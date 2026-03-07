@@ -5,13 +5,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openclaw/openclaw-a2a-plugins.git",
+    "url": "git+https://github.com/aramisfacchinetti/openclaw-a2a-plugins.git",
     "directory": "packages/a2a-outbound"
   },
   "bugs": {
-    "url": "https://github.com/openclaw/openclaw-a2a-plugins/issues"
+    "url": "https://github.com/aramisfacchinetti/openclaw-a2a-plugins/issues"
   },
-  "homepage": "https://github.com/openclaw/openclaw-a2a-plugins/tree/main/packages/a2a-outbound#readme",
+  "homepage": "https://github.com/aramisfacchinetti/openclaw-a2a-plugins/tree/master/packages/a2a-outbound#readme",
   "keywords": [
     "openclaw",
     "plugin",
