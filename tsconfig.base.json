@@ -10,6 +10,6 @@
     "forceConsistentCasingInFileNames": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "newLine": "lf"
-  }
+    "newLine": "lf",
+  },
 }

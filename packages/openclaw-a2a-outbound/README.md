@@ -17,7 +17,7 @@ npm install @aramisfa/openclaw-a2a-outbound
 
 ## OpenClaw Plugin Config
 
-`@aramisfa/openclaw-a2a-outbound` is disabled by default. Enable plugin id `a2a-outbound` in your OpenClaw plugin config:
+`@aramisfa/openclaw-a2a-outbound` is disabled by default. Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config:
 
 ```json
 {

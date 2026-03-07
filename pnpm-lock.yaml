@@ -20,7 +20,7 @@ importers:
 
   packages/a2a-inbound: {}
 
-  packages/a2a-outbound:
+  packages/openclaw-a2a-outbound:
     dependencies:
       '@a2a-js/sdk':
         specifier: ^0.3.10

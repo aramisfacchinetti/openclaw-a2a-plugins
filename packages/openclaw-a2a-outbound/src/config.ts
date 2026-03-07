@@ -93,12 +93,16 @@ export const A2A_OUTBOUND_CONFIG_JSON_SCHEMA: NonNullable<
             type: "string",
             enum: [...ALL_TRANSPORTS],
           },
-          default: [...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.preferredTransports],
+          default: [
+            ...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.preferredTransports,
+          ],
         },
         serviceParameters: {
           type: "object",
           additionalProperties: { type: "string" },
-          default: { ...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.serviceParameters },
+          default: {
+            ...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.serviceParameters,
+          },
         },
       },
     },
@@ -134,7 +138,9 @@ export const A2A_OUTBOUND_CONFIG_JSON_SCHEMA: NonNullable<
               type: "string",
               enum: [...ALL_TRANSPORTS],
             },
-            default: [...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.preferredTransports],
+            default: [
+              ...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.preferredTransports,
+            ],
           },
           examples: {
             type: "array",
@@ -179,7 +185,8 @@ export const A2A_OUTBOUND_CONFIG_JSON_SCHEMA: NonNullable<
         },
         enforceSupportedTransports: {
           type: "boolean",
-          default: A2A_OUTBOUND_DEFAULT_CONFIG.policy.enforceSupportedTransports,
+          default:
+            A2A_OUTBOUND_DEFAULT_CONFIG.policy.enforceSupportedTransports,
         },
         allowTargetUrlOverride: {
           type: "boolean",
@@ -260,7 +267,9 @@ function cloneTargetConfig(
   return {
     alias: target.alias,
     baseUrl: target.baseUrl,
-    ...(target.description !== undefined ? { description: target.description } : {}),
+    ...(target.description !== undefined
+      ? { description: target.description }
+      : {}),
     tags: [...target.tags],
     cardPath: target.cardPath,
     preferredTransports: [...target.preferredTransports],
@@ -423,7 +432,7 @@ function readOptionalTrimmedString(value: unknown): string | undefined {
 }
 
 function invalidConfig(message: string): TypeError {
-  return new TypeError(`Invalid a2a-outbound config: ${message}`);
+  return new TypeError(`Invalid openclaw-a2a-outbound config: ${message}`);
 }
 
 function normalizeTargets(
@@ -446,8 +455,7 @@ function normalizeTargets(
       throw invalidConfig(`targets[${index}] must be an object`);
     }
 
-    const alias =
-      typeof entry.alias === "string" ? entry.alias.trim() : "";
+    const alias = typeof entry.alias === "string" ? entry.alias.trim() : "";
     if (alias === "") {
       throw invalidConfig(`targets[${index}].alias must be a non-empty string`);
     }
@@ -564,11 +572,10 @@ export function parseA2AOutboundPluginConfig(
   };
 }
 
-export const A2A_OUTBOUND_OPENCLAW_CONFIG_SCHEMA: OpenClawPluginConfigSchema =
-  {
-    parse(value: unknown): A2AOutboundPluginConfig {
-      return parseA2AOutboundPluginConfig(value);
-    },
-    jsonSchema: A2A_OUTBOUND_CONFIG_JSON_SCHEMA,
-    uiHints: A2A_OUTBOUND_CONFIG_UI_HINTS,
-  };
+export const A2A_OUTBOUND_OPENCLAW_CONFIG_SCHEMA: OpenClawPluginConfigSchema = {
+  parse(value: unknown): A2AOutboundPluginConfig {
+    return parseA2AOutboundPluginConfig(value);
+  },
+  jsonSchema: A2A_OUTBOUND_CONFIG_JSON_SCHEMA,
+  uiHints: A2A_OUTBOUND_CONFIG_UI_HINTS,
+};

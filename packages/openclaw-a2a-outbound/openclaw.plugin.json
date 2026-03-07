@@ -1,5 +1,5 @@
 {
-  "id": "a2a-outbound",
+  "id": "openclaw-a2a-outbound",
   "name": "External A2A Delegation",
   "version": "0.1.0",
   "entry": "./dist/index.js",

@@ -15,8 +15,8 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
   });
 
   const api: OpenClawPluginApi = {
-    id: "a2a-outbound",
-    name: "a2a-outbound",
+    id: "openclaw-a2a-outbound",
+    name: "openclaw-a2a-outbound",
     version: "1.0.0",
     description: "test",
     source: "tests",

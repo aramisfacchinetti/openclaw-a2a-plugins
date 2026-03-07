@@ -3,15 +3,15 @@
 [![outbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-outbound?label=outbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
 [![node](https://img.shields.io/node/v/%40aramisfa%2Fopenclaw-a2a-outbound)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
 [![license](https://img.shields.io/github/license/aramisfacchinetti/openclaw-a2a-plugins)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/blob/master/LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.2-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/tree/master/packages/a2a-outbound)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.2-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/tree/master/packages/openclaw-a2a-outbound)
 
 `openclaw-a2a-plugins` is a monorepo for OpenClaw Agent-to-Agent (A2A) plugins.
 
-Today, the only implemented package intended for use is [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). The inbound package, [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound), is currently a placeholder and is not documented or ready for general use.
+Today, the only implemented package intended for use is [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound). The inbound package, [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound), is currently a placeholder and is not documented or ready for general use.
 
 ## Getting Started
 
-Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). It is the supported package in this repository today. It lets OpenClaw discover configured targets, delegate work to external A2A agents, watch live task updates, poll delegated task status, and cancel delegated work through one unified tool: `remote_agent`.
+Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound). It is the supported package in this repository today. It lets OpenClaw discover configured targets, delegate work to external A2A agents, watch live task updates, poll delegated task status, and cancel delegated work through one unified tool: `remote_agent`.
 
 ### Prerequisites
 
@@ -26,7 +26,7 @@ npm install @aramisfa/openclaw-a2a-outbound
 
 ### Enable the Plugin
 
-Enable plugin id `a2a-outbound` in your OpenClaw plugin config. The outbound config starts with this top-level shape:
+Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config. The outbound config starts with this top-level shape:
 
 ```json
 {
@@ -42,13 +42,13 @@ Enable plugin id `a2a-outbound` in your OpenClaw plugin config. The outbound con
 
 ### Where to Go Next
 
-Use [`packages/a2a-outbound/README.md`](./packages/a2a-outbound/README.md) for full configuration details, validation behavior, and package-specific usage.
+Use [`packages/openclaw-a2a-outbound/README.md`](./packages/openclaw-a2a-outbound/README.md) for full configuration details, validation behavior, and package-specific usage.
 
 ## Packages
 
 | Package | Status | Notes |
 | --- | --- | --- |
-| [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
+| [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
 | [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound) | Placeholder / experimental | Stub package only. Do not assume installation or usage guidance exists yet. |
 
 ## Current Capabilities
@@ -69,11 +69,11 @@ It registers one optional OpenClaw tool:
 
 Follow-up actions prefer `task_handle` first, then `target_alias` + `task_id` when the handle has expired or is unavailable.
 
-Plugin id: `a2a-outbound`
+Plugin id: `openclaw-a2a-outbound`
 
 ## Repository Layout
 
-- [`packages/a2a-outbound`](./packages/a2a-outbound): implemented outbound A2A plugin package, including docs, source, tests, and plugin manifest.
+- [`packages/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound): implemented outbound A2A plugin package, including docs, source, tests, and plugin manifest.
 - [`packages/a2a-inbound`](./packages/a2a-inbound): placeholder inbound workspace package that is not yet ready for general use.
 - Workspace root: shared `pnpm` workspace tooling, TypeScript project configuration, and Changesets release management.
 
