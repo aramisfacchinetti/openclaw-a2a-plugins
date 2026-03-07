@@ -50,8 +50,14 @@ import {
   createClientPool,
   type ResolvedTarget,
   type SDKClientPool,
+  type SDKClientPoolEntry,
 } from "./sdk-client-pool.js";
 import {
+  createTargetCatalog,
+  type TargetCatalog,
+} from "./target-catalog.js";
+import {
+  type A2ATargetInput,
   validateCancelInput,
   validateDelegateInput,
   validateDelegateStreamInput,
@@ -330,6 +336,11 @@ export interface A2AOutboundServiceOptions {
   clientPool?: SDKClientPool;
 }
 
+type ResolvedClientContext = {
+  target: ResolvedTarget;
+  clientEntry: SDKClientPoolEntry;
+};
+
 export class A2AOutboundService {
   private readonly logger: LoggerLike | undefined;
 
@@ -338,6 +349,8 @@ export class A2AOutboundService {
   private readonly config: A2AOutboundPluginConfig;
 
   private readonly clientPool: SDKClientPool;
+
+  private readonly targetCatalog: TargetCatalog;
 
   constructor(options: A2AOutboundServiceOptions = {}) {
     this.logger = options.logger;
@@ -354,6 +367,23 @@ export class A2AOutboundService {
         enforceSupportedTransports:
           this.config.policy.enforceSupportedTransports,
       });
+
+    this.targetCatalog = createTargetCatalog({
+      config: this.config,
+      clientPool: this.clientPool,
+    });
+  }
+
+  private async resolveClient(
+    target: A2ATargetInput,
+  ): Promise<ResolvedClientContext> {
+    const resolvedTarget = this.targetCatalog.resolveRawTarget(target);
+    const clientEntry = await this.clientPool.get(resolvedTarget);
+
+    return {
+      target: resolvedTarget,
+      clientEntry,
+    };
   }
 
   async delegate(
@@ -365,7 +395,7 @@ export class A2AOutboundService {
 
     try {
       const validated = validateDelegateInput(input);
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const messagePayload: MessageSendParams = {
@@ -378,7 +408,7 @@ export class A2AOutboundService {
           : {}),
       };
 
-      const raw = await resolved.client.sendMessage(
+      const raw = await resolved.clientEntry.client.sendMessage(
         messagePayload,
         requestOptions(
           validated.request.timeoutMs,
@@ -416,7 +446,7 @@ export class A2AOutboundService {
 
     try {
       const validated = validateDelegateStreamInput(input);
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const messagePayload: MessageSendParams = {
@@ -430,7 +460,7 @@ export class A2AOutboundService {
       };
 
       await consumeStream(
-        resolved.client.sendMessageStream(
+        resolved.clientEntry.client.sendMessageStream(
           messagePayload,
           requestOptions(
             validated.request.timeoutMs,
@@ -486,7 +516,7 @@ export class A2AOutboundService {
     try {
       const validated = validateStatusInput(input);
       taskId = validated.request.taskId;
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const params: TaskQueryParams = {
@@ -496,7 +526,7 @@ export class A2AOutboundService {
           : {}),
       };
 
-      const raw = await resolved.client.getTask(
+      const raw = await resolved.clientEntry.client.getTask(
         params,
         requestOptions(
           validated.request.timeoutMs,
@@ -537,7 +567,7 @@ export class A2AOutboundService {
       const validated = validateWaitInput(input);
       taskId = validated.request.taskId;
       const deadlineMs = startedAtMs + validated.request.waitTimeoutMs;
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const params: TaskQueryParams = {
@@ -567,7 +597,7 @@ export class A2AOutboundService {
         attempts += 1;
 
         try {
-          const raw = await resolved.client.getTask(
+          const raw = await resolved.clientEntry.client.getTask(
             params,
             requestOptions(
               validated.request.timeoutMs,
@@ -672,7 +702,7 @@ export class A2AOutboundService {
     try {
       const validated = validateResubscribeInput(input);
       taskId = validated.request.taskId;
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const params: TaskIdParams = {
@@ -680,7 +710,7 @@ export class A2AOutboundService {
       };
 
       await consumeStream(
-        resolved.client.resubscribeTask(
+        resolved.clientEntry.client.resubscribeTask(
           params,
           requestOptions(
             validated.request.timeoutMs,
@@ -737,14 +767,14 @@ export class A2AOutboundService {
     try {
       const validated = validateCancelInput(input);
       taskId = validated.request.taskId;
-      const resolved = await this.clientPool.get(validated.target);
+      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const params: TaskIdParams = {
         id: validated.request.taskId,
       };
 
-      const raw = await resolved.client.cancelTask(
+      const raw = await resolved.clientEntry.client.cancelTask(
         params,
         requestOptions(
           validated.request.timeoutMs,

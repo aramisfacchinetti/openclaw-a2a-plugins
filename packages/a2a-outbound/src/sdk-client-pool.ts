@@ -24,12 +24,24 @@ export interface ResolvedTarget {
   baseUrl: string;
   cardPath: string;
   preferredTransports: A2ATransport[];
+  alias?: string;
+  displayName?: string;
+  description?: string;
+  streamingSupported?: boolean;
 }
 
-type ClientEntry = {
+export type SDKClientPoolEntry = {
   client: Client;
   target: ResolvedTarget;
 };
+
+export type SDKClientPoolTargetInput = A2ATargetInput &
+  Partial<
+    Pick<
+      ResolvedTarget,
+      "alias" | "displayName" | "description" | "streamingSupported"
+    >
+  >;
 
 function mergeUniqueTransports(values: readonly unknown[]): A2ATransport[] {
   const deduped: A2ATransport[] = [];
@@ -104,8 +116,32 @@ function normalizeBaseUrl(baseUrl: string, normalize: boolean): string {
   return new URL(baseUrl).toString();
 }
 
+function mergeRoutingMetadata(
+  target: SDKClientPoolTargetInput,
+): Partial<
+  Pick<
+    ResolvedTarget,
+    "alias" | "displayName" | "description" | "streamingSupported"
+  >
+> {
+  return {
+    ...(typeof target.alias === "string" && target.alias.trim() !== ""
+      ? { alias: target.alias }
+      : {}),
+    ...(typeof target.displayName === "string" && target.displayName.trim() !== ""
+      ? { displayName: target.displayName }
+      : {}),
+    ...(typeof target.description === "string" && target.description.trim() !== ""
+      ? { description: target.description }
+      : {}),
+    ...(typeof target.streamingSupported === "boolean"
+      ? { streamingSupported: target.streamingSupported }
+      : {}),
+  };
+}
+
 export class SDKClientPool {
-  private readonly cache = new Map<string, ClientEntry>();
+  private readonly cache = new Map<string, SDKClientPoolEntry>();
 
   private readonly defaultCardPath: string;
 
@@ -142,7 +178,7 @@ export class SDKClientPool {
       A2A_OUTBOUND_DEFAULT_CONFIG.policy.enforceSupportedTransports;
   }
 
-  normalizeTarget(target: A2ATargetInput): ResolvedTarget {
+  normalizeTarget(target: SDKClientPoolTargetInput): ResolvedTarget {
     const preferredTransports = mergeUniqueTransports(
       target.preferredTransports && target.preferredTransports.length > 0
         ? target.preferredTransports
@@ -157,6 +193,7 @@ export class SDKClientPool {
       baseUrl: normalizeBaseUrl(target.baseUrl, this.shouldNormalizeBaseUrl),
       cardPath: target.cardPath ?? this.defaultCardPath,
       preferredTransports,
+      ...mergeRoutingMetadata(target),
     };
   }
 
@@ -179,13 +216,16 @@ export class SDKClientPool {
     );
   }
 
-  async get(target: A2ATargetInput): Promise<ClientEntry> {
+  async get(target: SDKClientPoolTargetInput): Promise<SDKClientPoolEntry> {
     const normalized = this.normalizeTarget(target);
     const key = clientKey(normalized);
 
     const existing = this.cache.get(key);
     if (existing) {
-      return existing;
+      return {
+        client: existing.client,
+        target: normalized,
+      };
     }
 
     const factory = new ClientFactory(
@@ -197,7 +237,7 @@ export class SDKClientPool {
       normalized.cardPath,
     );
 
-    const entry: ClientEntry = {
+    const entry: SDKClientPoolEntry = {
       client,
       target: normalized,
     };

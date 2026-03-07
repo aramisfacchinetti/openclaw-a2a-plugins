@@ -361,6 +361,7 @@ function buildService(config: ServiceConfigOverrides = {}): A2AOutboundService {
         acceptedOutputModes: [],
         normalizeBaseUrl: true,
         enforceSupportedTransports: true,
+        allowTargetUrlOverride: false,
       },
       ...config,
     },
@@ -474,6 +475,41 @@ test('delegate success accepts fully valid SDK message shape', async (t) => {
   assert.equal(peer.state.sendCalls, 1)
 })
 
+test('delegate attaches configured target metadata when raw baseUrl matches a registered target', async (t) => {
+  const peer = await startPeer()
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    targets: [
+      {
+        alias: 'support',
+        baseUrl: `${peer.baseUrl}/`,
+        description: 'Primary support agent',
+        tags: ['support'],
+        cardPath: peer.cardPath,
+        preferredTransports: ['JSONRPC'],
+        examples: [],
+        default: false,
+      },
+    ],
+  })
+
+  const result = await service.delegate({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('hello with catalog metadata'),
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.target.baseUrl, `${peer.baseUrl}/`)
+  assert.equal(success.target.alias, 'support')
+  assert.equal(success.target.description, 'Primary support agent')
+  assert.equal(peer.state.sendCalls, 1)
+})
+
 test('delegate forwards request.configuration unchanged in message/send params', async (t) => {
   const peer = await startPeer()
   t.after(() => peer.server.close())
@@ -483,6 +519,7 @@ test('delegate forwards request.configuration unchanged in message/send params',
       acceptedOutputModes: ['text/plain'],
       normalizeBaseUrl: true,
       enforceSupportedTransports: true,
+      allowTargetUrlOverride: false,
     },
   })
   const message = {
@@ -590,7 +627,10 @@ test('delegate stream success returns event log and emits updates', async (t) =>
   assert.equal((raw.events as unknown[]).length, 2)
   assert.equal(asRecord(raw.finalEvent).kind, 'status-update')
   assert.equal(peer.state.streamCalls, 1)
-  assert.equal(asRecord(peer.state.lastStreamParams ?? {}).message.messageId, 'user-msg-1')
+  assert.equal(
+    asRecord(asRecord(peer.state.lastStreamParams ?? {}).message).messageId,
+    'user-msg-1',
+  )
 
   assert.equal(updates.length, 2)
   assert.equal(updates[0].operation, 'a2a_delegate_stream')
