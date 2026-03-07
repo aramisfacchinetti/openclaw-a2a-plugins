@@ -556,6 +556,19 @@ test('validateStatusInput enforces nested request.taskId contract', () => {
   )
 })
 
+test('validateStatusInput accepts request.taskHandle without an explicit target', () => {
+  const out = validateStatusInput({
+    request: {
+      taskHandle: 'rah_status-1',
+      historyLength: 2,
+    },
+  })
+
+  assert.equal(out.target, undefined)
+  assert.equal(out.request.taskHandle, 'rah_status-1')
+  assert.equal(out.request.historyLength, 2)
+})
+
 test('validateWaitInput accepts nested request.taskId and applies backoff defaults', () => {
   const out = validateWaitInput({
     target: {
@@ -582,6 +595,20 @@ test('validateWaitInput accepts nested request.taskId and applies backoff defaul
   assert.equal(out.request.initialDelayMs, 250)
   assert.equal(out.request.maxDelayMs, 5000)
   assert.equal(out.request.backoffMultiplier, 2)
+})
+
+test('validateWaitInput accepts request.taskHandle without an explicit target', () => {
+  const out = validateWaitInput({
+    request: {
+      taskHandle: 'rah_wait-1',
+      waitTimeoutMs: 15000,
+    },
+  })
+
+  assert.equal(out.target, undefined)
+  assert.equal(out.request.taskHandle, 'rah_wait-1')
+  assert.equal(out.request.waitTimeoutMs, 15000)
+  assert.equal(out.request.initialDelayMs, 250)
 })
 
 test('validateWaitInput rejects missing request.taskId', () => {
@@ -683,6 +710,19 @@ test('validateResubscribeInput enforces nested request.taskId contract', () => {
   )
 })
 
+test('validateResubscribeInput accepts request.taskHandle without an explicit target', () => {
+  const out = validateResubscribeInput({
+    request: {
+      taskHandle: 'rah_resubscribe-1',
+      timeoutMs: 750,
+    },
+  })
+
+  assert.equal(out.target, undefined)
+  assert.equal(out.request.taskHandle, 'rah_resubscribe-1')
+  assert.equal(out.request.timeoutMs, 750)
+})
+
 test('validateCancelInput enforces nested request.taskId contract', () => {
   const out = validateCancelInput({
     target: {
@@ -715,6 +755,46 @@ test('validateCancelInput enforces nested request.taskId contract', () => {
       }),
     (error: unknown) => isValidationError(error),
   )
+})
+
+test('validateCancelInput accepts request.taskHandle without an explicit target', () => {
+  const out = validateCancelInput({
+    request: {
+      taskHandle: 'rah_cancel-1',
+      timeoutMs: 1200,
+    },
+  })
+
+  assert.equal(out.target, undefined)
+  assert.equal(out.request.taskHandle, 'rah_cancel-1')
+  assert.equal(out.request.timeoutMs, 1200)
+})
+
+test('follow-up validators reject requests with no resolvable task context', () => {
+  const validators = [
+    () =>
+      validateStatusInput({
+        request: {},
+      }),
+    () =>
+      validateWaitInput({
+        request: {
+          waitTimeoutMs: 1500,
+        },
+      }),
+    () =>
+      validateResubscribeInput({
+        request: {},
+      }),
+    () =>
+      validateCancelInput({
+        request: {},
+      }),
+  ]
+
+  for (const validate of validators) {
+    assert.throws(() => validate(), (error: unknown) => isValidationError(error))
+  }
 })
 
 test('TOOL_DEFINITIONS exposes all six outbound A2A tool schemas', () => {

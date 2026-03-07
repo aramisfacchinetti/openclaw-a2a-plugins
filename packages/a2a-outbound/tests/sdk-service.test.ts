@@ -97,6 +97,14 @@ function asFailure(result: A2AToolResult): FailureEnvelope {
   return result
 }
 
+function taskHandleFromSummary(summary: Record<string, unknown>): string {
+  if (typeof summary.taskHandle !== 'string') {
+    throw new TypeError('expected taskHandle summary field')
+  }
+
+  return summary.taskHandle
+}
+
 function json(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json')
@@ -414,6 +422,35 @@ test('delegate success returns normalized envelope and raw payload', async (t) =
   assert.equal(peer.state.sendCalls, 1)
 })
 
+test('delegate returns summary.taskHandle when the remote returns a task', async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: 'task',
+      id: 'task-delegate-1',
+      contextId: 'ctx-delegate-1',
+      status: {
+        state: 'submitted',
+      },
+    },
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.delegate({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('start task'),
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.kind, 'task')
+  assert.equal(success.summary.taskId, 'task-delegate-1')
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
+})
+
 test('delegate success accepts fully valid SDK message shape', async (t) => {
   const peer = await startPeer()
   t.after(() => peer.server.close())
@@ -623,6 +660,7 @@ test('delegate stream success returns event log and emits updates', async (t) =>
   assert.equal(success.summary.finalEventKind, 'status-update')
   assert.equal(success.summary.taskId, 'task-stream-1')
   assert.equal(success.summary.status, 'completed')
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
   assert.ok(Array.isArray(raw.events))
   assert.equal((raw.events as unknown[]).length, 2)
   assert.equal(asRecord(raw.finalEvent).kind, 'status-update')
@@ -669,6 +707,7 @@ test('delegate stream falls back to a single non-streaming send result', async (
   assert.equal(success.summary.eventCount, 1)
   assert.equal(success.summary.finalEventKind, 'message')
   assert.equal(success.summary.messageId, 'fallback-message-1')
+  assert.equal(success.summary.taskHandle, undefined)
   assert.ok(Array.isArray(raw.events))
   assert.equal((raw.events as unknown[]).length, 1)
   assert.equal(peer.state.sendCalls, 1)
@@ -697,6 +736,7 @@ test('task status success returns normalized envelope and raw payload', async (t
   assert.equal(success.operation, 'a2a_task_status')
   assert.equal(success.summary.taskId, 'task-99')
   assert.equal(success.summary.status, 'completed')
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
   assert.equal(raw.id, 'task-99')
   assert.equal(peer.state.getCalls, 1)
   assert.ok(peer.state.lastGetTaskParams)
@@ -742,6 +782,7 @@ test('task wait returns terminal success from the first poll', async (t) => {
   assert.equal(success.summary.taskId, 'task-wait-1')
   assert.equal(success.summary.status, 'completed')
   assert.equal(success.summary.attempts, 1)
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
   assert.equal(raw.id, 'task-wait-1')
   assert.equal(peer.state.getCalls, 1)
 })
@@ -1135,6 +1176,7 @@ test('task resubscribe success returns normalized stream envelope', async (t) =>
   assert.equal(success.summary.finalEventKind, 'artifact-update')
   assert.equal(success.summary.taskId, 'task-resubscribe-1')
   assert.equal(success.summary.artifactId, 'artifact-1')
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
   assert.ok(Array.isArray(raw.events))
   assert.equal((raw.events as unknown[]).length, 2)
   assert.equal(asRecord(raw.finalEvent).kind, 'artifact-update')
@@ -1163,8 +1205,230 @@ test('task cancel success returns normalized envelope and raw payload', async (t
   assert.equal(success.operation, 'a2a_task_cancel')
   assert.equal(success.summary.taskId, 'task-13')
   assert.equal(success.summary.status, 'canceled')
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
   assert.equal(raw.id, 'task-13')
   assert.equal(peer.state.cancelCalls, 1)
+})
+
+test('status, wait, cancel, and resubscribe accept request.taskHandle without explicit target', async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: 'task',
+      id: 'task-handle-1',
+      contextId: 'ctx-handle-1',
+      status: {
+        state: 'submitted',
+      },
+    },
+    resubscribeResponses: [
+      {
+        result: {
+          kind: 'status-update',
+          taskId: 'task-handle-1',
+          contextId: 'ctx-handle-1',
+          status: {
+            state: 'completed',
+          },
+          final: true,
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const delegated = asSuccess(
+    await service.delegate({
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: userMessageRequest('begin handle flow'),
+    }),
+  )
+  const taskHandle = taskHandleFromSummary(delegated.summary)
+
+  const status = asSuccess(
+    await service.status({
+      request: {
+        taskHandle,
+      },
+    }),
+  )
+  const waited = asSuccess(
+    await service.wait({
+      request: {
+        taskHandle,
+        waitTimeoutMs: 150,
+        initialDelayMs: 5,
+        maxDelayMs: 10,
+      },
+    }),
+  )
+  const canceled = asSuccess(
+    await service.cancel({
+      request: {
+        taskHandle,
+      },
+    }),
+  )
+  const resubscribed = asSuccess(
+    await service.resubscribe({
+      request: {
+        taskHandle,
+      },
+    }),
+  )
+
+  assert.equal(taskHandleFromSummary(status.summary), taskHandle)
+  assert.equal(taskHandleFromSummary(waited.summary), taskHandle)
+  assert.equal(taskHandleFromSummary(canceled.summary), taskHandle)
+  assert.equal(taskHandleFromSummary(resubscribed.summary), taskHandle)
+  assert.equal(peer.state.getCalls, 2)
+  assert.equal(peer.state.cancelCalls, 1)
+  assert.equal(peer.state.resubscribeCalls, 1)
+})
+
+test('follow-up calls refresh the same task handle', async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: 'task',
+      id: 'task-refresh-1',
+      contextId: 'ctx-refresh-1',
+      status: {
+        state: 'submitted',
+      },
+    },
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    taskHandles: {
+      ttlMs: 50,
+      maxEntries: 1000,
+    },
+  })
+  const delegated = asSuccess(
+    await service.delegate({
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: userMessageRequest('begin refresh flow'),
+    }),
+  )
+  const taskHandle = taskHandleFromSummary(delegated.summary)
+
+  await sleep(30)
+  const firstStatus = asSuccess(
+    await service.status({
+      request: {
+        taskHandle,
+      },
+    }),
+  )
+
+  await sleep(30)
+  const secondStatus = asSuccess(
+    await service.status({
+      request: {
+        taskHandle,
+      },
+    }),
+  )
+
+  assert.equal(taskHandleFromSummary(firstStatus.summary), taskHandle)
+  assert.equal(taskHandleFromSummary(secondStatus.summary), taskHandle)
+  assert.equal(peer.state.getCalls, 2)
+})
+
+test('explicit target plus taskId still works after a handle expires', async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: 'task',
+      id: 'task-expire-1',
+      contextId: 'ctx-expire-1',
+      status: {
+        state: 'submitted',
+      },
+    },
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    taskHandles: {
+      ttlMs: 20,
+      maxEntries: 1000,
+    },
+  })
+  const delegated = asSuccess(
+    await service.delegate({
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: userMessageRequest('begin expiry flow'),
+    }),
+  )
+  const expiredHandle = taskHandleFromSummary(delegated.summary)
+
+  await sleep(30)
+
+  const expired = asFailure(
+    await service.status({
+      request: {
+        taskHandle: expiredHandle,
+      },
+    }),
+  )
+  const explicit = asSuccess(
+    await service.status({
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: {
+        taskId: 'task-expire-1',
+      },
+    }),
+  )
+
+  assert.equal(expired.error.code, 'EXPIRED_TASK_HANDLE')
+  assert.equal(explicit.summary.taskId, 'task-expire-1')
+  assert.match(taskHandleFromSummary(explicit.summary), /^rah_/)
+})
+
+test('task resubscribe omits taskHandle when the stream never exposes a taskId', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    resubscribeResponses: [
+      {
+        result: {
+          kind: 'message',
+          messageId: 'message-no-task-1',
+          role: 'agent',
+          parts: [{ kind: 'text', text: 'no task id here' }],
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.resubscribe({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-resubscribe-no-handle',
+    },
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.taskHandle, undefined)
+  assert.equal(success.summary.finalEventKind, 'message')
 })
 
 test('delegate stream treats an empty stream as failure', async (t) => {

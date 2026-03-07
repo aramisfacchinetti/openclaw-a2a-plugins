@@ -1,4 +1,5 @@
 import type {
+  Artifact,
   Message,
   Task,
   TaskArtifactUpdateEvent,
@@ -43,6 +44,7 @@ export type StreamSuccessSummary = {
   kind: "stream";
   eventCount: number;
   finalEventKind: StreamEventSummary["kind"];
+  taskHandle?: string;
   taskId?: string;
   status?: string;
   messageId?: string;
@@ -87,9 +89,56 @@ function taskState(task: Task): string {
   return task.status.state;
 }
 
+function textParts(parts: Array<{ kind: string; text?: string }>): string[] {
+  return parts.flatMap((part) =>
+    part.kind === "text" && typeof part.text === "string" ? [part.text] : [],
+  );
+}
+
+function extractMessageText(message: Message): string | undefined {
+  const texts = textParts(message.parts);
+  return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+function extractArtifacts(task: Task): Artifact[] | undefined {
+  if (!Array.isArray(task.artifacts) || task.artifacts.length === 0) {
+    return undefined;
+  }
+
+  return task.artifacts.map((artifact) => ({
+    artifactId: artifact.artifactId,
+    parts: [...artifact.parts],
+    ...(artifact.description !== undefined
+      ? { description: artifact.description }
+      : {}),
+    ...(artifact.extensions !== undefined
+      ? { extensions: [...artifact.extensions] }
+      : {}),
+    ...(artifact.metadata !== undefined ? { metadata: artifact.metadata } : {}),
+    ...(artifact.name !== undefined ? { name: artifact.name } : {}),
+  }));
+}
+
+function extractTaskText(task: Task): string | undefined {
+  const historyText = task.history?.flatMap((message) => {
+    const text = extractMessageText(message);
+    return text !== undefined ? [text] : [];
+  });
+  const artifactText = extractArtifacts(task)?.flatMap((artifact) =>
+    textParts(artifact.parts),
+  );
+  const texts = [...(historyText ?? []), ...(artifactText ?? [])];
+
+  return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+function taskHandleField(taskHandle?: string): Record<string, string> {
+  return taskHandle !== undefined ? { taskHandle } : {};
+}
+
 function terminalSummaryFields(summary: StreamEventSummary): Omit<
   StreamSuccessSummary,
-  "kind" | "eventCount" | "finalEventKind"
+  "kind" | "eventCount" | "finalEventKind" | "taskHandle"
 > {
   return {
     ...(summary.taskId !== undefined ? { taskId: summary.taskId } : {}),
@@ -118,6 +167,7 @@ function streamSuccess<T extends StreamOperation>(
   operation: T,
   target: ResolvedTarget,
   events: A2AStreamEventData[],
+  taskHandle?: string,
 ): SuccessEnvelope<T> {
   const finalEvent = events.at(-1);
 
@@ -135,6 +185,7 @@ function streamSuccess<T extends StreamOperation>(
       kind: "stream",
       eventCount: events.length,
       finalEventKind: finalSummary.kind,
+      ...taskHandleField(taskHandle),
       ...terminalSummaryFields(finalSummary),
     },
     raw: {
@@ -181,8 +232,11 @@ export function summarizeStreamEvent(
 export function delegateSuccess(
   target: ResolvedTarget,
   raw: SendMessageResult,
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.DELEGATE> {
   if (raw.kind === "task") {
+    extractTaskText(raw);
+
     return {
       ok: true,
       operation: OPERATIONS.DELEGATE,
@@ -191,10 +245,13 @@ export function delegateSuccess(
         kind: "task",
         taskId: raw.id,
         status: taskState(raw),
+        ...taskHandleField(taskHandle),
       },
       raw,
     };
   }
+
+  extractMessageText(raw);
 
   return {
     ok: true,
@@ -219,8 +276,9 @@ export function delegateFailure(
 export function delegateStreamSuccess(
   target: ResolvedTarget,
   events: A2AStreamEventData[],
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.DELEGATE_STREAM> {
-  return streamSuccess(OPERATIONS.DELEGATE_STREAM, target, events);
+  return streamSuccess(OPERATIONS.DELEGATE_STREAM, target, events, taskHandle);
 }
 
 export function delegateStreamFailure(
@@ -234,7 +292,10 @@ export function taskStatusSuccess(
   target: ResolvedTarget,
   taskId: string,
   raw: Task,
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.TASK_STATUS> {
+  extractTaskText(raw);
+
   return {
     ok: true,
     operation: OPERATIONS.TASK_STATUS,
@@ -242,6 +303,7 @@ export function taskStatusSuccess(
     summary: {
       taskId,
       status: taskState(raw),
+      ...taskHandleField(taskHandle),
     },
     raw,
   };
@@ -260,7 +322,10 @@ export function taskWaitSuccess(
   raw: Task,
   attempts: number,
   elapsedMs: number,
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.TASK_WAIT> {
+  extractTaskText(raw);
+
   return {
     ok: true,
     operation: OPERATIONS.TASK_WAIT,
@@ -270,6 +335,7 @@ export function taskWaitSuccess(
       status: taskState(raw),
       attempts,
       elapsedMs,
+      ...taskHandleField(taskHandle),
     },
     raw,
   };
@@ -285,8 +351,9 @@ export function taskWaitFailure(
 export function taskResubscribeSuccess(
   target: ResolvedTarget,
   events: A2AStreamEventData[],
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.TASK_RESUBSCRIBE> {
-  return streamSuccess(OPERATIONS.TASK_RESUBSCRIBE, target, events);
+  return streamSuccess(OPERATIONS.TASK_RESUBSCRIBE, target, events, taskHandle);
 }
 
 export function taskResubscribeFailure(
@@ -300,7 +367,10 @@ export function taskCancelSuccess(
   target: ResolvedTarget,
   taskId: string,
   raw: Task,
+  taskHandle?: string,
 ): SuccessEnvelope<typeof OPERATIONS.TASK_CANCEL> {
+  extractTaskText(raw);
+
   return {
     ok: true,
     operation: OPERATIONS.TASK_CANCEL,
@@ -308,6 +378,7 @@ export function taskCancelSuccess(
     summary: {
       taskId,
       status: taskState(raw),
+      ...taskHandleField(taskHandle),
     },
     raw,
   };

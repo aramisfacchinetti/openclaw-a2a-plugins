@@ -199,6 +199,64 @@ const MESSAGE_SCHEMA = {
   required: ["kind", "messageId", "role", "parts"],
 };
 
+const TASK_HANDLE_SCHEMA = {
+  type: "string",
+  minLength: 1,
+  pattern: "^rah_[A-Za-z0-9-]+$",
+  description:
+    "Opaque delegated task handle issued by this plugin. Handles are process-local and invalidated by restarts.",
+};
+
+function buildFollowUpInputSchema(
+  taskIdDescription: string,
+  requestProperties: Record<string, unknown>,
+  requiredRequestProperties: string[] = [],
+) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      target: TARGET_SCHEMA,
+      request: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          taskId: {
+            type: "string",
+            minLength: 1,
+            description: taskIdDescription,
+          },
+          taskHandle: TASK_HANDLE_SCHEMA,
+          ...requestProperties,
+        },
+        required: requiredRequestProperties,
+      },
+    },
+    required: ["request"],
+    anyOf: [
+      {
+        type: "object",
+        required: ["target"],
+        properties: {
+          request: {
+            type: "object",
+            required: [...requiredRequestProperties, "taskId"],
+          },
+        },
+      },
+      {
+        type: "object",
+        properties: {
+          request: {
+            type: "object",
+            required: [...requiredRequestProperties, "taskHandle"],
+          },
+        },
+      },
+    ],
+  };
+}
+
 export const DELEGATE_INPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -240,165 +298,104 @@ export const DELEGATE_INPUT_SCHEMA = {
   required: ["target", "request"],
 };
 
-export const STATUS_INPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: TARGET_SCHEMA,
-    request: {
+export const STATUS_INPUT_SCHEMA = buildFollowUpInputSchema(
+  "Remote task id to query.",
+  {
+    historyLength: {
+      type: "integer",
+      minimum: 0,
+      description: "Optional history window length.",
+    },
+    timeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional timeout override for this operation.",
+    },
+    serviceParameters: {
       type: "object",
-      additionalProperties: false,
-      properties: {
-        taskId: {
-          type: "string",
-          minLength: 1,
-          description: "Remote task id to query.",
-        },
-        historyLength: {
-          type: "integer",
-          minimum: 0,
-          description: "Optional history window length.",
-        },
-        timeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description: "Optional timeout override for this operation.",
-        },
-        serviceParameters: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Optional service parameters for this operation.",
-        },
-      },
-      required: ["taskId"],
+      additionalProperties: { type: "string" },
+      description: "Optional service parameters for this operation.",
     },
   },
-  required: ["target", "request"],
-};
+);
 
-export const WAIT_INPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: TARGET_SCHEMA,
-    request: {
+export const WAIT_INPUT_SCHEMA = buildFollowUpInputSchema(
+  "Remote task id to wait for.",
+  {
+    waitTimeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description:
+        "Required overall wait deadline for repeated tasks/get polling.",
+    },
+    historyLength: {
+      type: "integer",
+      minimum: 0,
+      description: "Optional history window length.",
+    },
+    timeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional per-poll RPC timeout override.",
+    },
+    serviceParameters: {
       type: "object",
-      additionalProperties: false,
-      properties: {
-        taskId: {
-          type: "string",
-          minLength: 1,
-          description: "Remote task id to wait for.",
-        },
-        waitTimeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description:
-            "Required overall wait deadline for repeated tasks/get polling.",
-        },
-        historyLength: {
-          type: "integer",
-          minimum: 0,
-          description: "Optional history window length.",
-        },
-        timeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description: "Optional per-poll RPC timeout override.",
-        },
-        serviceParameters: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Optional service parameters for every poll.",
-        },
-        initialDelayMs: {
-          type: "integer",
-          minimum: 1,
-          description:
-            "Optional initial delay between polls. Defaults to 250ms.",
-        },
-        maxDelayMs: {
-          type: "integer",
-          minimum: 1,
-          description:
-            "Optional maximum delay between polls. Defaults to 5000ms.",
-        },
-        backoffMultiplier: {
-          type: "number",
-          minimum: 1,
-          description:
-            "Optional exponential backoff multiplier. Defaults to 2.",
-        },
-      },
-      required: ["taskId", "waitTimeoutMs"],
+      additionalProperties: { type: "string" },
+      description: "Optional service parameters for every poll.",
+    },
+    initialDelayMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional initial delay between polls. Defaults to 250ms.",
+    },
+    maxDelayMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional maximum delay between polls. Defaults to 5000ms.",
+    },
+    backoffMultiplier: {
+      type: "number",
+      minimum: 1,
+      description:
+        "Optional exponential backoff multiplier. Defaults to 2.",
     },
   },
-  required: ["target", "request"],
-};
+  ["waitTimeoutMs"],
+);
 
-export const CANCEL_INPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: TARGET_SCHEMA,
-    request: {
+export const CANCEL_INPUT_SCHEMA = buildFollowUpInputSchema(
+  "Remote task id to cancel.",
+  {
+    timeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional timeout override for this operation.",
+    },
+    serviceParameters: {
       type: "object",
-      additionalProperties: false,
-      properties: {
-        taskId: {
-          type: "string",
-          minLength: 1,
-          description: "Remote task id to cancel.",
-        },
-        timeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description: "Optional timeout override for this operation.",
-        },
-        serviceParameters: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Optional service parameters for this operation.",
-        },
-      },
-      required: ["taskId"],
+      additionalProperties: { type: "string" },
+      description: "Optional service parameters for this operation.",
     },
   },
-  required: ["target", "request"],
-};
+);
 
 export const DELEGATE_STREAM_INPUT_SCHEMA = DELEGATE_INPUT_SCHEMA;
 
-export const RESUBSCRIBE_INPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: TARGET_SCHEMA,
-    request: {
+export const RESUBSCRIBE_INPUT_SCHEMA = buildFollowUpInputSchema(
+  "Remote task id to resubscribe to.",
+  {
+    timeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional timeout override for this operation.",
+    },
+    serviceParameters: {
       type: "object",
-      additionalProperties: false,
-      properties: {
-        taskId: {
-          type: "string",
-          minLength: 1,
-          description: "Remote task id to resubscribe to.",
-        },
-        timeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description: "Optional timeout override for this operation.",
-        },
-        serviceParameters: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Optional service parameters for this operation.",
-        },
-      },
-      required: ["taskId"],
+      additionalProperties: { type: "string" },
+      description: "Optional service parameters for this operation.",
     },
   },
-  required: ["target", "request"],
-};
+);
 
 export type ToolDefinition = {
   name: string;
@@ -465,14 +462,16 @@ export interface DelegateRequestInput {
 export interface DelegateStreamRequestInput extends DelegateRequestInput {}
 
 export interface StatusRequestInput {
-  taskId: string;
+  taskId?: string;
+  taskHandle?: string;
   historyLength?: number;
   timeoutMs?: number;
   serviceParameters?: Record<string, string>;
 }
 
 export interface WaitRequestInput {
-  taskId: string;
+  taskId?: string;
+  taskHandle?: string;
   waitTimeoutMs: number;
   historyLength?: number;
   timeoutMs?: number;
@@ -483,13 +482,15 @@ export interface WaitRequestInput {
 }
 
 export interface ResubscribeRequestInput {
-  taskId: string;
+  taskId?: string;
+  taskHandle?: string;
   timeoutMs?: number;
   serviceParameters?: Record<string, string>;
 }
 
 export interface CancelRequestInput {
-  taskId: string;
+  taskId?: string;
+  taskHandle?: string;
   timeoutMs?: number;
   serviceParameters?: Record<string, string>;
 }
@@ -505,22 +506,22 @@ export interface DelegateStreamToolInput {
 }
 
 export interface StatusToolInput {
-  target: A2ATargetInput;
+  target?: A2ATargetInput;
   request: StatusRequestInput;
 }
 
 export interface WaitToolInput {
-  target: A2ATargetInput;
+  target?: A2ATargetInput;
   request: WaitRequestInput;
 }
 
 export interface ResubscribeToolInput {
-  target: A2ATargetInput;
+  target?: A2ATargetInput;
   request: ResubscribeRequestInput;
 }
 
 export interface CancelToolInput {
-  target: A2ATargetInput;
+  target?: A2ATargetInput;
   request: CancelRequestInput;
 }
 
@@ -590,12 +591,12 @@ export function validateWaitInput(input: unknown): WaitToolInput {
   }
 
   const validated = input as unknown as {
-    target: A2ATargetInput;
-    request: Pick<WaitRequestInput, "taskId" | "waitTimeoutMs"> &
+    target?: A2ATargetInput;
+    request: Pick<WaitRequestInput, "waitTimeoutMs"> &
       Partial<
         Omit<
           WaitRequestInput,
-          "taskId" | "waitTimeoutMs" | "initialDelayMs" | "maxDelayMs" | "backoffMultiplier"
+          "waitTimeoutMs" | "initialDelayMs" | "maxDelayMs" | "backoffMultiplier"
         >
       > & {
         initialDelayMs?: number;

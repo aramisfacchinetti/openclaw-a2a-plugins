@@ -1,5 +1,4 @@
 import type {
-  MessageSendParams,
   Task,
   TaskIdParams,
   TaskQueryParams,
@@ -10,7 +9,6 @@ import {
   InvalidAgentResponseError,
   TaskNotFoundError,
   UnsupportedOperationError,
-  type RequestOptions,
 } from "@a2a-js/sdk/client";
 import { setTimeout as sleepTimeout } from "node:timers/promises";
 import {
@@ -53,6 +51,10 @@ import {
   type SDKClientPoolEntry,
 } from "./sdk-client-pool.js";
 import {
+  buildRequestOptions,
+  normalizeLegacyDelegateRequest,
+} from "./request-normalization.js";
+import {
   createTargetCatalog,
   type TargetCatalog,
 } from "./target-catalog.js";
@@ -65,6 +67,10 @@ import {
   validateStatusInput,
   validateWaitInput,
 } from "./schemas.js";
+import {
+  createTaskHandleRegistry,
+  type TaskHandleRegistry,
+} from "./task-handle-registry.js";
 
 type ExecutionOptions = {
   signal?: AbortSignal;
@@ -77,6 +83,21 @@ type StreamExecutionOptions<T extends StreamOperation> = ExecutionOptions & {
 type StreamState = {
   events: A2AStreamEventData[];
   latestSummary?: ReturnType<typeof summarizeStreamEvent>;
+};
+
+type FollowUpRequestInput = {
+  taskId?: string;
+  taskHandle?: string;
+};
+
+type FollowUpToolInput = {
+  target?: A2ATargetInput;
+  request: FollowUpRequestInput;
+};
+
+type ResolvedTaskContext = ResolvedClientContext & {
+  taskId: string;
+  taskHandle?: string;
 };
 
 const TERMINAL_TASK_STATES = new Set<Task["status"]["state"]>([
@@ -198,18 +219,6 @@ async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   await sleepTimeout(delayMs, undefined, { signal });
 }
 
-function mergeServiceParameters(
-  base: Record<string, string>,
-  override: Record<string, string> | undefined,
-): Record<string, string> | undefined {
-  const merged = {
-    ...base,
-    ...(override ?? {}),
-  };
-
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
 function mergeSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
   const availableSignals = signals.filter(
     (signal): signal is AbortSignal => signal !== undefined,
@@ -225,28 +234,6 @@ function mergeSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
 
   return AbortSignal.any(availableSignals);
 }
-
-function requestOptions(
-  timeoutMs: number | undefined,
-  defaultTimeoutMs: number,
-  defaultServiceParameters: Record<string, string>,
-  serviceParameters: Record<string, string> | undefined,
-  signal?: AbortSignal,
-): RequestOptions {
-  const effectiveTimeoutMs = timeoutMs ?? defaultTimeoutMs;
-  const mergedServiceParameters = mergeServiceParameters(
-    defaultServiceParameters,
-    serviceParameters,
-  );
-
-  return {
-    signal: mergeSignals([AbortSignal.timeout(effectiveTimeoutMs), signal]),
-    ...(mergedServiceParameters
-      ? { serviceParameters: mergedServiceParameters }
-      : {}),
-  };
-}
-
 function fallbackErrorCode(error: unknown): A2AOutboundErrorCode {
   if (error instanceof A2AOutboundError) {
     return error.code;
@@ -293,6 +280,62 @@ function withErrorDetails(
   };
 }
 
+function targetIdentity(target: ResolvedTarget): string {
+  return JSON.stringify([
+    target.baseUrl,
+    target.cardPath,
+    ...target.preferredTransports,
+  ]);
+}
+
+function targetSummary(target: ResolvedTarget): Record<string, unknown> {
+  return {
+    baseUrl: target.baseUrl,
+    cardPath: target.cardPath,
+    preferredTransports: [...target.preferredTransports],
+    ...(target.alias !== undefined ? { alias: target.alias } : {}),
+  };
+}
+
+function taskHandleTargetMismatchError(
+  taskHandle: string,
+  handleTarget: ResolvedTarget,
+  explicitTarget: ResolvedTarget,
+): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.VALIDATION_ERROR,
+    `request.taskHandle "${taskHandle}" does not match the explicit target`,
+    {
+      taskHandle,
+      handleTarget: targetSummary(handleTarget),
+      explicitTarget: targetSummary(explicitTarget),
+    },
+  );
+}
+
+function taskHandleTaskIdMismatchError(
+  taskHandle: string,
+  handleTaskId: string,
+  explicitTaskId: string,
+): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.VALIDATION_ERROR,
+    `request.taskHandle "${taskHandle}" does not match request.taskId "${explicitTaskId}"`,
+    {
+      taskHandle,
+      handleTaskId,
+      explicitTaskId,
+    },
+  );
+}
+
+function missingTaskContextError(): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.VALIDATION_ERROR,
+    "request must include request.taskHandle or the explicit target + request.taskId path",
+  );
+}
+
 function waitTimeoutError(
   taskId: string,
   waitTimeoutMs: number,
@@ -315,6 +358,19 @@ function waitTimeoutError(
   );
 }
 
+function firstStreamTaskId(
+  events: readonly A2AStreamEventData[],
+): string | undefined {
+  for (const event of events) {
+    const summary = summarizeStreamEvent(event);
+    if (summary.taskId !== undefined) {
+      return summary.taskId;
+    }
+  }
+
+  return undefined;
+}
+
 async function consumeStream<T extends StreamOperation>(
   stream: AsyncIterable<A2AStreamEventData>,
   target: ResolvedTarget,
@@ -334,6 +390,7 @@ export interface A2AOutboundServiceOptions {
   logger?: LoggerLike;
   tracer?: TracerLike;
   clientPool?: SDKClientPool;
+  taskHandleRegistry?: TaskHandleRegistry;
 }
 
 type ResolvedClientContext = {
@@ -351,6 +408,8 @@ export class A2AOutboundService {
   private readonly clientPool: SDKClientPool;
 
   private readonly targetCatalog: TargetCatalog;
+
+  private readonly taskHandleRegistry: TaskHandleRegistry;
 
   constructor(options: A2AOutboundServiceOptions = {}) {
     this.logger = options.logger;
@@ -372,6 +431,13 @@ export class A2AOutboundService {
       config: this.config,
       clientPool: this.clientPool,
     });
+
+    this.taskHandleRegistry =
+      options.taskHandleRegistry ??
+      createTaskHandleRegistry({
+        ttlMs: this.config.taskHandles.ttlMs,
+        maxEntries: this.config.taskHandles.maxEntries,
+      });
   }
 
   private async resolveClient(
@@ -386,6 +452,81 @@ export class A2AOutboundService {
     };
   }
 
+  private async resolveTaskContext(
+    input: FollowUpToolInput,
+  ): Promise<ResolvedTaskContext> {
+    const { taskHandle, taskId } = input.request;
+
+    if (taskHandle !== undefined) {
+      const handleRecord = this.taskHandleRegistry.resolve(taskHandle);
+
+      if (taskId !== undefined && taskId !== handleRecord.taskId) {
+        throw taskHandleTaskIdMismatchError(
+          taskHandle,
+          handleRecord.taskId,
+          taskId,
+        );
+      }
+
+      if (input.target !== undefined) {
+        const explicitTarget = this.targetCatalog.resolveRawTarget(input.target);
+
+        if (targetIdentity(explicitTarget) !== targetIdentity(handleRecord.target)) {
+          throw taskHandleTargetMismatchError(
+            taskHandle,
+            handleRecord.target,
+            explicitTarget,
+          );
+        }
+      }
+
+      const clientEntry = await this.clientPool.get(handleRecord.target);
+
+      return {
+        target: clientEntry.target,
+        clientEntry,
+        taskId: handleRecord.taskId,
+        taskHandle,
+      };
+    }
+
+    if (input.target === undefined || taskId === undefined) {
+      throw missingTaskContextError();
+    }
+
+    const resolved = await this.resolveClient(input.target);
+
+    return {
+      ...resolved,
+      taskId,
+    };
+  }
+
+  private bindTaskHandle(
+    target: ResolvedTarget,
+    taskId: string,
+    taskHandle?: string,
+  ): string {
+    if (taskHandle !== undefined) {
+      return this.taskHandleRegistry.refresh(taskHandle, { target, taskId })
+        .taskHandle;
+    }
+
+    return this.taskHandleRegistry.create({ target, taskId }).taskHandle;
+  }
+
+  private bindStreamTaskHandle(
+    target: ResolvedTarget,
+    events: readonly A2AStreamEventData[],
+    taskHandle?: string,
+  ): string | undefined {
+    const taskId = firstStreamTaskId(events);
+
+    return taskId !== undefined
+      ? this.bindTaskHandle(target, taskId, taskHandle)
+      : undefined;
+  }
+
   async delegate(
     input: unknown,
     options: ExecutionOptions = {},
@@ -397,29 +538,21 @@ export class A2AOutboundService {
       const validated = validateDelegateInput(input);
       const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
-
-      const messagePayload: MessageSendParams = {
-        message: validated.request.message,
-        ...(validated.request.metadata !== undefined
-          ? { metadata: validated.request.metadata }
-          : {}),
-        ...(validated.request.configuration !== undefined
-          ? { configuration: validated.request.configuration }
-          : {}),
-      };
+      const normalized = normalizeLegacyDelegateRequest(validated.request, {
+        defaultTimeoutMs: this.config.defaults.timeoutMs,
+        defaultServiceParameters: this.config.defaults.serviceParameters,
+        signal: options.signal,
+      });
 
       const raw = await resolved.clientEntry.client.sendMessage(
-        messagePayload,
-        requestOptions(
-          validated.request.timeoutMs,
-          this.config.defaults.timeoutMs,
-          this.config.defaults.serviceParameters,
-          validated.request.serviceParameters,
-          options.signal,
-        ),
+        normalized.sendParams,
+        normalized.requestOptions,
       );
 
-      return delegateSuccess(target, raw);
+      const taskHandle =
+        raw.kind === "task" ? this.bindTaskHandle(target, raw.id) : undefined;
+
+      return delegateSuccess(target, raw, taskHandle);
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -448,27 +581,16 @@ export class A2AOutboundService {
       const validated = validateDelegateStreamInput(input);
       const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
-
-      const messagePayload: MessageSendParams = {
-        message: validated.request.message,
-        ...(validated.request.metadata !== undefined
-          ? { metadata: validated.request.metadata }
-          : {}),
-        ...(validated.request.configuration !== undefined
-          ? { configuration: validated.request.configuration }
-          : {}),
-      };
+      const normalized = normalizeLegacyDelegateRequest(validated.request, {
+        defaultTimeoutMs: this.config.defaults.timeoutMs,
+        defaultServiceParameters: this.config.defaults.serviceParameters,
+        signal: options.signal,
+      });
 
       await consumeStream(
         resolved.clientEntry.client.sendMessageStream(
-          messagePayload,
-          requestOptions(
-            validated.request.timeoutMs,
-            this.config.defaults.timeoutMs,
-            this.config.defaults.serviceParameters,
-            validated.request.serviceParameters,
-            options.signal,
-          ),
+          normalized.sendParams,
+          normalized.requestOptions,
         ),
         target,
         OPERATIONS.DELEGATE_STREAM,
@@ -483,7 +605,11 @@ export class A2AOutboundService {
         );
       }
 
-      return delegateStreamSuccess(target, state.events);
+      return delegateStreamSuccess(
+        target,
+        state.events,
+        this.bindStreamTaskHandle(target, state.events),
+      );
     } catch (error) {
       let toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -515,12 +641,12 @@ export class A2AOutboundService {
 
     try {
       const validated = validateStatusInput(input);
-      taskId = validated.request.taskId;
-      const resolved = await this.resolveClient(validated.target);
+      const resolved = await this.resolveTaskContext(validated);
+      taskId = resolved.taskId;
       target = resolved.target;
 
       const params: TaskQueryParams = {
-        id: validated.request.taskId,
+        id: resolved.taskId,
         ...(validated.request.historyLength !== undefined
           ? { historyLength: validated.request.historyLength }
           : {}),
@@ -528,7 +654,7 @@ export class A2AOutboundService {
 
       const raw = await resolved.clientEntry.client.getTask(
         params,
-        requestOptions(
+        buildRequestOptions(
           validated.request.timeoutMs,
           this.config.defaults.timeoutMs,
           this.config.defaults.serviceParameters,
@@ -537,7 +663,12 @@ export class A2AOutboundService {
         ),
       );
 
-      return taskStatusSuccess(target, validated.request.taskId, raw);
+      return taskStatusSuccess(
+        target,
+        raw.id,
+        raw,
+        this.bindTaskHandle(target, raw.id, resolved.taskHandle),
+      );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -565,13 +696,13 @@ export class A2AOutboundService {
 
     try {
       const validated = validateWaitInput(input);
-      taskId = validated.request.taskId;
+      const resolved = await this.resolveTaskContext(validated);
+      taskId = resolved.taskId;
       const deadlineMs = startedAtMs + validated.request.waitTimeoutMs;
-      const resolved = await this.resolveClient(validated.target);
       target = resolved.target;
 
       const params: TaskQueryParams = {
-        id: validated.request.taskId,
+        id: resolved.taskId,
         ...(validated.request.historyLength !== undefined
           ? { historyLength: validated.request.historyLength }
           : {}),
@@ -585,7 +716,7 @@ export class A2AOutboundService {
         const remainingPollBudgetMs = remainingTimeMs(deadlineMs);
         if (remainingPollBudgetMs <= 0) {
           throw waitTimeoutError(
-            validated.request.taskId,
+            resolved.taskId,
             validated.request.waitTimeoutMs,
             attempts,
             startedAtMs,
@@ -599,7 +730,7 @@ export class A2AOutboundService {
         try {
           const raw = await resolved.clientEntry.client.getTask(
             params,
-            requestOptions(
+            buildRequestOptions(
               validated.request.timeoutMs,
               this.config.defaults.timeoutMs,
               this.config.defaults.serviceParameters,
@@ -616,10 +747,11 @@ export class A2AOutboundService {
           if (isTerminalTaskState(raw.status.state)) {
             return taskWaitSuccess(
               target,
-              validated.request.taskId,
+              raw.id,
               raw,
               attempts,
               elapsedTimeMs(startedAtMs),
+              this.bindTaskHandle(target, raw.id, resolved.taskHandle),
             );
           }
         } catch (error) {
@@ -635,7 +767,7 @@ export class A2AOutboundService {
 
           if (remainingTimeMs(deadlineMs) <= 0) {
             throw waitTimeoutError(
-              validated.request.taskId,
+              resolved.taskId,
               validated.request.waitTimeoutMs,
               attempts,
               startedAtMs,
@@ -650,7 +782,7 @@ export class A2AOutboundService {
 
         if (remainingSleepBudgetMs <= 0) {
           throw waitTimeoutError(
-            validated.request.taskId,
+            resolved.taskId,
             validated.request.waitTimeoutMs,
             attempts,
             startedAtMs,
@@ -701,18 +833,18 @@ export class A2AOutboundService {
 
     try {
       const validated = validateResubscribeInput(input);
-      taskId = validated.request.taskId;
-      const resolved = await this.resolveClient(validated.target);
+      const resolved = await this.resolveTaskContext(validated);
+      taskId = resolved.taskId;
       target = resolved.target;
 
       const params: TaskIdParams = {
-        id: validated.request.taskId,
+        id: resolved.taskId,
       };
 
       await consumeStream(
         resolved.clientEntry.client.resubscribeTask(
           params,
-          requestOptions(
+          buildRequestOptions(
             validated.request.timeoutMs,
             this.config.defaults.timeoutMs,
             this.config.defaults.serviceParameters,
@@ -733,7 +865,11 @@ export class A2AOutboundService {
         );
       }
 
-      return taskResubscribeSuccess(target, state.events);
+      return taskResubscribeSuccess(
+        target,
+        state.events,
+        this.bindStreamTaskHandle(target, state.events, resolved.taskHandle),
+      );
     } catch (error) {
       let toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -766,17 +902,17 @@ export class A2AOutboundService {
 
     try {
       const validated = validateCancelInput(input);
-      taskId = validated.request.taskId;
-      const resolved = await this.resolveClient(validated.target);
+      const resolved = await this.resolveTaskContext(validated);
+      taskId = resolved.taskId;
       target = resolved.target;
 
       const params: TaskIdParams = {
-        id: validated.request.taskId,
+        id: resolved.taskId,
       };
 
       const raw = await resolved.clientEntry.client.cancelTask(
         params,
-        requestOptions(
+        buildRequestOptions(
           validated.request.timeoutMs,
           this.config.defaults.timeoutMs,
           this.config.defaults.serviceParameters,
@@ -785,7 +921,12 @@ export class A2AOutboundService {
         ),
       );
 
-      return taskCancelSuccess(target, validated.request.taskId, raw);
+      return taskCancelSuccess(
+        target,
+        raw.id,
+        raw,
+        this.bindTaskHandle(target, raw.id, resolved.taskHandle),
+      );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
