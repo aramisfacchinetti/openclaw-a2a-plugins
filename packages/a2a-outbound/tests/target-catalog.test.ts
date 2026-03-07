@@ -217,6 +217,8 @@ test("raw target resolution enforces override policy for unknown URLs", async (t
       "raw_url_disallowed_by_policy",
     );
     assert.equal(details.normalizedBaseUrl, `${unknownPeer.baseUrl}/`);
+    assert.equal(details.suggested_action, "list_targets");
+    assert.equal(details.hint, "Use target_alias or enable policy.allowTargetUrlOverride.");
     return true;
   });
 
@@ -293,11 +295,13 @@ test("raw target resolution fails when normalized URL matches multiple configure
       "ambiguous_normalized_url_matches",
     );
     assert.deepEqual(details.aliases, ["support", "support-canary"]);
+    assert.equal(details.suggested_action, "list_targets");
+    assert.equal(details.hint, "Disambiguate by using target_alias instead of target_url.");
     return true;
   });
 });
 
-test("unknown configured aliases and raw URLs return target-resolution errors", async (t) => {
+test("unknown configured aliases and raw URLs return target-resolution errors with suggested_action", async (t) => {
   const peer = await startCardPeer();
   t.after(() => peer.server.close());
 
@@ -313,6 +317,7 @@ test("unknown configured aliases and raw URLs return target-resolution errors", 
   assert.throws(() => catalog.resolveAlias("missing"), (error) => {
     const details = expectTargetResolutionError(error, "unknown_alias");
     assert.ok(Array.isArray(details.availableAliases));
+    assert.equal(details.suggested_action, "list_targets");
     return true;
   });
 
@@ -324,6 +329,7 @@ test("unknown configured aliases and raw URLs return target-resolution errors", 
     (error) => {
       const details = expectTargetResolutionError(error, "unknown_raw_url");
       assert.equal(details.normalizedBaseUrl, "http://127.0.0.1:65534/");
+      assert.equal(details.suggested_action, "list_targets");
       return true;
     },
   );
@@ -385,6 +391,46 @@ test("repeated card hydration reuses cached metadata without another card reques
   assert.equal(second.card.displayName, "Support Agent");
   assert.equal(entry?.card.displayName, "Support Agent");
   assert.equal(peer.state.cardRequests, 1);
+});
+
+test("hydrateAllConfigured populates reachable targets and records errors for unreachable ones", async (t) => {
+  const reachablePeer = await startCardPeer();
+  const unreachablePeer = await startCardPeer({ statusCode: 503, body: { error: "down" } });
+  t.after(() => reachablePeer.server.close());
+  t.after(() => unreachablePeer.server.close());
+
+  const catalog = buildCatalog({
+    targets: [
+      {
+        alias: "reachable",
+        baseUrl: reachablePeer.baseUrl,
+      },
+      {
+        alias: "unreachable",
+        baseUrl: unreachablePeer.baseUrl,
+      },
+    ],
+  });
+
+  const entries = await catalog.hydrateAllConfigured();
+
+  assert.equal(entries.length, 2);
+
+  const reachable = entries.find((e) => e.target.alias === "reachable");
+  const unreachable = entries.find((e) => e.target.alias === "unreachable");
+
+  assert.ok(reachable);
+  assert.equal(reachable.card.displayName, "Support Agent");
+  assert.equal(reachable.card.skillSummaries.length, 1);
+  assert.equal(reachable.card.streamingSupported, true);
+  assert.ok(reachable.card.lastRefreshedAt);
+  assert.equal(reachable.card.lastRefreshError, undefined);
+
+  assert.ok(unreachable);
+  assert.equal(unreachable.card.displayName, undefined);
+  assert.equal(unreachable.card.skillSummaries.length, 0);
+  assert.ok(unreachable.card.lastRefreshError);
+  assert.ok(unreachable.card.lastRefreshedAt);
 });
 
 test("card refresh failures are recorded without breaking configured resolution", async (t) => {

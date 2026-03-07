@@ -692,13 +692,13 @@ test("status and cancel both work from task_handle context", async (t) => {
   assert.equal(peer.state.lastGetTaskParams?.historyLength, 2);
 });
 
-test("list_targets returns configured targets plus cached metadata without forcing hydration", async (t) => {
+test("list_targets hydrates card metadata automatically", async (t) => {
   const peer = await startPeer({
     streaming: true,
   });
   t.after(() => peer.server.close());
 
-  const parsedConfig = buildParsedConfig({
+  const { service } = buildService({
     targets: [
       configuredTarget(peer, {
         alias: "support",
@@ -707,31 +707,9 @@ test("list_targets returns configured targets plus cached metadata without forci
       }),
     ],
   });
-  const clientPool = createClientPool({
-    defaultCardPath: parsedConfig.defaults.cardPath,
-    preferredTransports: parsedConfig.defaults.preferredTransports,
-    acceptedOutputModes: parsedConfig.policy.acceptedOutputModes,
-    normalizeBaseUrl: parsedConfig.policy.normalizeBaseUrl,
-    enforceSupportedTransports: parsedConfig.policy.enforceSupportedTransports,
-  });
-  const targetCatalog = createTargetCatalog({
-    config: parsedConfig,
-    clientPool,
-  });
 
-  await targetCatalog.hydrateConfiguredTarget("support");
-  assert.equal(peer.state.cardRequests, 1);
+  assert.equal(peer.state.cardRequests, 0);
 
-  const service = new A2AOutboundService({
-    parsedConfig,
-    clientPool,
-    targetCatalog,
-    logger: {
-      info() {},
-      warn() {},
-      error() {},
-    },
-  });
   const result = await service.execute({
     action: "list_targets",
   });
@@ -745,6 +723,8 @@ test("list_targets returns configured targets plus cached metadata without forci
   assert.equal(targets[0]?.target_name, "Mock Peer");
   assert.equal(targets[0]?.description, "Primary support lane");
   assert.equal(targets[0]?.streaming_supported, true);
+  assert.ok(targets[0]?.skills && targets[0].skills.length > 0);
+  assert.equal(targets[0]?.skills?.[0]?.name, "Mock Skill");
   assert.equal(peer.state.cardRequests, 1);
   assert.ok(Array.isArray(success.raw));
 });
@@ -800,6 +780,91 @@ test("watch returns an actionable failure when the target is known not to suppor
   assert.equal(failure.action, "watch");
   assert.equal(failure.error.code, "A2A_SDK_ERROR");
   assert.match(failure.error.message, /action=status/);
-  assert.equal(details.recommended_action, "status");
+  assert.equal(details.suggested_action, "status");
   assert.equal(peer.state.resubscribeCalls, 0);
+});
+
+test("status with unknown task_handle returns UNKNOWN_TASK_HANDLE with suggested_action", async () => {
+  const { service } = buildService();
+
+  const result = await service.execute({
+    action: "status",
+    task_handle: "rah_does-not-exist",
+  });
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "status");
+  assert.equal(failure.error.code, "UNKNOWN_TASK_HANDLE");
+  assert.equal(details.suggested_action, "send");
+});
+
+test("status with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hint", async () => {
+  let now = 10_000;
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 100,
+    maxEntries: 100,
+    now: () => now,
+  });
+  const handle = taskHandleRegistry.create({
+    target: {
+      baseUrl: "https://peer.example/",
+      cardPath: "/.well-known/agent-card.json",
+      preferredTransports: ["JSONRPC", "HTTP+JSON"],
+      alias: "support",
+    },
+    taskId: "task-expired-1",
+  }).taskHandle;
+
+  now = 10_200;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+
+  const result = await service.execute({
+    action: "status",
+    task_handle: handle,
+  });
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "status");
+  assert.equal(failure.error.code, "EXPIRED_TASK_HANDLE");
+  assert.ok(Array.isArray(details.suggested_actions));
+  assert.ok((details.suggested_actions as string[]).includes("status"));
+  assert.ok((details.suggested_actions as string[]).includes("send"));
+  assert.equal(typeof details.hint, "string");
+});
+
+test("list_targets with unreachable peer still returns entries with lastRefreshError", async (t) => {
+  const peer = await startPeer();
+  const peerUrl = peer.baseUrl;
+  peer.server.close();
+  await new Promise<void>((resolve) => peer.server.on("close", resolve));
+
+  const { service } = buildService({
+    targets: [
+      configuredTarget(peer, {
+        alias: "down",
+        default: true,
+      }),
+    ],
+    defaults: {
+      timeoutMs: 500,
+    },
+  });
+
+  const result = await service.execute({
+    action: "list_targets",
+  });
+
+  const success = asSuccess(result);
+  const targets = targetsFromSummary(success.summary);
+
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0]?.target_alias, "down");
+  assert.equal(targets[0]?.target_url, `${peerUrl}/`);
+  assert.ok(targets[0]?.last_refresh_error);
+  assert.equal(typeof targets[0]?.last_refresh_error?.code, "string");
 });

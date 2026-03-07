@@ -240,6 +240,7 @@ export class TargetCatalog {
         {
           inputBaseUrl: target.baseUrl,
           normalizedBaseUrl: normalizedTarget.baseUrl,
+          suggested_action: "list_targets",
         },
       );
     }
@@ -267,11 +268,25 @@ export class TargetCatalog {
           normalizedBaseUrl: normalizedTarget.baseUrl,
           allowTargetUrlOverride: this.config.policy.allowTargetUrlOverride,
           configuredAliases: this.config.targets.map((entry) => entry.alias),
+          suggested_action: "list_targets",
+          hint: "Use target_alias or enable policy.allowTargetUrlOverride.",
         },
       );
     }
 
     return this.applyCachedMetadata(normalizedTarget);
+  }
+
+  async hydrateAllConfigured(
+    options: TargetCatalogHydrationOptions = {},
+  ): Promise<TargetCatalogEntry[]> {
+    await Promise.allSettled(
+      this.configuredEntries.map((entry) =>
+        this.loadCardMetadata(entry.target, options),
+      ),
+    );
+
+    return this.listEntries();
   }
 
   async hydrateConfiguredTarget(
@@ -302,6 +317,7 @@ export class TargetCatalog {
         {
           alias: normalizedAlias,
           availableAliases: this.configuredEntries.map((item) => item.alias),
+          suggested_action: "list_targets",
         },
       );
     }
@@ -325,6 +341,8 @@ export class TargetCatalog {
       {
         normalizedBaseUrl: normalizedTarget.baseUrl,
         aliases: matches.map((entry) => entry.alias),
+        suggested_action: "list_targets",
+        hint: "Disambiguate by using target_alias instead of target_url.",
       },
     );
   }

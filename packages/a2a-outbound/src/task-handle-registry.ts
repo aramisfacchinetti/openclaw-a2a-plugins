@@ -66,7 +66,9 @@ function unknownTaskHandleError(taskHandle: string): A2AOutboundError {
   return new A2AOutboundError(
     ERROR_CODES.UNKNOWN_TASK_HANDLE,
     `unknown task handle "${taskHandle}"`,
-    recoveryDetails(taskHandle),
+    recoveryDetails(taskHandle, {
+      suggested_action: "send",
+    }),
   );
 }
 
@@ -79,6 +81,8 @@ function expiredTaskHandleError(
     `task handle "${taskHandle}" has expired`,
     recoveryDetails(taskHandle, {
       expiresAt,
+      suggested_actions: ["status", "send"],
+      hint: "Retry with target_alias + task_id, or send a new request.",
     }),
   );
 }

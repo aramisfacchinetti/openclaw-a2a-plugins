@@ -262,3 +262,66 @@ test("remote_agent execute accepts execute(callId, params) signature", async () 
   assert.equal(payload.action, "watch");
   assert.equal(payload.error.code, "VALIDATION_ERROR");
 });
+
+test("remote_agent execute returns VALIDATION_ERROR for unknown alias", async () => {
+  const tools = new Map<string, AnyAgentTool>();
+
+  plugin.register(
+    createApi(
+      {
+        enabled: true,
+        targets: [
+          {
+            alias: "support",
+            baseUrl: "https://support.example",
+            default: true,
+          },
+        ],
+      },
+      (descriptor) => {
+        tools.set(descriptor.name, descriptor);
+      },
+    ),
+  );
+
+  const remoteAgent = tools.get("remote_agent");
+  assert.ok(remoteAgent);
+  const result = await executeTool(remoteAgent, {
+    action: "send",
+    target_alias: "unknown",
+    input: "hello",
+  });
+
+  const payload = toFailure(readStructuredContent(result));
+
+  assert.equal(payload.operation, "remote_agent");
+  assert.equal(payload.action, "send");
+  assert.equal(payload.error.code, "VALIDATION_ERROR");
+  const details = asRecord(payload.error.details);
+  assert.ok(Array.isArray(details.errors));
+});
+
+test("remote_agent execute returns UNKNOWN_TASK_HANDLE for missing handle", async () => {
+  const tools = new Map<string, AnyAgentTool>();
+
+  plugin.register(
+    createApi({ enabled: true }, (descriptor) => {
+      tools.set(descriptor.name, descriptor);
+    }),
+  );
+
+  const remoteAgent = tools.get("remote_agent");
+  assert.ok(remoteAgent);
+  const result = await executeTool(remoteAgent, {
+    action: "status",
+    task_handle: "rah_missing-handle-id",
+  });
+
+  const payload = toFailure(readStructuredContent(result));
+
+  assert.equal(payload.operation, "remote_agent");
+  assert.equal(payload.action, "status");
+  assert.equal(payload.error.code, "UNKNOWN_TASK_HANDLE");
+  const details = asRecord(payload.error.details);
+  assert.equal(details.suggested_action, "send");
+});

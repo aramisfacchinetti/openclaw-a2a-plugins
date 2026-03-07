@@ -226,7 +226,7 @@ function streamingNotSupportedError(
       ...(target.streamingSupported !== undefined
         ? { streaming_supported: target.streamingSupported }
         : {}),
-      recommended_action: "status",
+      suggested_action: "status",
     },
   );
 }
@@ -491,7 +491,8 @@ export class A2AOutboundService {
     const span = startSpan(this.tracer, "a2a.remote_agent.list_targets");
 
     try {
-      return listTargetsSuccess(this.targetCatalog.listEntries());
+      const entries = await this.targetCatalog.hydrateAllConfigured();
+      return listTargetsSuccess(entries);
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 

@@ -64,7 +64,7 @@ test("task handle registry refresh extends the expiry window", () => {
   assert.equal(refreshed.expiresAt, 2_150);
 });
 
-test("task handle registry rejects expired handles", () => {
+test("task handle registry rejects expired handles with suggested_actions", () => {
   let now = 3_000;
   const registry = createTaskHandleRegistry({
     ttlMs: 100,
@@ -81,20 +81,21 @@ test("task handle registry rejects expired handles", () => {
 
   assert.throws(
     () => registry.resolve(created.taskHandle),
-    (error: unknown) =>
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "EXPIRED_TASK_HANDLE" &&
-      "details" in error &&
-      typeof error.details === "object" &&
-      error.details !== null &&
-      "taskHandle" in error.details &&
-      error.details.taskHandle === created.taskHandle,
+    (error: unknown) => {
+      const e = error as { code?: string; details?: Record<string, unknown> };
+      return (
+        e.code === "EXPIRED_TASK_HANDLE" &&
+        e.details?.taskHandle === created.taskHandle &&
+        Array.isArray(e.details?.suggested_actions) &&
+        (e.details.suggested_actions as string[]).includes("status") &&
+        (e.details.suggested_actions as string[]).includes("send") &&
+        typeof e.details?.hint === "string"
+      );
+    },
   );
 });
 
-test("task handle registry rejects unknown handles", () => {
+test("task handle registry rejects unknown handles with suggested_action", () => {
   const registry = createTaskHandleRegistry({
     ttlMs: 100,
     maxEntries: 4,
@@ -102,15 +103,14 @@ test("task handle registry rejects unknown handles", () => {
 
   assert.throws(
     () => registry.resolve("rah_missing"),
-    (error: unknown) =>
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "UNKNOWN_TASK_HANDLE" &&
-      "details" in error &&
-      typeof error.details === "object" &&
-      error.details !== null &&
-      "retryHint" in error.details,
+    (error: unknown) => {
+      const e = error as { code?: string; details?: Record<string, unknown> };
+      return (
+        e.code === "UNKNOWN_TASK_HANDLE" &&
+        typeof e.details?.retryHint === "string" &&
+        e.details?.suggested_action === "send"
+      );
+    },
   );
 });
 
