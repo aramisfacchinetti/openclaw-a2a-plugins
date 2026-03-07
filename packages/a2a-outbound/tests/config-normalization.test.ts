@@ -11,6 +11,8 @@ test('parse(undefined) returns defaults with cloned nested values', () => {
   assert.deepEqual(parsed, A2A_OUTBOUND_DEFAULT_CONFIG)
   assert.notStrictEqual(parsed, A2A_OUTBOUND_DEFAULT_CONFIG)
   assert.notStrictEqual(parsed.defaults, A2A_OUTBOUND_DEFAULT_CONFIG.defaults)
+  assert.notStrictEqual(parsed.targets, A2A_OUTBOUND_DEFAULT_CONFIG.targets)
+  assert.notStrictEqual(parsed.taskHandles, A2A_OUTBOUND_DEFAULT_CONFIG.taskHandles)
   assert.notStrictEqual(parsed.policy, A2A_OUTBOUND_DEFAULT_CONFIG.policy)
   assert.notStrictEqual(
     parsed.defaults.preferredTransports,
@@ -41,9 +43,14 @@ test('invalid scalar values fall back to defaults without throwing', () => {
         timeoutMs: 0,
         cardPath: '  ',
       },
+      taskHandles: {
+        ttlMs: 0,
+        maxEntries: 'many',
+      },
       policy: {
         normalizeBaseUrl: 'false',
         enforceSupportedTransports: 1,
+        allowTargetUrlOverride: 'yes',
       },
     })
   })
@@ -54,20 +61,87 @@ test('invalid scalar values fall back to defaults without throwing', () => {
       timeoutMs: 0,
       cardPath: '  ',
     },
+    taskHandles: {
+      ttlMs: 0,
+      maxEntries: 'many',
+    },
     policy: {
       normalizeBaseUrl: 'false',
       enforceSupportedTransports: 1,
+      allowTargetUrlOverride: 'yes',
     },
   })
 
   assert.equal(parsed.enabled, A2A_OUTBOUND_DEFAULT_CONFIG.enabled)
   assert.equal(parsed.defaults.timeoutMs, A2A_OUTBOUND_DEFAULT_CONFIG.defaults.timeoutMs)
   assert.equal(parsed.defaults.cardPath, A2A_OUTBOUND_DEFAULT_CONFIG.defaults.cardPath)
+  assert.equal(parsed.taskHandles.ttlMs, A2A_OUTBOUND_DEFAULT_CONFIG.taskHandles.ttlMs)
+  assert.equal(
+    parsed.taskHandles.maxEntries,
+    A2A_OUTBOUND_DEFAULT_CONFIG.taskHandles.maxEntries,
+  )
   assert.equal(parsed.policy.normalizeBaseUrl, A2A_OUTBOUND_DEFAULT_CONFIG.policy.normalizeBaseUrl)
   assert.equal(
     parsed.policy.enforceSupportedTransports,
     A2A_OUTBOUND_DEFAULT_CONFIG.policy.enforceSupportedTransports,
   )
+  assert.equal(
+    parsed.policy.allowTargetUrlOverride,
+    A2A_OUTBOUND_DEFAULT_CONFIG.policy.allowTargetUrlOverride,
+  )
+})
+
+test('targets normalize trimmed values, dedupe arrays, and materialize per-target defaults', () => {
+  const parsed = parseA2AOutboundPluginConfig({
+    defaults: {
+      cardPath: ' /delegation/card.json ',
+      preferredTransports: ['GRPC', 'HTTP+JSON'],
+    },
+    targets: [
+      {
+        alias: ' support ',
+        baseUrl: ' https://support.example/a2a ',
+        description: ' Primary escalation queue ',
+        tags: [' ops ', 'support', 'ops', ''],
+        cardPath: ' /support/card.json ',
+        preferredTransports: [' HTTP+JSON ', 'INVALID', 'HTTP+JSON'],
+        examples: [' delegate support ', 'delegate support', '', 'escalate'],
+        default: true,
+      },
+      {
+        alias: 'sales',
+        baseUrl: ' https://sales.example/a2a ',
+        description: ' ',
+        tags: [' revenue ', 7, 'revenue'],
+        cardPath: '   ',
+        preferredTransports: ['INVALID', '', null],
+        examples: ['intro', ' intro '],
+        default: 'yes',
+      },
+    ],
+  })
+
+  assert.deepEqual(parsed.targets, [
+    {
+      alias: 'support',
+      baseUrl: 'https://support.example/a2a',
+      description: 'Primary escalation queue',
+      tags: ['ops', 'support'],
+      cardPath: '/support/card.json',
+      preferredTransports: ['HTTP+JSON'],
+      examples: ['delegate support', 'escalate'],
+      default: true,
+    },
+    {
+      alias: 'sales',
+      baseUrl: 'https://sales.example/a2a',
+      tags: ['revenue'],
+      cardPath: '/delegation/card.json',
+      preferredTransports: ['GRPC', 'HTTP+JSON'],
+      examples: ['intro'],
+      default: false,
+    },
+  ])
 })
 
 test('preferredTransports keeps known values, dedupes, and falls back when empty', () => {
@@ -134,3 +208,44 @@ test('acceptedOutputModes keeps non-empty strings and dedupes', () => {
     'application/json',
   ])
 })
+
+for (const testCase of [
+  {
+    name: 'blank alias',
+    input: {
+      targets: [{ alias: '   ', baseUrl: 'https://example.com/a2a' }],
+    },
+    pattern: /targets\[0\]\.alias/,
+  },
+  {
+    name: 'blank base URL',
+    input: {
+      targets: [{ alias: 'support', baseUrl: '   ' }],
+    },
+    pattern: /targets\[0\]\.baseUrl/,
+  },
+  {
+    name: 'duplicate aliases after trimming',
+    input: {
+      targets: [
+        { alias: 'support', baseUrl: 'https://one.example/a2a' },
+        { alias: ' support ', baseUrl: 'https://two.example/a2a' },
+      ],
+    },
+    pattern: /duplicate alias "support"/,
+  },
+  {
+    name: 'multiple default targets',
+    input: {
+      targets: [
+        { alias: 'support', baseUrl: 'https://one.example/a2a', default: true },
+        { alias: 'sales', baseUrl: 'https://two.example/a2a', default: true },
+      ],
+    },
+    pattern: /multiple default entries/,
+  },
+]) {
+  test(`target registry validation rejects ${testCase.name}`, () => {
+    assert.throws(() => parseA2AOutboundPluginConfig(testCase.input), testCase.pattern)
+  })
+}

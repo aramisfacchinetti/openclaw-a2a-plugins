@@ -37,6 +37,68 @@
           }
         }
       },
+      "targets": {
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["alias", "baseUrl"],
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "baseUrl": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": []
+            },
+            "cardPath": {
+              "type": "string",
+              "default": "/.well-known/agent-card.json"
+            },
+            "preferredTransports": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["JSONRPC", "HTTP+JSON", "GRPC"]
+              },
+              "default": ["JSONRPC", "HTTP+JSON"]
+            },
+            "examples": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": []
+            },
+            "default": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      },
+      "taskHandles": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 86400000
+          },
+          "maxEntries": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1000
+          }
+        }
+      },
       "policy": {
         "type": "object",
         "additionalProperties": false,
@@ -53,6 +115,10 @@
           "enforceSupportedTransports": {
             "type": "boolean",
             "default": true
+          },
+          "allowTargetUrlOverride": {
+            "type": "boolean",
+            "default": false
           }
         }
       }
