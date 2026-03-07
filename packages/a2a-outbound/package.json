@@ -1,23 +1,23 @@
 {
   "name": "@aramisfa/openclaw-a2a-outbound",
-  "version": "0.1.0",
-  "description": "Native OpenClaw outbound A2A delegation plugin",
+  "version": "0.1.2",
+  "description": "Outbound A2A delegation plugin for OpenClaw agents",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aramisfacchinetti/openclaw-a2a-plugins.git",
-    "directory": "packages/a2a-outbound"
+    "url": "git+https://github.com/aramisfacchinetti/openclaw-a2a-plugins.git"
   },
   "bugs": {
     "url": "https://github.com/aramisfacchinetti/openclaw-a2a-plugins/issues"
   },
-  "homepage": "https://github.com/aramisfacchinetti/openclaw-a2a-plugins/tree/master/packages/a2a-outbound#readme",
+  "homepage": "https://github.com/aramisfacchinetti/openclaw-a2a-plugins#readme",
   "keywords": [
     "openclaw",
-    "plugin",
+    "openclaw-plugin",
     "a2a",
     "agent-to-agent",
-    "delegation"
+    "delegation",
+    "agent"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,9 @@
   },
   "files": [
     "dist",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
   ],
   "openclaw": {
     "extensions": [
