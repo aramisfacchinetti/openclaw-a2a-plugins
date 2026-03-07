@@ -1,0 +1,46 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, existsSync } from 'node:fs'
+
+const manifestPath = new URL('../openclaw.plugin.json', import.meta.url)
+const skillPath = new URL('../skills/remote-agent/SKILL.md', import.meta.url)
+
+test('manifest declares skills field', () => {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  assert.deepEqual(manifest.skills, ['./skills'])
+})
+
+test('SKILL.md exists at expected path', () => {
+  assert.ok(existsSync(skillPath))
+})
+
+test('SKILL.md has valid frontmatter', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.startsWith('---\n'), 'must start with frontmatter delimiter')
+  const closingIndex = content.indexOf('\n---\n', 4)
+  assert.ok(closingIndex > 0, 'must have closing frontmatter delimiter')
+  const frontmatter = content.slice(4, closingIndex)
+  assert.ok(frontmatter.includes('name:'), 'frontmatter must include name')
+  assert.ok(
+    frontmatter.includes('description:'),
+    'frontmatter must include description',
+  )
+})
+
+test('SKILL.md references remote_agent tool', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('remote_agent'))
+})
+
+test('SKILL.md documents all five actions', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  for (const action of ['list_targets', 'send', 'watch', 'status', 'cancel']) {
+    assert.ok(content.includes(action), `must document action: ${action}`)
+  }
+})
+
+test('SKILL.md teaches target_alias and task_handle preference', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('target_alias'))
+  assert.ok(content.includes('task_handle'))
+})
