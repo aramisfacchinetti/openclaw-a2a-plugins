@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "entry": "./dist/index.js",
   "description": "Delegate requests to external A2A agents and manage delegated tasks.",
+  "skills": ["./skills"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
