@@ -1,18 +1,57 @@
-import type { Message, Task } from "@a2a-js/sdk";
+import type {
+  Message,
+  Task,
+  TaskArtifactUpdateEvent,
+  TaskStatusUpdateEvent,
+} from "@a2a-js/sdk";
 import type { ToolError } from "./errors.js";
 import type { ResolvedTarget } from "./sdk-client-pool.js";
 
+export type A2AStreamEventData =
+  | Message
+  | Task
+  | TaskStatusUpdateEvent
+  | TaskArtifactUpdateEvent;
+
 export const OPERATIONS = {
   DELEGATE: "a2a_delegate",
+  DELEGATE_STREAM: "a2a_delegate_stream",
   TASK_STATUS: "a2a_task_status",
+  TASK_RESUBSCRIBE: "a2a_task_resubscribe",
   TASK_CANCEL: "a2a_task_cancel",
 } as const;
 
 export type A2AOperation = (typeof OPERATIONS)[keyof typeof OPERATIONS];
 export type SendMessageResult = Message | Task;
+export type StreamOperation =
+  | typeof OPERATIONS.DELEGATE_STREAM
+  | typeof OPERATIONS.TASK_RESUBSCRIBE;
+export type StreamRawResult = {
+  events: A2AStreamEventData[];
+  finalEvent: A2AStreamEventData;
+};
+export type StreamEventSummary = {
+  kind: A2AStreamEventData["kind"];
+  taskId?: string;
+  status?: string;
+  messageId?: string;
+  artifactId?: string;
+  role?: Message["role"];
+};
+export type StreamSuccessSummary = {
+  kind: "stream";
+  eventCount: number;
+  finalEventKind: StreamEventSummary["kind"];
+  taskId?: string;
+  status?: string;
+  messageId?: string;
+  artifactId?: string;
+};
 export type OperationRawMap = {
   [OPERATIONS.DELEGATE]: SendMessageResult;
+  [OPERATIONS.DELEGATE_STREAM]: StreamRawResult;
   [OPERATIONS.TASK_STATUS]: Task;
+  [OPERATIONS.TASK_RESUBSCRIBE]: StreamRawResult;
   [OPERATIONS.TASK_CANCEL]: Task;
 };
 
@@ -31,10 +70,110 @@ export type FailureEnvelope = {
   error: ToolError;
 };
 
+export type StreamUpdateEnvelope<T extends StreamOperation = StreamOperation> = {
+  ok: true;
+  operation: T;
+  phase: "update";
+  target: ResolvedTarget;
+  summary: StreamEventSummary;
+  raw: A2AStreamEventData;
+};
+
 export type A2AToolResult = SuccessEnvelope | FailureEnvelope;
 
 function taskState(task: Task): string {
   return task.status.state;
+}
+
+function terminalSummaryFields(summary: StreamEventSummary): Omit<
+  StreamSuccessSummary,
+  "kind" | "eventCount" | "finalEventKind"
+> {
+  return {
+    ...(summary.taskId !== undefined ? { taskId: summary.taskId } : {}),
+    ...(summary.status !== undefined ? { status: summary.status } : {}),
+    ...(summary.messageId !== undefined ? { messageId: summary.messageId } : {}),
+    ...(summary.artifactId !== undefined
+      ? { artifactId: summary.artifactId }
+      : {}),
+  };
+}
+
+function failureEnvelope(
+  operation: A2AOperation,
+  target: ResolvedTarget | undefined,
+  error: ToolError,
+): FailureEnvelope {
+  return {
+    ok: false,
+    operation,
+    ...(target ? { target } : {}),
+    error,
+  };
+}
+
+function streamSuccess<T extends StreamOperation>(
+  operation: T,
+  target: ResolvedTarget,
+  events: A2AStreamEventData[],
+): SuccessEnvelope<T> {
+  const finalEvent = events.at(-1);
+
+  if (!finalEvent) {
+    throw new TypeError("stream success requires at least one event");
+  }
+
+  const finalSummary = summarizeStreamEvent(finalEvent);
+
+  return {
+    ok: true,
+    operation,
+    target,
+    summary: {
+      kind: "stream",
+      eventCount: events.length,
+      finalEventKind: finalSummary.kind,
+      ...terminalSummaryFields(finalSummary),
+    },
+    raw: {
+      events,
+      finalEvent,
+    } as OperationRawMap[T],
+  };
+}
+
+export function summarizeStreamEvent(
+  event: A2AStreamEventData,
+): StreamEventSummary {
+  switch (event.kind) {
+    case "message":
+      return {
+        kind: "message",
+        ...(event.taskId !== undefined ? { taskId: event.taskId } : {}),
+        messageId: event.messageId,
+        role: event.role,
+      };
+    case "task":
+      return {
+        kind: "task",
+        taskId: event.id,
+        status: taskState(event),
+      };
+    case "status-update":
+      return {
+        kind: "status-update",
+        taskId: event.taskId,
+        status: event.status.state,
+      };
+    case "artifact-update":
+      return {
+        kind: "artifact-update",
+        taskId: event.taskId,
+        artifactId: event.artifact.artifactId,
+      };
+  }
+
+  throw new TypeError("unsupported A2A stream event kind");
 }
 
 export function delegateSuccess(
@@ -72,12 +211,21 @@ export function delegateFailure(
   target: ResolvedTarget | undefined,
   error: ToolError,
 ): FailureEnvelope {
-  return {
-    ok: false,
-    operation: OPERATIONS.DELEGATE,
-    ...(target ? { target } : {}),
-    error,
-  };
+  return failureEnvelope(OPERATIONS.DELEGATE, target, error);
+}
+
+export function delegateStreamSuccess(
+  target: ResolvedTarget,
+  events: A2AStreamEventData[],
+): SuccessEnvelope<typeof OPERATIONS.DELEGATE_STREAM> {
+  return streamSuccess(OPERATIONS.DELEGATE_STREAM, target, events);
+}
+
+export function delegateStreamFailure(
+  target: ResolvedTarget | undefined,
+  error: ToolError,
+): FailureEnvelope {
+  return failureEnvelope(OPERATIONS.DELEGATE_STREAM, target, error);
 }
 
 export function taskStatusSuccess(
@@ -101,12 +249,21 @@ export function taskStatusFailure(
   target: ResolvedTarget | undefined,
   error: ToolError,
 ): FailureEnvelope {
-  return {
-    ok: false,
-    operation: OPERATIONS.TASK_STATUS,
-    ...(target ? { target } : {}),
-    error,
-  };
+  return failureEnvelope(OPERATIONS.TASK_STATUS, target, error);
+}
+
+export function taskResubscribeSuccess(
+  target: ResolvedTarget,
+  events: A2AStreamEventData[],
+): SuccessEnvelope<typeof OPERATIONS.TASK_RESUBSCRIBE> {
+  return streamSuccess(OPERATIONS.TASK_RESUBSCRIBE, target, events);
+}
+
+export function taskResubscribeFailure(
+  target: ResolvedTarget | undefined,
+  error: ToolError,
+): FailureEnvelope {
+  return failureEnvelope(OPERATIONS.TASK_RESUBSCRIBE, target, error);
 }
 
 export function taskCancelSuccess(
@@ -130,10 +287,20 @@ export function taskCancelFailure(
   target: ResolvedTarget | undefined,
   error: ToolError,
 ): FailureEnvelope {
+  return failureEnvelope(OPERATIONS.TASK_CANCEL, target, error);
+}
+
+export function streamUpdate<T extends StreamOperation>(
+  operation: T,
+  target: ResolvedTarget,
+  raw: A2AStreamEventData,
+): StreamUpdateEnvelope<T> {
   return {
-    ok: false,
-    operation: OPERATIONS.TASK_CANCEL,
-    ...(target ? { target } : {}),
-    error,
+    ok: true,
+    operation,
+    phase: "update",
+    target,
+    summary: summarizeStreamEvent(raw),
+    raw,
   };
 }

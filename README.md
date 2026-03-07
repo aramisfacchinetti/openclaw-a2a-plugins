@@ -11,7 +11,7 @@ Today, the only implemented package intended for use is [`@aramisfa/openclaw-a2a
 
 ## Getting Started
 
-Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). It is the supported package in this repository today. It lets OpenClaw delegate work to external A2A agents, then track or cancel that delegated work.
+Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). It is the supported package in this repository today. It lets OpenClaw delegate work to external A2A agents, stream live updates, resubscribe to running tasks, and track or cancel delegated work.
 
 ### Prerequisites
 
@@ -58,10 +58,12 @@ Current usable functionality is provided by `@aramisfa/openclaw-a2a-outbound` on
 It registers these OpenClaw tools:
 
 - `a2a_delegate`
+- `a2a_delegate_stream`
 - `a2a_task_status`
+- `a2a_task_resubscribe`
 - `a2a_task_cancel`
 
-At a high level, the outbound plugin lets OpenClaw delegate work to external A2A agents, then check or cancel delegated tasks later.
+The streaming tools emit OpenClaw tool updates for each A2A stream event and finish with a self-contained transcript payload containing the full event log.
 
 Plugin id: `a2a-outbound`
 

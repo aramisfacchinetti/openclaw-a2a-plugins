@@ -19,12 +19,47 @@ type SDKPluginEntry = {
   register(api: OpenClawPluginApi): void;
 };
 
-function resolveToolInput(args: unknown[]): unknown {
+type ToolExecuteUpdate = ReturnType<typeof jsonResult>;
+
+type ResolvedExecuteArgs = {
+  params: unknown;
+  signal?: AbortSignal;
+  onUpdate?: (update: ToolExecuteUpdate) => void;
+};
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "aborted" in value &&
+    typeof (value as AbortSignal).aborted === "boolean" &&
+    "addEventListener" in value &&
+    typeof (value as AbortSignal).addEventListener === "function"
+  );
+}
+
+function resolveExecuteArgs(args: unknown[]): ResolvedExecuteArgs {
   if (typeof args[0] === "string" && args[1] !== undefined) {
-    return args[1];
+    const [, params, maybeSignal, maybeOnUpdate] = args;
+
+    return {
+      params,
+      ...(isAbortSignal(maybeSignal) ? { signal: maybeSignal } : {}),
+      ...(typeof maybeOnUpdate === "function"
+        ? { onUpdate: maybeOnUpdate as ResolvedExecuteArgs["onUpdate"] }
+        : {}),
+    };
   }
 
-  return args[0];
+  const [params, maybeSignal, maybeOnUpdate] = args;
+
+  return {
+    params,
+    ...(isAbortSignal(maybeSignal) ? { signal: maybeSignal } : {}),
+    ...(typeof maybeOnUpdate === "function"
+      ? { onUpdate: maybeOnUpdate as ResolvedExecuteArgs["onUpdate"] }
+      : {}),
+  };
 }
 
 function registerTools(api: OpenClawPluginApi): void {
@@ -44,25 +79,67 @@ function registerTools(api: OpenClawPluginApi): void {
 
   const delegateTool: AnyAgentTool = {
     ...TOOL_DEFINITIONS.a2a_delegate,
-    execute: async (...args: unknown[]) =>
-      jsonResult(await service.delegate(resolveToolInput(args))),
+    execute: async (...args: unknown[]) => {
+      const { params, signal } = resolveExecuteArgs(args);
+      return jsonResult(await service.delegate(params, { signal }));
+    },
+  };
+
+  const delegateStreamTool: AnyAgentTool = {
+    ...TOOL_DEFINITIONS.a2a_delegate_stream,
+    execute: async (...args: unknown[]) => {
+      const { params, signal, onUpdate } = resolveExecuteArgs(args);
+      return jsonResult(
+        await service.delegateStream(params, {
+          signal,
+          onUpdate:
+            onUpdate !== undefined
+              ? (update) => onUpdate(jsonResult(update))
+              : undefined,
+        }),
+      );
+    },
   };
 
   const statusTool: AnyAgentTool = {
     ...TOOL_DEFINITIONS.a2a_task_status,
-    execute: async (...args: unknown[]) =>
-      jsonResult(await service.status(resolveToolInput(args))),
+    execute: async (...args: unknown[]) => {
+      const { params, signal } = resolveExecuteArgs(args);
+      return jsonResult(await service.status(params, { signal }));
+    },
+  };
+
+  const resubscribeTool: AnyAgentTool = {
+    ...TOOL_DEFINITIONS.a2a_task_resubscribe,
+    execute: async (...args: unknown[]) => {
+      const { params, signal, onUpdate } = resolveExecuteArgs(args);
+      return jsonResult(
+        await service.resubscribe(params, {
+          signal,
+          onUpdate:
+            onUpdate !== undefined
+              ? (update) => onUpdate(jsonResult(update))
+              : undefined,
+        }),
+      );
+    },
   };
 
   const cancelTool: AnyAgentTool = {
     ...TOOL_DEFINITIONS.a2a_task_cancel,
-    execute: async (...args: unknown[]) =>
-      jsonResult(await service.cancel(resolveToolInput(args))),
+    execute: async (...args: unknown[]) => {
+      const { params, signal } = resolveExecuteArgs(args);
+      return jsonResult(await service.cancel(params, { signal }));
+    },
   };
 
   api.registerTool(delegateTool, { optional: true });
 
+  api.registerTool(delegateStreamTool, { optional: true });
+
   api.registerTool(statusTool, { optional: true });
+
+  api.registerTool(resubscribeTool, { optional: true });
 
   api.registerTool(cancelTool, { optional: true });
 

@@ -12,22 +12,35 @@ import type { A2AOutboundPluginConfig } from '../dist/config.js'
 
 type JsonObject = Record<string, unknown>
 
+type SseResponse = {
+  result?: JsonObject
+  error?: JsonObject
+  delayMs?: number
+}
+
 type StartPeerOptions = {
   cardPath?: string
   rpcPath?: string
+  streaming?: boolean
   sendDelayMs?: number
   sendResult?: JsonObject
   getTaskResult?: JsonObject
   cancelTaskResult?: JsonObject
+  streamResponses?: SseResponse[]
+  resubscribeResponses?: SseResponse[]
 }
 
 type PeerState = {
   lastRpcHeaders?: IncomingHttpHeaders
   lastSendParams?: JsonObject
   lastGetTaskParams?: JsonObject
+  lastStreamParams?: JsonObject
+  lastResubscribeParams?: JsonObject
   sendCalls: number
+  streamCalls: number
   getCalls: number
   cancelCalls: number
+  resubscribeCalls: number
 }
 
 type StartedPeer = {
@@ -64,12 +77,18 @@ function asRecord(value: unknown): JsonObject {
 }
 
 function asSuccess(result: A2AToolResult): SuccessEnvelope {
-  assert.equal(result.ok, true)
+  if (result.ok !== true) {
+    throw new TypeError('expected success result')
+  }
+
   return result
 }
 
 function asFailure(result: A2AToolResult): FailureEnvelope {
-  assert.equal(result.ok, false)
+  if (result.ok !== false) {
+    throw new TypeError('expected failure result')
+  }
+
   return result
 }
 
@@ -77,6 +96,14 @@ function json(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify(body))
+}
+
+function writeSse(res: ServerResponse, body: unknown): void {
+  res.write(`data: ${JSON.stringify(body)}\n\n`)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function readJson(req: IncomingMessage): Promise<JsonObject> {
@@ -97,6 +124,31 @@ function readJson(req: IncomingMessage): Promise<JsonObject> {
   })
 }
 
+async function sendSseResponses(
+  res: ServerResponse,
+  id: unknown,
+  responses: SseResponse[],
+): Promise<void> {
+  res.statusCode = 200
+  res.setHeader('Content-Type', 'text/event-stream')
+
+  for (const response of responses) {
+    if (response.delayMs) {
+      await sleep(response.delayMs)
+    }
+
+    writeSse(res, {
+      jsonrpc: '2.0',
+      id,
+      ...(response.result !== undefined
+        ? { result: response.result }
+        : { error: response.error ?? { code: -32004, message: 'stream failure' } }),
+    })
+  }
+
+  res.end()
+}
+
 function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
   const cardPath = options.cardPath ?? '/.well-known/agent-card.json'
   const rpcPath = options.rpcPath ?? '/a2a/jsonrpc'
@@ -105,9 +157,13 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
     lastRpcHeaders: undefined,
     lastSendParams: undefined,
     lastGetTaskParams: undefined,
+    lastStreamParams: undefined,
+    lastResubscribeParams: undefined,
     sendCalls: 0,
+    streamCalls: 0,
     getCalls: 0,
     cancelCalls: 0,
+    resubscribeCalls: 0,
   }
 
   const server = http.createServer(async (req, res) => {
@@ -126,7 +182,7 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
         url: `${baseUrl}${rpcPath}`,
         preferredTransport: 'JSONRPC',
         capabilities: {
-          streaming: false,
+          streaming: options.streaming ?? false,
           pushNotifications: false,
           stateTransitionHistory: false,
         },
@@ -153,7 +209,7 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
         state.lastSendParams = payloadParams
 
         if (options.sendDelayMs) {
-          await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs))
+          await sleep(options.sendDelayMs)
         }
 
         return json(res, 200, {
@@ -167,6 +223,13 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
               parts: [{ kind: 'text', text: 'ack' }],
             },
         })
+      }
+
+      if (payload.method === 'message/stream') {
+        state.streamCalls += 1
+        state.lastStreamParams = payloadParams
+
+        return await sendSseResponses(res, payload.id, options.streamResponses ?? [])
       }
 
       if (payload.method === 'tasks/get') {
@@ -204,6 +267,17 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
               },
             },
         })
+      }
+
+      if (payload.method === 'tasks/resubscribe') {
+        state.resubscribeCalls += 1
+        state.lastResubscribeParams = payloadParams
+
+        return await sendSseResponses(
+          res,
+          payload.id,
+          options.resubscribeResponses ?? [],
+        )
       }
 
       return json(res, 200, {
@@ -419,6 +493,110 @@ test('delegate forwards request.configuration unchanged in message/send params',
   })
 })
 
+test('delegate stream success returns event log and emits updates', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-stream-1',
+          contextId: 'ctx-stream-1',
+          status: {
+            state: 'submitted',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'status-update',
+          taskId: 'task-stream-1',
+          contextId: 'ctx-stream-1',
+          status: {
+            state: 'completed',
+          },
+          final: true,
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const updates: Array<Record<string, unknown>> = []
+  const result = await service.delegateStream(
+    {
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: userMessageRequest('stream hello'),
+    },
+    {
+      onUpdate(update) {
+        updates.push(asRecord(update))
+      },
+    },
+  )
+
+  const success = asSuccess(result)
+  const raw = asRecord(success.raw)
+
+  assert.equal(success.operation, 'a2a_delegate_stream')
+  assert.equal(success.summary.kind, 'stream')
+  assert.equal(success.summary.eventCount, 2)
+  assert.equal(success.summary.finalEventKind, 'status-update')
+  assert.equal(success.summary.taskId, 'task-stream-1')
+  assert.equal(success.summary.status, 'completed')
+  assert.ok(Array.isArray(raw.events))
+  assert.equal((raw.events as unknown[]).length, 2)
+  assert.equal(asRecord(raw.finalEvent).kind, 'status-update')
+  assert.equal(peer.state.streamCalls, 1)
+  assert.equal(asRecord(peer.state.lastStreamParams ?? {}).message.messageId, 'user-msg-1')
+
+  assert.equal(updates.length, 2)
+  assert.equal(updates[0].operation, 'a2a_delegate_stream')
+  assert.equal(updates[0].phase, 'update')
+  assert.equal(asRecord(updates[0].summary).kind, 'task')
+  assert.equal(asRecord(updates[1].summary).kind, 'status-update')
+  assert.equal(asRecord(updates[1].summary).status, 'completed')
+})
+
+test('delegate stream falls back to a single non-streaming send result', async (t) => {
+  const peer = await startPeer({
+    streaming: false,
+    sendResult: {
+      kind: 'message',
+      messageId: 'fallback-message-1',
+      role: 'agent',
+      parts: [{ kind: 'text', text: 'fallback' }],
+    },
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.delegateStream({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('fallback please'),
+  })
+
+  const success = asSuccess(result)
+  const raw = asRecord(success.raw)
+
+  assert.equal(success.operation, 'a2a_delegate_stream')
+  assert.equal(success.summary.kind, 'stream')
+  assert.equal(success.summary.eventCount, 1)
+  assert.equal(success.summary.finalEventKind, 'message')
+  assert.equal(success.summary.messageId, 'fallback-message-1')
+  assert.ok(Array.isArray(raw.events))
+  assert.equal((raw.events as unknown[]).length, 1)
+  assert.equal(peer.state.sendCalls, 1)
+  assert.equal(peer.state.streamCalls, 0)
+})
+
 test('task status success returns normalized envelope and raw payload', async (t) => {
   const peer = await startPeer()
   t.after(() => peer.server.close())
@@ -448,6 +626,64 @@ test('task status success returns normalized envelope and raw payload', async (t
   assert.equal(peer.state.lastGetTaskParams.historyLength, 3)
 })
 
+test('task resubscribe success returns normalized stream envelope', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    resubscribeResponses: [
+      {
+        result: {
+          kind: 'status-update',
+          taskId: 'task-resubscribe-1',
+          contextId: 'ctx-resubscribe-1',
+          status: {
+            state: 'working',
+          },
+          final: false,
+        },
+      },
+      {
+        result: {
+          kind: 'artifact-update',
+          taskId: 'task-resubscribe-1',
+          contextId: 'ctx-resubscribe-1',
+          artifact: {
+            artifactId: 'artifact-1',
+            parts: [{ kind: 'text', text: 'artifact chunk' }],
+          },
+          lastChunk: true,
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.resubscribe({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-resubscribe-1',
+    },
+  })
+
+  const success = asSuccess(result)
+  const raw = asRecord(success.raw)
+
+  assert.equal(success.operation, 'a2a_task_resubscribe')
+  assert.equal(success.summary.kind, 'stream')
+  assert.equal(success.summary.eventCount, 2)
+  assert.equal(success.summary.finalEventKind, 'artifact-update')
+  assert.equal(success.summary.taskId, 'task-resubscribe-1')
+  assert.equal(success.summary.artifactId, 'artifact-1')
+  assert.ok(Array.isArray(raw.events))
+  assert.equal((raw.events as unknown[]).length, 2)
+  assert.equal(asRecord(raw.finalEvent).kind, 'artifact-update')
+  assert.equal(peer.state.resubscribeCalls, 1)
+  assert.equal(asRecord(peer.state.lastResubscribeParams ?? {}).id, 'task-resubscribe-1')
+})
+
 test('task cancel success returns normalized envelope and raw payload', async (t) => {
   const peer = await startPeer()
   t.after(() => peer.server.close())
@@ -471,6 +707,179 @@ test('task cancel success returns normalized envelope and raw payload', async (t
   assert.equal(success.summary.status, 'canceled')
   assert.equal(raw.id, 'task-13')
   assert.equal(peer.state.cancelCalls, 1)
+})
+
+test('delegate stream treats an empty stream as failure', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.delegateStream({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('empty stream'),
+  })
+
+  const failure = asFailure(result)
+
+  assert.equal(failure.operation, 'a2a_delegate_stream')
+  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
+  assert.equal(failure.error.message, 'stream ended without events')
+})
+
+test('delegate stream decorates mid-stream failures with partial event details', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-partial-1',
+          contextId: 'ctx-partial-1',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+      {
+        error: {
+          code: -32004,
+          message: 'stream exploded',
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.delegateStream({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('partial stream'),
+  })
+
+  const failure = asFailure(result)
+  const details = asRecord(failure.error.details)
+
+  assert.equal(failure.operation, 'a2a_delegate_stream')
+  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
+  assert.equal(details.partialEventCount, 1)
+  assert.equal(asRecord(details.latestEventSummary).kind, 'task')
+  assert.equal(asRecord(details.latestEventSummary).taskId, 'task-partial-1')
+})
+
+test('delegate stream timeout handling maps to SDK timeout error', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-timeout-1',
+          contextId: 'ctx-timeout-1',
+          status: {
+            state: 'submitted',
+          },
+        },
+        delayMs: 80,
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    defaults: {
+      timeoutMs: 10,
+      cardPath: '/.well-known/agent-card.json',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+      serviceParameters: {},
+    },
+  })
+
+  const result = await service.delegateStream({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: userMessageRequest('slow stream'),
+  })
+
+  const failure = asFailure(result)
+
+  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
+  assert.equal(failure.error.message, 'request timed out')
+})
+
+test('delegate stream abort handling preserves partial event details', async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-abort-1',
+          contextId: 'ctx-abort-1',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'status-update',
+          taskId: 'task-abort-1',
+          contextId: 'ctx-abort-1',
+          status: {
+            state: 'completed',
+          },
+          final: true,
+        },
+        delayMs: 80,
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    defaults: {
+      timeoutMs: 500,
+      cardPath: '/.well-known/agent-card.json',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+      serviceParameters: {},
+    },
+  })
+  const controller = new AbortController()
+
+  const result = await service.delegateStream(
+    {
+      target: {
+        baseUrl: peer.baseUrl,
+        cardPath: peer.cardPath,
+      },
+      request: userMessageRequest('abort stream'),
+    },
+    {
+      signal: controller.signal,
+      onUpdate() {
+        controller.abort()
+      },
+    },
+  )
+
+  const failure = asFailure(result)
+  const details = asRecord(failure.error.details)
+
+  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
+  assert.equal(failure.error.message, 'request timed out')
+  assert.equal(details.partialEventCount, 1)
+  assert.equal(asRecord(details.latestEventSummary).taskId, 'task-abort-1')
 })
 
 test('malformed input returns validation envelope', async () => {

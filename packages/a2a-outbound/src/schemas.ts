@@ -300,6 +300,39 @@ export const CANCEL_INPUT_SCHEMA = {
   required: ["target", "request"],
 };
 
+export const DELEGATE_STREAM_INPUT_SCHEMA = DELEGATE_INPUT_SCHEMA;
+
+export const RESUBSCRIBE_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    target: TARGET_SCHEMA,
+    request: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: {
+          type: "string",
+          minLength: 1,
+          description: "Remote task id to resubscribe to.",
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional timeout override for this operation.",
+        },
+        serviceParameters: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Optional service parameters for this operation.",
+        },
+      },
+      required: ["taskId"],
+    },
+  },
+  required: ["target", "request"],
+};
+
 export type ToolDefinition = {
   name: string;
   label: string;
@@ -314,11 +347,24 @@ export const TOOL_DEFINITIONS = {
     description: "Delegate a request to an external A2A agent.",
     parameters: DELEGATE_INPUT_SCHEMA,
   },
+  a2a_delegate_stream: {
+    name: "a2a_delegate_stream",
+    label: "A2A Delegate Stream",
+    description:
+      "Delegate a request to an external A2A agent and stream updates.",
+    parameters: DELEGATE_STREAM_INPUT_SCHEMA,
+  },
   a2a_task_status: {
     name: "a2a_task_status",
     label: "A2A Task Status",
     description: "Fetch status for an external A2A task.",
     parameters: STATUS_INPUT_SCHEMA,
+  },
+  a2a_task_resubscribe: {
+    name: "a2a_task_resubscribe",
+    label: "A2A Task Resubscribe",
+    description: "Reconnect to streaming updates for an external A2A task.",
+    parameters: RESUBSCRIBE_INPUT_SCHEMA,
   },
   a2a_task_cancel: {
     name: "a2a_task_cancel",
@@ -342,9 +388,17 @@ export interface DelegateRequestInput {
   configuration?: MessageSendParams["configuration"];
 }
 
+export interface DelegateStreamRequestInput extends DelegateRequestInput {}
+
 export interface StatusRequestInput {
   taskId: string;
   historyLength?: number;
+  timeoutMs?: number;
+  serviceParameters?: Record<string, string>;
+}
+
+export interface ResubscribeRequestInput {
+  taskId: string;
   timeoutMs?: number;
   serviceParameters?: Record<string, string>;
 }
@@ -360,9 +414,19 @@ export interface DelegateToolInput {
   request: DelegateRequestInput;
 }
 
+export interface DelegateStreamToolInput {
+  target: A2ATargetInput;
+  request: DelegateStreamRequestInput;
+}
+
 export interface StatusToolInput {
   target: A2ATargetInput;
   request: StatusRequestInput;
+}
+
+export interface ResubscribeToolInput {
+  target: A2ATargetInput;
+  request: ResubscribeRequestInput;
 }
 
 export interface CancelToolInput {
@@ -373,7 +437,9 @@ export interface CancelToolInput {
 const ajv = createA2AOutboundAjv();
 
 const validateDelegateSchema = ajv.compile(DELEGATE_INPUT_SCHEMA);
+const validateDelegateStreamSchema = ajv.compile(DELEGATE_STREAM_INPUT_SCHEMA);
 const validateStatusSchema = ajv.compile(STATUS_INPUT_SCHEMA);
+const validateResubscribeSchema = ajv.compile(RESUBSCRIBE_INPUT_SCHEMA);
 const validateCancelSchema = ajv.compile(CANCEL_INPUT_SCHEMA);
 
 export function validateDelegateInput(input: unknown): DelegateToolInput {
@@ -383,11 +449,35 @@ export function validateDelegateInput(input: unknown): DelegateToolInput {
   return input as unknown as DelegateToolInput;
 }
 
+export function validateDelegateStreamInput(
+  input: unknown,
+): DelegateStreamToolInput {
+  if (!validateDelegateStreamSchema(input)) {
+    toValidationError(
+      "a2a_delegate_stream",
+      [...validateDelegateStreamSchema.errors!],
+    );
+  }
+  return input as unknown as DelegateStreamToolInput;
+}
+
 export function validateStatusInput(input: unknown): StatusToolInput {
   if (!validateStatusSchema(input)) {
     toValidationError("a2a_task_status", [...validateStatusSchema.errors!]);
   }
   return input as unknown as StatusToolInput;
+}
+
+export function validateResubscribeInput(
+  input: unknown,
+): ResubscribeToolInput {
+  if (!validateResubscribeSchema(input)) {
+    toValidationError(
+      "a2a_task_resubscribe",
+      [...validateResubscribeSchema.errors!],
+    );
+  }
+  return input as unknown as ResubscribeToolInput;
 }
 
 export function validateCancelInput(input: unknown): CancelToolInput {

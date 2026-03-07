@@ -1,8 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  TOOL_DEFINITIONS,
   validateCancelInput,
   validateDelegateInput,
+  validateDelegateStreamInput,
+  validateResubscribeInput,
   validateStatusInput,
 } from '../dist/schemas.js'
 
@@ -83,6 +86,44 @@ test('validateDelegateInput accepts strict SDK-native delegate envelope', () => 
   assert.ok(out.request.metadata)
   assert.equal(out.request.metadata.ticket, '123')
   assert.deepEqual(out.request.configuration, configuration)
+})
+
+test('validateDelegateStreamInput accepts the delegate streaming envelope', () => {
+  const out = validateDelegateStreamInput({
+    target: {
+      baseUrl: 'http://peer.example',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+    },
+    request: {
+      message: {
+        kind: 'message',
+        messageId: 'msg-stream-1',
+        role: 'user',
+        parts: [{ kind: 'text', text: 'hello stream' }],
+      },
+      timeoutMs: 5000,
+      serviceParameters: {
+        'X-Trace-Id': 'trace-stream-1',
+      },
+      metadata: {
+        ticket: 'stream-123',
+      },
+      configuration: {
+        blocking: true,
+        acceptedOutputModes: ['text/plain'],
+      },
+    },
+  })
+
+  assert.equal(out.target.baseUrl, 'http://peer.example')
+  assert.equal(out.request.message.messageId, 'msg-stream-1')
+  assert.equal(out.request.timeoutMs, 5000)
+  assert.equal(out.request.serviceParameters?.['X-Trace-Id'], 'trace-stream-1')
+  assert.equal(out.request.metadata?.ticket, 'stream-123')
+  assert.deepEqual(out.request.configuration, {
+    blocking: true,
+    acceptedOutputModes: ['text/plain'],
+  })
 })
 
 test('validateDelegateInput accepts valid text, file(uri), file(bytes), and data parts', () => {
@@ -459,6 +500,30 @@ test('validateDelegateInput rejects legacy aliases and malformed target shapes',
   )
 })
 
+test('validateDelegateStreamInput rejects missing request.message', () => {
+  assert.throws(
+    () =>
+      validateDelegateStreamInput({
+        target: {
+          baseUrl: 'http://peer.example',
+        },
+        request: {
+          timeoutMs: 1000,
+        },
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'required' &&
+          e.instancePath === '/request' &&
+          isRecord(e.params) &&
+          e.params.missingProperty === 'message',
+      ),
+  )
+})
+
 test('validateStatusInput enforces nested request.taskId contract', () => {
   const out = validateStatusInput({
     target: {
@@ -485,6 +550,38 @@ test('validateStatusInput enforces nested request.taskId contract', () => {
           baseUrl: 'http://peer.example',
         },
         taskId: 'legacy-1',
+      }),
+    (error: unknown) => isValidationError(error),
+  )
+})
+
+test('validateResubscribeInput enforces nested request.taskId contract', () => {
+  const out = validateResubscribeInput({
+    target: {
+      baseUrl: 'http://peer.example',
+      cardPath: '/agent-card.json',
+    },
+    request: {
+      taskId: 'task-stream-1',
+      timeoutMs: 750,
+      serviceParameters: {
+        'X-Trace-Id': 'trace-stream-2',
+      },
+    },
+  })
+
+  assert.equal(out.target.cardPath, '/agent-card.json')
+  assert.equal(out.request.taskId, 'task-stream-1')
+  assert.equal(out.request.timeoutMs, 750)
+  assert.equal(out.request.serviceParameters?.['X-Trace-Id'], 'trace-stream-2')
+
+  assert.throws(
+    () =>
+      validateResubscribeInput({
+        target: {
+          baseUrl: 'http://peer.example',
+        },
+        taskId: 'legacy-stream-1',
       }),
     (error: unknown) => isValidationError(error),
   )
@@ -521,5 +618,25 @@ test('validateCancelInput enforces nested request.taskId contract', () => {
         },
       }),
     (error: unknown) => isValidationError(error),
+  )
+})
+
+test('TOOL_DEFINITIONS exposes all five outbound A2A tools', () => {
+  assert.deepEqual(Object.keys(TOOL_DEFINITIONS).sort(), [
+    'a2a_delegate',
+    'a2a_delegate_stream',
+    'a2a_task_cancel',
+    'a2a_task_resubscribe',
+    'a2a_task_status',
+  ])
+
+  assert.equal(TOOL_DEFINITIONS.a2a_delegate_stream.name, 'a2a_delegate_stream')
+  assert.equal(
+    TOOL_DEFINITIONS.a2a_task_resubscribe.name,
+    'a2a_task_resubscribe',
+  )
+  assert.deepEqual(
+    TOOL_DEFINITIONS.a2a_delegate_stream.parameters,
+    TOOL_DEFINITIONS.a2a_delegate.parameters,
   )
 })
