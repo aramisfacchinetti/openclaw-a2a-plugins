@@ -1,0 +1,68 @@
+{
+  "name": "@aramisfa/openclaw-a2a-outbound",
+  "version": "0.1.0",
+  "description": "Native OpenClaw outbound A2A delegation plugin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openclaw/openclaw-a2a-plugins.git",
+    "directory": "packages/a2a-outbound"
+  },
+  "bugs": {
+    "url": "https://github.com/openclaw/openclaw-a2a-plugins/issues"
+  },
+  "homepage": "https://github.com/openclaw/openclaw-a2a-plugins/tree/main/packages/a2a-outbound#readme",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "a2a",
+    "agent-to-agent",
+    "delegation"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck:src": "tsc -b --pretty false",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --pretty false",
+    "typecheck": "corepack pnpm run typecheck:src && corepack pnpm run typecheck:tests",
+    "test": "corepack pnpm run build && node --import tsx --test tests/*.test.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.10",
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1",
+    "openclaw": "2026.3.2"
+  },
+  "peerDependencies": {
+    "openclaw": "2026.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+packages/*/dist/
+dist/
+coverage/
+.nyc_output/
+
+# TypeScript incremental build state
+*.tsbuildinfo
+
+# Package manager logs and caches
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+*.tgz
+.npm/
+
+# Lint caches
+.eslintcache
+.stylelintcache
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+
+AGENTS.md
+CLAUDE.md

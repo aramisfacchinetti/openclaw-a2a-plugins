@@ -1,0 +1,61 @@
+{
+  "id": "a2a-outbound",
+  "name": "External A2A Delegation",
+  "version": "0.1.0",
+  "entry": "./dist/index.js",
+  "description": "Delegate requests to external A2A agents and manage delegated tasks.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": false },
+      "defaults": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 120000
+          },
+          "cardPath": {
+            "type": "string",
+            "default": "/.well-known/agent-card.json"
+          },
+          "preferredTransports": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["JSONRPC", "HTTP+JSON", "GRPC"]
+            },
+            "default": ["JSONRPC", "HTTP+JSON"]
+          },
+          "serviceParameters": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "default": {}
+          }
+        }
+      },
+      "policy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "acceptedOutputModes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "normalizeBaseUrl": {
+            "type": "boolean",
+            "default": true
+          },
+          "enforceSupportedTransports": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}

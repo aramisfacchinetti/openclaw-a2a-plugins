@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/a2a-outbound" },
+    { "path": "./packages/a2a-inbound" },
+  ],
+}

@@ -1,0 +1,19 @@
+{
+  "name": "openclaw-a2a-plugin",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "corepack pnpm -r --if-present run test",
+    "clean": "corepack pnpm -r run clean",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.6",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.9.3"
+  }
+}
