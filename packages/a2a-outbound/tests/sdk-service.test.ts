@@ -23,6 +23,7 @@ type StartPeerOptions = {
 
 type PeerState = {
   lastRpcHeaders?: IncomingHttpHeaders
+  lastSendParams?: JsonObject
   lastGetTaskParams?: JsonObject
   sendCalls: number
   getCalls: number
@@ -102,6 +103,7 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
 
   const state: PeerState = {
     lastRpcHeaders: undefined,
+    lastSendParams: undefined,
     lastGetTaskParams: undefined,
     sendCalls: 0,
     getCalls: 0,
@@ -148,6 +150,7 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
 
       if (payload.method === 'message/send') {
         state.sendCalls += 1
+        state.lastSendParams = payloadParams
 
         if (options.sendDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs))
@@ -359,6 +362,63 @@ test('delegate success accepts fully valid SDK message shape', async (t) => {
   assert.equal(peer.state.sendCalls, 1)
 })
 
+test('delegate forwards request.configuration unchanged in message/send params', async (t) => {
+  const peer = await startPeer()
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    policy: {
+      acceptedOutputModes: ['text/plain'],
+      normalizeBaseUrl: true,
+      enforceSupportedTransports: true,
+    },
+  })
+  const message = {
+    kind: 'message' as const,
+    messageId: 'user-msg-config-1',
+    role: 'user' as const,
+    parts: [{ kind: 'text' as const, text: 'configuration passthrough' }],
+  }
+  const metadata = {
+    requestId: 'req-config-1',
+  }
+  const configuration = {
+    blocking: true,
+    acceptedOutputModes: ['application/json'],
+    historyLength: 5,
+    pushNotificationConfig: {
+      url: 'https://notify.example/hooks/123',
+      id: 'push-1',
+      token: 'push-token',
+      authentication: {
+        schemes: ['Bearer', 'Basic'],
+        credentials: 'credential-1',
+      },
+    },
+  }
+
+  const result = await service.delegate({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      message,
+      metadata,
+      configuration,
+    },
+  })
+
+  asSuccess(result)
+
+  assert.ok(peer.state.lastSendParams)
+  assert.deepEqual(peer.state.lastSendParams, {
+    message,
+    metadata,
+    configuration,
+  })
+})
+
 test('task status success returns normalized envelope and raw payload', async (t) => {
   const peer = await startPeer()
   t.after(() => peer.server.close())
@@ -517,6 +577,8 @@ test('serviceParameters merge defaults and per-call overrides', async (t) => {
   asSuccess(result)
 
   assert.ok(peer.state.lastRpcHeaders)
+  assert.ok(peer.state.lastSendParams)
   assert.equal(peer.state.lastRpcHeaders['x-from-input'], 'input')
   assert.equal(peer.state.lastRpcHeaders['x-from-config'], 'override')
+  assert.equal('serviceParameters' in peer.state.lastSendParams, false)
 })

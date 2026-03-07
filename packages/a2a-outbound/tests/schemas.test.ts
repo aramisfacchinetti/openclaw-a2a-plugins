@@ -35,6 +35,21 @@ function hasAjvError(
 }
 
 test('validateDelegateInput accepts strict SDK-native delegate envelope', () => {
+  const configuration = {
+    blocking: true,
+    acceptedOutputModes: ['text/plain', 'application/json'],
+    historyLength: 4,
+    pushNotificationConfig: {
+      url: 'https://notify.example/hooks/123',
+      id: 'push-1',
+      token: 'push-token',
+      authentication: {
+        schemes: ['Bearer', 'Basic'],
+        credentials: 'credential-1',
+      },
+    },
+  }
+
   const out = validateDelegateInput({
     target: {
       baseUrl: 'http://peer.example',
@@ -54,6 +69,7 @@ test('validateDelegateInput accepts strict SDK-native delegate envelope', () => 
       metadata: {
         ticket: '123',
       },
+      configuration,
     },
   })
 
@@ -66,6 +82,7 @@ test('validateDelegateInput accepts strict SDK-native delegate envelope', () => 
   assert.equal(out.request.serviceParameters['X-Trace-Id'], 'trace-1')
   assert.ok(out.request.metadata)
   assert.equal(out.request.metadata.ticket, '123')
+  assert.deepEqual(out.request.configuration, configuration)
 })
 
 test('validateDelegateInput accepts valid text, file(uri), file(bytes), and data parts', () => {
@@ -276,6 +293,129 @@ test('validateDelegateInput rejects file part without uri and bytes', () => {
       ),
   )
 })
+
+const delegateConfigurationValidationCases = [
+  {
+    name: 'unknown configuration keys',
+    input: {
+      blocking: true,
+      unexpected: true,
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'additionalProperties' &&
+          e.instancePath === '/request/configuration' &&
+          isRecord(e.params) &&
+          e.params.additionalProperty === 'unexpected',
+      ),
+  },
+  {
+    name: 'non-boolean configuration.blocking',
+    input: {
+      blocking: 'yes',
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'type' &&
+          e.instancePath === '/request/configuration/blocking',
+      ),
+  },
+  {
+    name: 'non-array configuration.acceptedOutputModes',
+    input: {
+      acceptedOutputModes: 'text/plain',
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'type' &&
+          e.instancePath === '/request/configuration/acceptedOutputModes',
+      ),
+  },
+  {
+    name: 'negative configuration.historyLength',
+    input: {
+      historyLength: -1,
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'minimum' &&
+          e.instancePath === '/request/configuration/historyLength',
+      ),
+  },
+  {
+    name: 'configuration.pushNotificationConfig without url',
+    input: {
+      pushNotificationConfig: {
+        token: 'push-token',
+      },
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'required' &&
+          e.instancePath === '/request/configuration/pushNotificationConfig' &&
+          isRecord(e.params) &&
+          e.params.missingProperty === 'url',
+      ),
+  },
+  {
+    name: 'configuration.pushNotificationConfig.authentication.schemes with invalid type',
+    input: {
+      pushNotificationConfig: {
+        url: 'https://notify.example/hooks/123',
+        authentication: {
+          schemes: 'Bearer',
+        },
+      },
+    },
+    predicate: (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'type' &&
+          e.instancePath ===
+            '/request/configuration/pushNotificationConfig/authentication/schemes',
+      ),
+  },
+] as const
+
+for (const testCase of delegateConfigurationValidationCases) {
+  test(`validateDelegateInput rejects ${testCase.name}`, () => {
+    assert.throws(
+      () =>
+        validateDelegateInput({
+          target: {
+            baseUrl: 'http://peer.example',
+          },
+          request: {
+            message: {
+              kind: 'message',
+              messageId: 'msg-config',
+              role: 'user',
+              parts: [{ kind: 'text', text: 'hello' }],
+            },
+            configuration: testCase.input,
+          },
+        }),
+      testCase.predicate,
+    )
+  })
+}
 
 test('validateDelegateInput rejects legacy aliases and malformed target shapes', () => {
   assert.throws(

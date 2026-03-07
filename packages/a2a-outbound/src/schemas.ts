@@ -84,6 +84,83 @@ const DATA_PART_SCHEMA = {
   required: ["kind", "data"],
 };
 
+const PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    schemes: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Authentication schemes for MessageSendParams.configuration.pushNotificationConfig.authentication.schemes.",
+    },
+    credentials: {
+      type: "string",
+      description:
+        "Optional credentials for MessageSendParams.configuration.pushNotificationConfig.authentication.credentials.",
+    },
+  },
+  required: ["schemes"],
+};
+
+const PUSH_NOTIFICATION_CONFIG_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    url: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Callback URL for MessageSendParams.configuration.pushNotificationConfig.url.",
+    },
+    id: {
+      type: "string",
+      description:
+        "Optional identifier for MessageSendParams.configuration.pushNotificationConfig.id.",
+    },
+    token: {
+      type: "string",
+      description:
+        "Optional token for MessageSendParams.configuration.pushNotificationConfig.token.",
+    },
+    authentication: {
+      ...PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA,
+      description:
+        "Optional MessageSendParams.configuration.pushNotificationConfig.authentication payload.",
+    },
+  },
+  required: ["url"],
+};
+
+const MESSAGE_SEND_CONFIGURATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    blocking: {
+      type: "boolean",
+      description:
+        "Optional MessageSendParams.configuration.blocking passthrough.",
+    },
+    acceptedOutputModes: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Optional MessageSendParams.configuration.acceptedOutputModes passthrough.",
+    },
+    historyLength: {
+      type: "integer",
+      minimum: 0,
+      description:
+        "Optional MessageSendParams.configuration.historyLength passthrough.",
+    },
+    pushNotificationConfig: {
+      ...PUSH_NOTIFICATION_CONFIG_SCHEMA,
+      description:
+        "Optional MessageSendParams.configuration.pushNotificationConfig passthrough.",
+    },
+  },
+};
+
 const MESSAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -143,6 +220,11 @@ export const DELEGATE_INPUT_SCHEMA = {
           type: "object",
           additionalProperties: true,
           description: "Optional MessageSendParams.metadata payload.",
+        },
+        configuration: {
+          ...MESSAGE_SEND_CONFIGURATION_SCHEMA,
+          description:
+            "Optional MessageSendParams.configuration payload passed through unchanged.",
         },
       },
       required: ["message"],
@@ -257,6 +339,7 @@ export interface DelegateRequestInput {
   timeoutMs?: number;
   serviceParameters?: Record<string, string>;
   metadata?: MessageSendParams["metadata"];
+  configuration?: MessageSendParams["configuration"];
 }
 
 export interface StatusRequestInput {

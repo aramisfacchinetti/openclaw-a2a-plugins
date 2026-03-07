@@ -122,6 +122,9 @@ export class A2AOutboundService {
         ...(validated.request.metadata !== undefined
           ? { metadata: validated.request.metadata }
           : {}),
+        ...(validated.request.configuration !== undefined
+          ? { configuration: validated.request.configuration }
+          : {}),
       };
 
       const raw = await resolved.client.sendMessage(
