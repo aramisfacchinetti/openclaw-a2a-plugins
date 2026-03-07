@@ -1,4 +1,5 @@
-import type { Message, MessageSendParams } from "@a2a-js/sdk";
+import type { MessageSendParams } from "@a2a-js/sdk";
+import { type A2AOutboundPluginConfig } from "./config.js";
 import { ALL_TRANSPORTS, type A2ATransport } from "./constants.js";
 import {
   createA2AOutboundAjv,
@@ -6,12 +7,545 @@ import {
   type ErrorObject,
 } from "./ajv-validator.js";
 
-const MESSAGE_ROLES = ["user", "agent"] as const;
-const DEFAULT_WAIT_INITIAL_DELAY_MS = 250;
-const DEFAULT_WAIT_MAX_DELAY_MS = 5000;
-const DEFAULT_WAIT_BACKOFF_MULTIPLIER = 2;
+export const REMOTE_AGENT_TOOL_NAME = "remote_agent";
+export const REMOTE_AGENT_ACTIONS = [
+  "list_targets",
+  "send",
+  "watch",
+  "status",
+  "cancel",
+] as const;
 
-const TARGET_SCHEMA = {
+export type RemoteAgentAction = (typeof REMOTE_AGENT_ACTIONS)[number];
+
+const TASK_HANDLE_SCHEMA = {
+  type: "string",
+  minLength: 1,
+  pattern: "^rah_[A-Za-z0-9-]+$",
+  description:
+    "Opaque task handle issued by this plugin. Handles are process-local and invalidated by restarts.",
+} as const;
+
+const ATTACHMENT_METADATA_SCHEMA = {
+  type: "object",
+  additionalProperties: true,
+} as const;
+
+const FILE_ATTACHMENT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["file"] },
+    uri: {
+      type: "string",
+      minLength: 1,
+      description: "Remote file URI for the attachment.",
+    },
+    bytes: {
+      type: "string",
+      minLength: 1,
+      description: "Base64-encoded inline file content.",
+    },
+    name: {
+      type: "string",
+      minLength: 1,
+      description: "Optional filename.",
+    },
+    mime_type: {
+      type: "string",
+      minLength: 1,
+      description: "Optional MIME type.",
+    },
+    metadata: ATTACHMENT_METADATA_SCHEMA,
+  },
+  required: ["kind"],
+  anyOf: [{ required: ["uri"] }, { required: ["bytes"] }],
+} as const;
+
+const DATA_ATTACHMENT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["data"] },
+    data: {
+      type: "object",
+      additionalProperties: true,
+      description: "Structured attachment payload.",
+    },
+    metadata: ATTACHMENT_METADATA_SCHEMA,
+  },
+  required: ["kind", "data"],
+} as const;
+
+export interface A2ATargetInput {
+  baseUrl: string;
+  cardPath?: string;
+  preferredTransports?: A2ATransport[];
+}
+
+export interface RemoteAgentFileAttachmentInput {
+  kind: "file";
+  uri?: string;
+  bytes?: string;
+  name?: string;
+  mime_type?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RemoteAgentDataAttachmentInput {
+  kind: "data";
+  data: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export type RemoteAgentAttachmentInput =
+  | RemoteAgentFileAttachmentInput
+  | RemoteAgentDataAttachmentInput;
+
+interface RemoteAgentBaseInput {
+  target_alias?: string;
+  target_url?: string;
+  task_handle?: string;
+  task_id?: string;
+  timeout_ms?: number;
+  service_parameters?: Record<string, string>;
+}
+
+export interface ListTargetsActionInput {
+  action: "list_targets";
+}
+
+export interface SendActionInput extends RemoteAgentBaseInput {
+  action: "send";
+  input: string;
+  attachments?: RemoteAgentAttachmentInput[];
+  follow_updates?: boolean;
+  history_length?: number;
+  metadata?: MessageSendParams["metadata"];
+}
+
+export interface WatchActionInput extends RemoteAgentBaseInput {
+  action: "watch";
+}
+
+export interface StatusActionInput extends RemoteAgentBaseInput {
+  action: "status";
+  history_length?: number;
+}
+
+export interface CancelActionInput extends RemoteAgentBaseInput {
+  action: "cancel";
+}
+
+export type RemoteAgentToolInput =
+  | ListTargetsActionInput
+  | SendActionInput
+  | WatchActionInput
+  | StatusActionInput
+  | CancelActionInput;
+
+export interface ToolDefinition {
+  name: string;
+  label: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+type TargetResolutionSummary = {
+  aliases: string[];
+  configuredBaseUrls: Set<string>;
+  hasDefaultTarget: boolean;
+};
+
+const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
+  Object.freeze({
+    list_targets: new Set(["action"]),
+    send: new Set([
+      "action",
+      "target_alias",
+      "target_url",
+      "input",
+      "attachments",
+      "follow_updates",
+      "history_length",
+      "timeout_ms",
+      "service_parameters",
+      "metadata",
+    ]),
+    watch: new Set([
+      "action",
+      "target_alias",
+      "target_url",
+      "task_handle",
+      "task_id",
+      "timeout_ms",
+      "service_parameters",
+    ]),
+    status: new Set([
+      "action",
+      "target_alias",
+      "target_url",
+      "task_handle",
+      "task_id",
+      "history_length",
+      "timeout_ms",
+      "service_parameters",
+    ]),
+    cancel: new Set([
+      "action",
+      "target_alias",
+      "target_url",
+      "task_handle",
+      "task_id",
+      "timeout_ms",
+      "service_parameters",
+    ]),
+  });
+
+function normalizeConfiguredBaseUrl(
+  baseUrl: string,
+  config: A2AOutboundPluginConfig,
+): string {
+  return config.policy.normalizeBaseUrl ? new URL(baseUrl).toString() : baseUrl;
+}
+
+function summarizeTargets(
+  config: A2AOutboundPluginConfig,
+): TargetResolutionSummary {
+  return {
+    aliases: config.targets.map((target) => target.alias),
+    configuredBaseUrls: new Set(
+      config.targets.map((target) =>
+        normalizeConfiguredBaseUrl(target.baseUrl, config),
+      ),
+    ),
+    hasDefaultTarget: config.targets.some((target) => target.default),
+  };
+}
+
+function configuredTargetSummaryText(config: A2AOutboundPluginConfig): string {
+  const aliases = config.targets.map((target) => target.alias);
+  const defaultTarget = config.targets.find((target) => target.default);
+
+  if (aliases.length === 0) {
+    return config.policy.allowTargetUrlOverride
+      ? "No configured targets. Use target_url for explicit routing."
+      : "No configured targets. Add a default target or enable target_url overrides to route send/status/watch/cancel actions.";
+  }
+
+  const configured = `Configured targets: ${aliases.join(", ")}.`;
+  const defaultDescription = defaultTarget
+    ? ` Default target: ${defaultTarget.alias}.`
+    : " No default target is configured.";
+  const urlPolicy = config.policy.allowTargetUrlOverride
+    ? " Explicit target_url overrides are enabled."
+    : " Explicit target_url values must match configured targets.";
+
+  return `${configured}${defaultDescription}${urlPolicy}`;
+}
+
+function targetAliasSchema(
+  config: A2AOutboundPluginConfig,
+): Record<string, unknown> {
+  const aliases = config.targets.map((target) => target.alias);
+  const defaultTarget = config.targets.find((target) => target.default);
+
+  return {
+    type: "string",
+    minLength: 1,
+    ...(aliases.length > 0 ? { enum: aliases } : {}),
+    description: defaultTarget
+      ? `Configured target alias. When omitted, the default target "${defaultTarget.alias}" is used when the action allows it.`
+      : "Configured target alias.",
+  };
+}
+
+export function buildRemoteAgentParametersSchema(
+  config: A2AOutboundPluginConfig,
+): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: {
+        type: "string",
+        enum: REMOTE_AGENT_ACTIONS,
+        description:
+          "Action to perform: list_targets, send, watch, status, or cancel.",
+      },
+      target_alias: targetAliasSchema(config),
+      target_url: {
+        type: "string",
+        minLength: 1,
+        format: "uri",
+        pattern: "^https?://",
+        description:
+          "Explicit remote target base URL. When target URL overrides are disabled, the URL must match a configured target.",
+      },
+      input: {
+        type: "string",
+        minLength: 1,
+        description:
+          "User text input for action=send. This becomes the single user text part.",
+      },
+      attachments: {
+        type: "array",
+        description:
+          "Optional file/data attachments for action=send. Inline text attachments are not supported in phase 4; use input instead.",
+        items: {
+          oneOf: [FILE_ATTACHMENT_SCHEMA, DATA_ATTACHMENT_SCHEMA],
+        },
+      },
+      task_handle: TASK_HANDLE_SCHEMA,
+      task_id: {
+        type: "string",
+        minLength: 1,
+        description: "Remote task id for watch/status/cancel when no task_handle is available.",
+      },
+      follow_updates: {
+        type: "boolean",
+        description:
+          "When true, action=send streams updates and returns the full event log.",
+      },
+      history_length: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Optional history window for action=send and action=status.",
+      },
+      timeout_ms: {
+        type: "integer",
+        minimum: 1,
+        description: "Optional timeout override for the remote request.",
+      },
+      service_parameters: {
+        type: "object",
+        additionalProperties: { type: "string" },
+        description: "Optional request service parameters.",
+      },
+      metadata: {
+        type: "object",
+        additionalProperties: true,
+        description: "Optional metadata payload for action=send.",
+      },
+    },
+    required: ["action"],
+  };
+}
+
+export function buildRemoteAgentToolDefinition(
+  config: A2AOutboundPluginConfig,
+): ToolDefinition {
+  return {
+    name: REMOTE_AGENT_TOOL_NAME,
+    label: "Remote Agent",
+    description: `Route requests to remote A2A agents and manage delegated tasks. ${configuredTargetSummaryText(config)}`,
+    parameters: buildRemoteAgentParametersSchema(config),
+  };
+}
+
+function makeError(
+  instancePath: string,
+  keyword: string,
+  message: string,
+  params: Record<string, unknown> = {},
+): ErrorObject {
+  return {
+    instancePath,
+    schemaPath: `#/runtime/${keyword}`,
+    keyword,
+    params,
+    message,
+  } as ErrorObject;
+}
+
+function disallowedFieldErrors(
+  action: RemoteAgentAction,
+  input: Record<string, unknown>,
+): ErrorObject[] {
+  const allowedFields = ACTION_ALLOWED_FIELDS[action];
+  const errors: ErrorObject[] = [];
+
+  for (const property of Object.keys(input)) {
+    if (!allowedFields.has(property)) {
+      errors.push(
+        makeError(
+          "",
+          "not",
+          `"${property}" is not supported for action=${action}`,
+          {
+            property,
+            action,
+          },
+        ),
+      );
+    }
+  }
+
+  return errors;
+}
+
+function validateExplicitTargetFields(
+  input: Pick<RemoteAgentBaseInput, "target_alias" | "target_url">,
+  summary: TargetResolutionSummary,
+  config: A2AOutboundPluginConfig,
+): ErrorObject[] {
+  const errors: ErrorObject[] = [];
+
+  if (input.target_alias !== undefined && !summary.aliases.includes(input.target_alias)) {
+    errors.push(
+      makeError("/target_alias", "enum", "must match a configured target alias", {
+        allowedValues: summary.aliases,
+      }),
+    );
+  }
+
+  if (input.target_url !== undefined) {
+    const normalized = normalizeConfiguredBaseUrl(input.target_url, config);
+    const isResolvable =
+      config.policy.allowTargetUrlOverride ||
+      summary.configuredBaseUrls.has(normalized);
+
+    if (!isResolvable) {
+      errors.push(
+        makeError(
+          "/target_url",
+          "anyOf",
+          "must resolve to a configured target or be allowed by policy",
+          {
+            allowTargetUrlOverride: config.policy.allowTargetUrlOverride,
+            configuredTargetAliases: summary.aliases,
+          },
+        ),
+      );
+    }
+  }
+
+  return errors;
+}
+
+function validateSendInput(
+  input: SendActionInput,
+  summary: TargetResolutionSummary,
+  config: A2AOutboundPluginConfig,
+): ErrorObject[] {
+  const errors = validateExplicitTargetFields(input, summary, config);
+
+  if (input.input === undefined) {
+    errors.push(
+      makeError("", "required", "send requires input", {
+        missingProperty: "input",
+      }),
+    );
+  }
+
+  const hasExplicitTarget =
+    input.target_alias !== undefined || input.target_url !== undefined;
+
+  if (!hasExplicitTarget && !summary.hasDefaultTarget) {
+    errors.push(
+      makeError(
+        "",
+        "anyOf",
+        "send requires target_alias, target_url, or a configured default target",
+      ),
+    );
+  }
+
+  return errors;
+}
+
+function validateFollowUpInput(
+  input: WatchActionInput | StatusActionInput | CancelActionInput,
+  summary: TargetResolutionSummary,
+  config: A2AOutboundPluginConfig,
+): ErrorObject[] {
+  const errors = validateExplicitTargetFields(input, summary, config);
+  const hasTaskHandle = input.task_handle !== undefined;
+  const hasTaskId = input.task_id !== undefined;
+
+  if (!hasTaskHandle && !hasTaskId) {
+    errors.push(
+      makeError(
+        "",
+        "anyOf",
+        `${input.action} requires task_handle or task_id`,
+      ),
+    );
+  }
+
+  if (
+    !hasTaskHandle &&
+    hasTaskId &&
+    input.target_alias === undefined &&
+    input.target_url === undefined &&
+    !summary.hasDefaultTarget
+  ) {
+    errors.push(
+      makeError(
+        "",
+        "anyOf",
+        `${input.action} requires target_alias, target_url, or a configured default target when task_id is used without task_handle`,
+      ),
+    );
+  }
+
+  return errors;
+}
+
+function validateActionSpecificRules(
+  input: RemoteAgentToolInput,
+  summary: TargetResolutionSummary,
+  config: A2AOutboundPluginConfig,
+): ErrorObject[] {
+  const recordInput = input as unknown as Record<string, unknown>;
+  const errors = disallowedFieldErrors(input.action, recordInput);
+
+  switch (input.action) {
+    case "list_targets":
+      return errors;
+    case "send":
+      return [...errors, ...validateSendInput(input, summary, config)];
+    case "watch":
+    case "status":
+    case "cancel":
+      return [...errors, ...validateFollowUpInput(input, summary, config)];
+  }
+}
+
+export type RemoteAgentInputValidator = (
+  input: unknown,
+) => RemoteAgentToolInput;
+
+export function createRemoteAgentInputValidator(
+  config: A2AOutboundPluginConfig,
+): RemoteAgentInputValidator {
+  const ajv = createA2AOutboundAjv();
+  const schema = buildRemoteAgentParametersSchema(config);
+  const validateSchema = ajv.compile(schema);
+  const targetSummary = summarizeTargets(config);
+
+  return (input: unknown): RemoteAgentToolInput => {
+    if (!validateSchema(input)) {
+      toValidationError(REMOTE_AGENT_TOOL_NAME, [...validateSchema.errors!]);
+    }
+
+    const validated = input as RemoteAgentToolInput;
+    const customErrors = validateActionSpecificRules(
+      validated,
+      targetSummary,
+      config,
+    );
+
+    if (customErrors.length > 0) {
+      toValidationError(REMOTE_AGENT_TOOL_NAME, customErrors);
+    }
+
+    return validated;
+  };
+}
+
+export const PUBLIC_TARGET_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -39,607 +573,4 @@ const TARGET_SCHEMA = {
     },
   },
   required: ["baseUrl"],
-};
-
-const MESSAGE_PART_METADATA_SCHEMA = {
-  type: "object",
-  additionalProperties: true,
-};
-
-const TEXT_PART_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    kind: { type: "string", enum: ["text"] },
-    text: { type: "string" },
-    metadata: MESSAGE_PART_METADATA_SCHEMA,
-  },
-  required: ["kind", "text"],
-};
-
-const FILE_PART_FILE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    uri: { type: "string", minLength: 1 },
-    bytes: { type: "string", minLength: 1 },
-    name: { type: "string" },
-    mimeType: { type: "string" },
-  },
-  anyOf: [{ required: ["uri"] }, { required: ["bytes"] }],
-};
-
-const FILE_PART_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    kind: { type: "string", enum: ["file"] },
-    file: FILE_PART_FILE_SCHEMA,
-    metadata: MESSAGE_PART_METADATA_SCHEMA,
-  },
-  required: ["kind", "file"],
-};
-
-const DATA_PART_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    kind: { type: "string", enum: ["data"] },
-    data: { type: "object", additionalProperties: true },
-    metadata: MESSAGE_PART_METADATA_SCHEMA,
-  },
-  required: ["kind", "data"],
-};
-
-const PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    schemes: {
-      type: "array",
-      items: { type: "string" },
-      description:
-        "Authentication schemes for MessageSendParams.configuration.pushNotificationConfig.authentication.schemes.",
-    },
-    credentials: {
-      type: "string",
-      description:
-        "Optional credentials for MessageSendParams.configuration.pushNotificationConfig.authentication.credentials.",
-    },
-  },
-  required: ["schemes"],
-};
-
-const PUSH_NOTIFICATION_CONFIG_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    url: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Callback URL for MessageSendParams.configuration.pushNotificationConfig.url.",
-    },
-    id: {
-      type: "string",
-      description:
-        "Optional identifier for MessageSendParams.configuration.pushNotificationConfig.id.",
-    },
-    token: {
-      type: "string",
-      description:
-        "Optional token for MessageSendParams.configuration.pushNotificationConfig.token.",
-    },
-    authentication: {
-      ...PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA,
-      description:
-        "Optional MessageSendParams.configuration.pushNotificationConfig.authentication payload.",
-    },
-  },
-  required: ["url"],
-};
-
-const MESSAGE_SEND_CONFIGURATION_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    blocking: {
-      type: "boolean",
-      description:
-        "Optional MessageSendParams.configuration.blocking passthrough.",
-    },
-    acceptedOutputModes: {
-      type: "array",
-      items: { type: "string" },
-      description:
-        "Optional MessageSendParams.configuration.acceptedOutputModes passthrough.",
-    },
-    historyLength: {
-      type: "integer",
-      minimum: 0,
-      description:
-        "Optional MessageSendParams.configuration.historyLength passthrough.",
-    },
-    pushNotificationConfig: {
-      ...PUSH_NOTIFICATION_CONFIG_SCHEMA,
-      description:
-        "Optional MessageSendParams.configuration.pushNotificationConfig passthrough.",
-    },
-  },
-};
-
-const MESSAGE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    kind: { type: "string", enum: ["message"] },
-    messageId: { type: "string", minLength: 1 },
-    role: { type: "string", enum: MESSAGE_ROLES },
-    parts: {
-      type: "array",
-      items: {
-        oneOf: [TEXT_PART_SCHEMA, FILE_PART_SCHEMA, DATA_PART_SCHEMA],
-      },
-    },
-    contextId: { type: "string", minLength: 1 },
-    taskId: { type: "string", minLength: 1 },
-    extensions: {
-      type: "array",
-      items: { type: "string" },
-    },
-    referenceTaskIds: {
-      type: "array",
-      items: { type: "string" },
-    },
-    metadata: {
-      type: "object",
-      additionalProperties: true,
-    },
-  },
-  required: ["kind", "messageId", "role", "parts"],
-};
-
-const TASK_HANDLE_SCHEMA = {
-  type: "string",
-  minLength: 1,
-  pattern: "^rah_[A-Za-z0-9-]+$",
-  description:
-    "Opaque delegated task handle issued by this plugin. Handles are process-local and invalidated by restarts.",
-};
-
-function buildFollowUpInputSchema(
-  taskIdDescription: string,
-  requestProperties: Record<string, unknown>,
-  requiredRequestProperties: string[] = [],
-) {
-  return {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      target: TARGET_SCHEMA,
-      request: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          taskId: {
-            type: "string",
-            minLength: 1,
-            description: taskIdDescription,
-          },
-          taskHandle: TASK_HANDLE_SCHEMA,
-          ...requestProperties,
-        },
-        required: requiredRequestProperties,
-      },
-    },
-    required: ["request"],
-    anyOf: [
-      {
-        type: "object",
-        required: ["target"],
-        properties: {
-          request: {
-            type: "object",
-            required: [...requiredRequestProperties, "taskId"],
-          },
-        },
-      },
-      {
-        type: "object",
-        properties: {
-          request: {
-            type: "object",
-            required: [...requiredRequestProperties, "taskHandle"],
-          },
-        },
-      },
-    ],
-  };
-}
-
-export const DELEGATE_INPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: TARGET_SCHEMA,
-    request: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        message: {
-          ...MESSAGE_SCHEMA,
-          description:
-            "A2A message payload passed as MessageSendParams.message.",
-        },
-        timeoutMs: {
-          type: "integer",
-          minimum: 1,
-          description: "Optional timeout override for this operation.",
-        },
-        serviceParameters: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Optional service parameters for this operation.",
-        },
-        metadata: {
-          type: "object",
-          additionalProperties: true,
-          description: "Optional MessageSendParams.metadata payload.",
-        },
-        configuration: {
-          ...MESSAGE_SEND_CONFIGURATION_SCHEMA,
-          description:
-            "Optional MessageSendParams.configuration payload passed through unchanged.",
-        },
-      },
-      required: ["message"],
-    },
-  },
-  required: ["target", "request"],
-};
-
-export const STATUS_INPUT_SCHEMA = buildFollowUpInputSchema(
-  "Remote task id to query.",
-  {
-    historyLength: {
-      type: "integer",
-      minimum: 0,
-      description: "Optional history window length.",
-    },
-    timeoutMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional timeout override for this operation.",
-    },
-    serviceParameters: {
-      type: "object",
-      additionalProperties: { type: "string" },
-      description: "Optional service parameters for this operation.",
-    },
-  },
-);
-
-export const WAIT_INPUT_SCHEMA = buildFollowUpInputSchema(
-  "Remote task id to wait for.",
-  {
-    waitTimeoutMs: {
-      type: "integer",
-      minimum: 1,
-      description:
-        "Required overall wait deadline for repeated tasks/get polling.",
-    },
-    historyLength: {
-      type: "integer",
-      minimum: 0,
-      description: "Optional history window length.",
-    },
-    timeoutMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional per-poll RPC timeout override.",
-    },
-    serviceParameters: {
-      type: "object",
-      additionalProperties: { type: "string" },
-      description: "Optional service parameters for every poll.",
-    },
-    initialDelayMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional initial delay between polls. Defaults to 250ms.",
-    },
-    maxDelayMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional maximum delay between polls. Defaults to 5000ms.",
-    },
-    backoffMultiplier: {
-      type: "number",
-      minimum: 1,
-      description:
-        "Optional exponential backoff multiplier. Defaults to 2.",
-    },
-  },
-  ["waitTimeoutMs"],
-);
-
-export const CANCEL_INPUT_SCHEMA = buildFollowUpInputSchema(
-  "Remote task id to cancel.",
-  {
-    timeoutMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional timeout override for this operation.",
-    },
-    serviceParameters: {
-      type: "object",
-      additionalProperties: { type: "string" },
-      description: "Optional service parameters for this operation.",
-    },
-  },
-);
-
-export const DELEGATE_STREAM_INPUT_SCHEMA = DELEGATE_INPUT_SCHEMA;
-
-export const RESUBSCRIBE_INPUT_SCHEMA = buildFollowUpInputSchema(
-  "Remote task id to resubscribe to.",
-  {
-    timeoutMs: {
-      type: "integer",
-      minimum: 1,
-      description: "Optional timeout override for this operation.",
-    },
-    serviceParameters: {
-      type: "object",
-      additionalProperties: { type: "string" },
-      description: "Optional service parameters for this operation.",
-    },
-  },
-);
-
-export type ToolDefinition = {
-  name: string;
-  label: string;
-  description: string;
-  parameters: Record<string, unknown>;
-};
-
-export const TOOL_DEFINITIONS = {
-  a2a_delegate: {
-    name: "a2a_delegate",
-    label: "A2A Delegate",
-    description: "Delegate a request to an external A2A agent.",
-    parameters: DELEGATE_INPUT_SCHEMA,
-  },
-  a2a_delegate_stream: {
-    name: "a2a_delegate_stream",
-    label: "A2A Delegate Stream",
-    description:
-      "Delegate a request to an external A2A agent and stream updates.",
-    parameters: DELEGATE_STREAM_INPUT_SCHEMA,
-  },
-  a2a_task_status: {
-    name: "a2a_task_status",
-    label: "A2A Task Status",
-    description: "Fetch status for an external A2A task.",
-    parameters: STATUS_INPUT_SCHEMA,
-  },
-  a2a_task_wait: {
-    name: "a2a_task_wait",
-    label: "A2A Task Wait",
-    description:
-      "Poll task status for an external A2A task until it reaches a terminal state or the overall wait deadline expires.",
-    parameters: WAIT_INPUT_SCHEMA,
-  },
-  a2a_task_resubscribe: {
-    name: "a2a_task_resubscribe",
-    label: "A2A Task Resubscribe",
-    description: "Reconnect to streaming updates for an external A2A task.",
-    parameters: RESUBSCRIBE_INPUT_SCHEMA,
-  },
-  a2a_task_cancel: {
-    name: "a2a_task_cancel",
-    label: "A2A Task Cancel",
-    description: "Request cancellation for an external A2A task.",
-    parameters: CANCEL_INPUT_SCHEMA,
-  },
-} as const satisfies Record<string, ToolDefinition>;
-
-export interface A2ATargetInput {
-  baseUrl: string;
-  cardPath?: string;
-  preferredTransports?: A2ATransport[];
-}
-
-export interface DelegateRequestInput {
-  message: Message;
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
-  metadata?: MessageSendParams["metadata"];
-  configuration?: MessageSendParams["configuration"];
-}
-
-export interface DelegateStreamRequestInput extends DelegateRequestInput {}
-
-export interface StatusRequestInput {
-  taskId?: string;
-  taskHandle?: string;
-  historyLength?: number;
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
-}
-
-export interface WaitRequestInput {
-  taskId?: string;
-  taskHandle?: string;
-  waitTimeoutMs: number;
-  historyLength?: number;
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  backoffMultiplier: number;
-}
-
-export interface ResubscribeRequestInput {
-  taskId?: string;
-  taskHandle?: string;
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
-}
-
-export interface CancelRequestInput {
-  taskId?: string;
-  taskHandle?: string;
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
-}
-
-export interface DelegateToolInput {
-  target: A2ATargetInput;
-  request: DelegateRequestInput;
-}
-
-export interface DelegateStreamToolInput {
-  target: A2ATargetInput;
-  request: DelegateStreamRequestInput;
-}
-
-export interface StatusToolInput {
-  target?: A2ATargetInput;
-  request: StatusRequestInput;
-}
-
-export interface WaitToolInput {
-  target?: A2ATargetInput;
-  request: WaitRequestInput;
-}
-
-export interface ResubscribeToolInput {
-  target?: A2ATargetInput;
-  request: ResubscribeRequestInput;
-}
-
-export interface CancelToolInput {
-  target?: A2ATargetInput;
-  request: CancelRequestInput;
-}
-
-const ajv = createA2AOutboundAjv();
-
-const validateDelegateSchema = ajv.compile(DELEGATE_INPUT_SCHEMA);
-const validateDelegateStreamSchema = ajv.compile(DELEGATE_STREAM_INPUT_SCHEMA);
-const validateStatusSchema = ajv.compile(STATUS_INPUT_SCHEMA);
-const validateWaitSchema = ajv.compile(WAIT_INPUT_SCHEMA);
-const validateResubscribeSchema = ajv.compile(RESUBSCRIBE_INPUT_SCHEMA);
-const validateCancelSchema = ajv.compile(CANCEL_INPUT_SCHEMA);
-
-function toWaitValidationErrors(
-  request: Partial<Pick<WaitRequestInput, "initialDelayMs" | "maxDelayMs">>,
-): ErrorObject[] {
-  if (
-    request.initialDelayMs === undefined ||
-    request.maxDelayMs === undefined ||
-    request.maxDelayMs >= request.initialDelayMs
-  ) {
-    return [];
-  }
-
-  return [
-    {
-      instancePath: "/request/maxDelayMs",
-      schemaPath: "#/request/maxDelayMs",
-      keyword: "minimum",
-      params: {
-        comparison: ">=",
-        limit: request.initialDelayMs,
-      },
-      message: `must be greater than or equal to ${request.initialDelayMs}`,
-    } as ErrorObject,
-  ];
-}
-
-export function validateDelegateInput(input: unknown): DelegateToolInput {
-  if (!validateDelegateSchema(input)) {
-    toValidationError("a2a_delegate", [...validateDelegateSchema.errors!]);
-  }
-  return input as unknown as DelegateToolInput;
-}
-
-export function validateDelegateStreamInput(
-  input: unknown,
-): DelegateStreamToolInput {
-  if (!validateDelegateStreamSchema(input)) {
-    toValidationError(
-      "a2a_delegate_stream",
-      [...validateDelegateStreamSchema.errors!],
-    );
-  }
-  return input as unknown as DelegateStreamToolInput;
-}
-
-export function validateStatusInput(input: unknown): StatusToolInput {
-  if (!validateStatusSchema(input)) {
-    toValidationError("a2a_task_status", [...validateStatusSchema.errors!]);
-  }
-  return input as unknown as StatusToolInput;
-}
-
-export function validateWaitInput(input: unknown): WaitToolInput {
-  if (!validateWaitSchema(input)) {
-    toValidationError("a2a_task_wait", [...validateWaitSchema.errors!]);
-  }
-
-  const validated = input as unknown as {
-    target?: A2ATargetInput;
-    request: Pick<WaitRequestInput, "waitTimeoutMs"> &
-      Partial<
-        Omit<
-          WaitRequestInput,
-          "waitTimeoutMs" | "initialDelayMs" | "maxDelayMs" | "backoffMultiplier"
-        >
-      > & {
-        initialDelayMs?: number;
-        maxDelayMs?: number;
-        backoffMultiplier?: number;
-      };
-  };
-  const normalized: WaitToolInput = {
-    target: validated.target,
-    request: {
-      ...validated.request,
-      initialDelayMs:
-        validated.request.initialDelayMs ?? DEFAULT_WAIT_INITIAL_DELAY_MS,
-      maxDelayMs: validated.request.maxDelayMs ?? DEFAULT_WAIT_MAX_DELAY_MS,
-      backoffMultiplier:
-        validated.request.backoffMultiplier ??
-        DEFAULT_WAIT_BACKOFF_MULTIPLIER,
-    },
-  };
-
-  const errors = toWaitValidationErrors(normalized.request);
-  if (errors.length > 0) {
-    toValidationError("a2a_task_wait", errors);
-  }
-
-  return normalized;
-}
-
-export function validateResubscribeInput(
-  input: unknown,
-): ResubscribeToolInput {
-  if (!validateResubscribeSchema(input)) {
-    toValidationError(
-      "a2a_task_resubscribe",
-      [...validateResubscribeSchema.errors!],
-    );
-  }
-  return input as unknown as ResubscribeToolInput;
-}
-
-export function validateCancelInput(input: unknown): CancelToolInput {
-  if (!validateCancelSchema(input)) {
-    toValidationError("a2a_task_cancel", [...validateCancelSchema.errors!]);
-  }
-  return input as unknown as CancelToolInput;
-}
+} as const;

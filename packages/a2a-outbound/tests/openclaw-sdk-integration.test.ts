@@ -1,31 +1,40 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
-import type { AnyAgentTool, OpenClawPluginApi } from 'openclaw/plugin-sdk'
-import { createLoggerBackedRuntime } from 'openclaw/plugin-sdk'
-import plugin from '../dist/index.js'
+import test from "node:test";
+import assert from "node:assert/strict";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { createLoggerBackedRuntime } from "openclaw/plugin-sdk";
+import plugin from "../dist/index.js";
 
-test('integration smoke: plugin loads with official OpenClawPluginApi shape', () => {
-  const registrations: Array<{ tool: AnyAgentTool; opts?: { optional?: boolean } }> = []
+test("integration smoke: plugin loads with official OpenClawPluginApi shape", () => {
+  const registrations: Array<{ tool: AnyAgentTool; opts?: { optional?: boolean } }> =
+    [];
   const runtimeHelper = createLoggerBackedRuntime({
     logger: {
       info() {},
       error() {},
     },
-  })
+  });
 
   const api: OpenClawPluginApi = {
-    id: 'a2a-outbound',
-    name: 'a2a-outbound',
-    version: '1.0.0',
-    description: 'test',
-    source: 'tests',
-    config: {} as OpenClawPluginApi['config'],
+    id: "a2a-outbound",
+    name: "a2a-outbound",
+    version: "1.0.0",
+    description: "test",
+    source: "tests",
+    config: {} as OpenClawPluginApi["config"],
     pluginConfig: {
       enabled: true,
+      targets: [
+        {
+          alias: "support",
+          baseUrl: "https://support.example",
+          default: true,
+        },
+      ],
     },
     runtime: {
       logging: {},
-    } as OpenClawPluginApi['runtime'],
+      ...runtimeHelper,
+    } as OpenClawPluginApi["runtime"],
     logger: {
       debug() {},
       info() {},
@@ -33,11 +42,11 @@ test('integration smoke: plugin loads with official OpenClawPluginApi shape', ()
       error() {},
     },
     registerTool(tool, opts) {
-      if (typeof tool === 'function') {
-        throw new TypeError('unexpected tool factory registration in test')
+      if (typeof tool === "function") {
+        throw new TypeError("unexpected tool factory registration in test");
       }
 
-      registrations.push({ tool, opts })
+      registrations.push({ tool, opts });
     },
     registerHook() {},
     registerHttpRoute() {},
@@ -48,26 +57,15 @@ test('integration smoke: plugin loads with official OpenClawPluginApi shape', ()
     registerProvider() {},
     registerCommand() {},
     resolvePath(input) {
-      return input
+      return input;
     },
     on() {},
-  }
+  };
 
-  plugin.register(api)
+  plugin.register(api);
 
-  assert.equal(registrations.length, 4)
-  assert.deepEqual(
-    registrations.map((entry) => entry.tool.name).sort(),
-    [
-      'a2a_delegate',
-      'a2a_task_cancel',
-      'a2a_task_status',
-      'a2a_task_wait',
-    ],
-  )
-
-  for (const entry of registrations) {
-    assert.deepEqual(entry.opts, { optional: true })
-    assert.equal(typeof entry.tool.execute, 'function')
-  }
-})
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0]?.tool.name, "remote_agent");
+  assert.deepEqual(registrations[0]?.opts, { optional: true });
+  assert.equal(typeof registrations[0]?.tool.execute, "function");
+});

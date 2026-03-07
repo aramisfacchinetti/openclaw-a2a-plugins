@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { DataPart, FilePart, MessageSendParams } from "@a2a-js/sdk";
 import type { RequestOptions } from "@a2a-js/sdk/client";
 import type {
-  DelegateRequestInput,
-  DelegateStreamRequestInput,
+  RemoteAgentAttachmentInput,
+  SendActionInput,
 } from "./schemas.js";
 
 export interface SendRequestNormalizationOptions {
@@ -17,15 +17,13 @@ export interface NormalizedSendRequest {
   requestOptions: RequestOptions;
 }
 
-export type PlainIntentAttachmentInput = FilePart | DataPart;
-
 export interface PlainIntentRequestInput {
   input: string;
-  attachments?: PlainIntentAttachmentInput[];
-  timeoutMs?: number;
-  serviceParameters?: Record<string, string>;
+  attachments?: RemoteAgentAttachmentInput[];
+  history_length?: number;
+  timeout_ms?: number;
+  service_parameters?: Record<string, string>;
   metadata?: MessageSendParams["metadata"];
-  configuration?: MessageSendParams["configuration"];
 }
 
 function mergeServiceParameters(
@@ -56,38 +54,55 @@ function mergeSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
   return AbortSignal.any(availableSignals);
 }
 
-function cloneAttachmentPart(part: PlainIntentAttachmentInput): FilePart | DataPart {
-  switch (part.kind) {
+function cloneAttachmentPart(
+  attachment: RemoteAgentAttachmentInput,
+): FilePart | DataPart {
+  switch (attachment.kind) {
     case "file":
       return {
         kind: "file",
-        file: {
-          ...part.file,
-        },
-        ...(part.metadata !== undefined ? { metadata: part.metadata } : {}),
+        file:
+          attachment.uri !== undefined
+            ? {
+                uri: attachment.uri,
+                ...(attachment.name !== undefined ? { name: attachment.name } : {}),
+                ...(attachment.mime_type !== undefined
+                  ? { mimeType: attachment.mime_type }
+                  : {}),
+              }
+            : {
+                bytes: attachment.bytes!,
+                ...(attachment.name !== undefined ? { name: attachment.name } : {}),
+                ...(attachment.mime_type !== undefined
+                  ? { mimeType: attachment.mime_type }
+                  : {}),
+              },
+        ...(attachment.metadata !== undefined
+          ? { metadata: attachment.metadata }
+          : {}),
       };
     case "data":
       return {
         kind: "data",
         data: {
-          ...part.data,
+          ...attachment.data,
         },
-        ...(part.metadata !== undefined ? { metadata: part.metadata } : {}),
+        ...(attachment.metadata !== undefined
+          ? { metadata: attachment.metadata }
+          : {}),
       };
   }
-
-  throw new TypeError("unsupported attachment kind");
 }
 
-function withOptionalSendFields(
-  sendParams: MessageSendParams,
-  metadata: MessageSendParams["metadata"] | undefined,
-  configuration: MessageSendParams["configuration"] | undefined,
-): MessageSendParams {
+function buildSendConfiguration(
+  input: PlainIntentRequestInput,
+): MessageSendParams["configuration"] | undefined {
+  if (input.history_length === undefined) {
+    return undefined;
+  }
+
   return {
-    ...sendParams,
-    ...(metadata !== undefined ? { metadata } : {}),
-    ...(configuration !== undefined ? { configuration } : {}),
+    historyLength: input.history_length,
   };
 }
 
@@ -113,55 +128,48 @@ export function buildRequestOptions(
 }
 
 export function normalizePlainIntentRequest(
-  input: PlainIntentRequestInput,
+  input: PlainIntentRequestInput | SendActionInput,
   options: SendRequestNormalizationOptions,
 ): NormalizedSendRequest {
-  return {
-    sendParams: withOptionalSendFields(
-      {
-        message: {
-          kind: "message",
-          messageId: randomUUID(),
-          role: "user",
-          parts: [
-            {
-              kind: "text",
-              text: input.input,
-            },
-            ...(input.attachments?.map(cloneAttachmentPart) ?? []),
-          ],
-        },
-      },
-      input.metadata,
-      input.configuration,
-    ),
-    requestOptions: buildRequestOptions(
-      input.timeoutMs,
-      options.defaultTimeoutMs,
-      options.defaultServiceParameters,
-      input.serviceParameters,
-      options.signal,
-    ),
+  const normalizedInput: PlainIntentRequestInput = {
+    input: input.input,
+    ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
+    ...(input.history_length !== undefined
+      ? { history_length: input.history_length }
+      : {}),
+    ...(input.timeout_ms !== undefined ? { timeout_ms: input.timeout_ms } : {}),
+    ...(input.service_parameters !== undefined
+      ? { service_parameters: input.service_parameters }
+      : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
   };
-}
 
-export function normalizeLegacyDelegateRequest(
-  input: DelegateRequestInput | DelegateStreamRequestInput,
-  options: SendRequestNormalizationOptions,
-): NormalizedSendRequest {
+  const configuration = buildSendConfiguration(normalizedInput);
+
   return {
-    sendParams: withOptionalSendFields(
-      {
-        message: input.message,
+    sendParams: {
+      message: {
+        kind: "message",
+        messageId: randomUUID(),
+        role: "user",
+        parts: [
+          {
+            kind: "text",
+            text: normalizedInput.input,
+          },
+          ...(normalizedInput.attachments?.map(cloneAttachmentPart) ?? []),
+        ],
       },
-      input.metadata,
-      input.configuration,
-    ),
+      ...(normalizedInput.metadata !== undefined
+        ? { metadata: normalizedInput.metadata }
+        : {}),
+      ...(configuration !== undefined ? { configuration } : {}),
+    },
     requestOptions: buildRequestOptions(
-      input.timeoutMs,
+      normalizedInput.timeout_ms,
       options.defaultTimeoutMs,
       options.defaultServiceParameters,
-      input.serviceParameters,
+      normalizedInput.service_parameters,
       options.signal,
     ),
   };

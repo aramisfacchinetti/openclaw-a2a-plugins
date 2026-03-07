@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildRequestOptions,
-  normalizeLegacyDelegateRequest,
   normalizePlainIntentRequest,
 } from "../dist/request-normalization.js";
 
@@ -28,26 +27,34 @@ test("normalizePlainIntentRequest builds a generated user message", () => {
 
   assert.equal(first.sendParams.message.kind, "message");
   assert.equal(first.sendParams.message.role, "user");
-  assert.equal(first.sendParams.message.parts.length, 1);
-  assert.deepEqual(first.sendParams.message.parts[0], {
-    kind: "text",
-    text: "hello world",
-  });
-  assert.notEqual(first.sendParams.message.messageId, second.sendParams.message.messageId);
+  assert.deepEqual(first.sendParams.message.parts, [
+    {
+      kind: "text",
+      text: "hello world",
+    },
+  ]);
+  assert.notEqual(
+    first.sendParams.message.messageId,
+    second.sendParams.message.messageId,
+  );
 });
 
-test("normalizePlainIntentRequest maps file and data attachments into A2A parts", () => {
+test("normalizePlainIntentRequest maps flattened file and data attachments", () => {
   const normalized = normalizePlainIntentRequest(
     {
       input: "process these",
       attachments: [
         {
           kind: "file",
-          file: {
-            uri: "https://example.com/report.pdf",
-            name: "report.pdf",
-            mimeType: "application/pdf",
-          },
+          uri: "https://example.com/report.pdf",
+          name: "report.pdf",
+          mime_type: "application/pdf",
+        },
+        {
+          kind: "file",
+          bytes: "Zm9v",
+          name: "inline.txt",
+          mime_type: "text/plain",
         },
         {
           kind: "data",
@@ -77,12 +84,43 @@ test("normalizePlainIntentRequest maps file and data attachments into A2A parts"
       },
     },
     {
+      kind: "file",
+      file: {
+        bytes: "Zm9v",
+        name: "inline.txt",
+        mimeType: "text/plain",
+      },
+    },
+    {
       kind: "data",
       data: {
         ticket: "123",
       },
     },
   ]);
+});
+
+test("normalizePlainIntentRequest maps metadata and history_length", () => {
+  const normalized = normalizePlainIntentRequest(
+    {
+      input: "hello",
+      history_length: 4,
+      metadata: {
+        requestId: "req-1",
+      },
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+    },
+  );
+
+  assert.deepEqual(normalized.sendParams.metadata, {
+    requestId: "req-1",
+  });
+  assert.deepEqual(normalized.sendParams.configuration, {
+    historyLength: 4,
+  });
 });
 
 test("buildRequestOptions merges default and per-call service parameters", () => {
@@ -107,66 +145,4 @@ test("buildRequestOptions merges default and per-call service parameters", () =>
     "X-Shared": "override",
   });
   assert.ok(options.signal instanceof AbortSignal);
-});
-
-test("normalizeLegacyDelegateRequest preserves raw SDK-native message passthrough", () => {
-  const message = {
-    kind: "message" as const,
-    messageId: "msg-legacy-1",
-    role: "agent" as const,
-    contextId: "ctx-legacy-1",
-    taskId: "task-legacy-1",
-    extensions: ["urn:example:ext"],
-    referenceTaskIds: ["task-legacy-0"],
-    metadata: {
-      source: "legacy",
-    },
-    parts: [
-      {
-        kind: "text" as const,
-        text: "passthrough",
-      },
-      {
-        kind: "data" as const,
-        data: {
-          ok: true,
-        },
-      },
-    ],
-  };
-  const metadata = {
-    requestId: "req-legacy-1",
-  };
-  const configuration = {
-    blocking: true,
-    acceptedOutputModes: ["application/json"],
-  };
-
-  const normalized = normalizeLegacyDelegateRequest(
-    {
-      message,
-      metadata,
-      configuration,
-      timeoutMs: 700,
-      serviceParameters: {
-        "X-Input": "input",
-      },
-    },
-    {
-      defaultTimeoutMs: 250,
-      defaultServiceParameters: {
-        "X-Default": "default",
-      },
-    },
-  );
-
-  assert.deepEqual(normalized.sendParams, {
-    message,
-    metadata,
-    configuration,
-  });
-  assert.deepEqual(normalized.requestOptions.serviceParameters, {
-    "X-Default": "default",
-    "X-Input": "input",
-  });
 });

@@ -1,148 +1,153 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
-import http from 'node:http'
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  A2AOutboundService,
+  type A2AOutboundServiceOptions,
+} from "../dist/service.js";
+import { parseA2AOutboundPluginConfig, type A2AOutboundPluginConfig } from "../dist/config.js";
 import type {
-  IncomingHttpHeaders,
-  IncomingMessage,
-  ServerResponse,
-} from 'node:http'
-import { A2AOutboundService } from '../dist/service.js'
-import type { A2AToolResult, FailureEnvelope, SuccessEnvelope } from '../dist/result-shape.js'
-import type { A2AOutboundPluginConfig } from '../dist/config.js'
+  A2AToolResult,
+  FailureEnvelope,
+  SuccessEnvelope,
+  StreamUpdateEnvelope,
+  TargetListSummary,
+} from "../dist/result-shape.js";
+import {
+  createClientPool,
+  type ResolvedTarget,
+} from "../dist/sdk-client-pool.js";
+import { createTargetCatalog } from "../dist/target-catalog.js";
+import { createTaskHandleRegistry } from "../dist/task-handle-registry.js";
 
-type JsonObject = Record<string, unknown>
+type JsonObject = Record<string, unknown>;
 
 type RpcResponse = {
-  result?: JsonObject
-  error?: JsonObject
-  delayMs?: number
-}
-
-type SseResponse = RpcResponse
+  result?: JsonObject;
+  error?: JsonObject;
+  delayMs?: number;
+};
 
 type StartPeerOptions = {
-  cardPath?: string
-  rpcPath?: string
-  streaming?: boolean
-  sendDelayMs?: number
-  sendResult?: JsonObject
-  getTaskResult?: JsonObject
-  getTaskResponses?: RpcResponse[]
-  cancelTaskResult?: JsonObject
-  streamResponses?: SseResponse[]
-  resubscribeResponses?: SseResponse[]
-}
+  cardPath?: string;
+  rpcPath?: string;
+  streaming?: boolean;
+  sendResult?: JsonObject;
+  getTaskResult?: JsonObject;
+  cancelTaskResult?: JsonObject;
+  streamResponses?: RpcResponse[];
+  resubscribeResponses?: RpcResponse[];
+};
 
 type PeerState = {
-  lastRpcHeaders?: IncomingHttpHeaders
-  lastSendParams?: JsonObject
-  lastGetTaskParams?: JsonObject
-  getTaskHeaders: IncomingHttpHeaders[]
-  getTaskParams: JsonObject[]
-  lastStreamParams?: JsonObject
-  lastResubscribeParams?: JsonObject
-  sendCalls: number
-  streamCalls: number
-  getCalls: number
-  cancelCalls: number
-  resubscribeCalls: number
-}
+  cardRequests: number;
+  sendCalls: number;
+  streamCalls: number;
+  getCalls: number;
+  cancelCalls: number;
+  resubscribeCalls: number;
+  lastSendParams?: JsonObject;
+  lastGetTaskParams?: JsonObject;
+  lastCancelParams?: JsonObject;
+  lastResubscribeParams?: JsonObject;
+};
 
 type StartedPeer = {
-  server: http.Server
-  state: PeerState
-  baseUrl: string
-  cardPath: string
-}
+  server: http.Server;
+  state: PeerState;
+  baseUrl: string;
+  cardPath: string;
+};
 
 type ServiceConfigOverrides = Partial<A2AOutboundPluginConfig> & {
-  defaults?: Partial<A2AOutboundPluginConfig['defaults']>
-  policy?: Partial<A2AOutboundPluginConfig['policy']>
-}
-
-type UserMessageRequest = {
-  message: {
-    kind: 'message'
-    messageId: string
-    role: 'user'
-    parts: Array<{ kind: 'text'; text: string }>
-  }
-}
+  defaults?: Partial<A2AOutboundPluginConfig["defaults"]>;
+  taskHandles?: Partial<A2AOutboundPluginConfig["taskHandles"]>;
+  policy?: Partial<A2AOutboundPluginConfig["policy"]>;
+};
 
 function isRecord(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function asRecord(value: unknown): JsonObject {
   if (!isRecord(value)) {
-    throw new TypeError('expected object')
+    throw new TypeError("expected object");
   }
 
-  return value
+  return value;
 }
 
 function asSuccess(result: A2AToolResult): SuccessEnvelope {
   if (result.ok !== true) {
-    throw new TypeError('expected success result')
+    throw new TypeError("expected success result");
   }
 
-  return result
+  return result;
 }
 
 function asFailure(result: A2AToolResult): FailureEnvelope {
   if (result.ok !== false) {
-    throw new TypeError('expected failure result')
+    throw new TypeError("expected failure result");
   }
 
-  return result
+  return result;
 }
 
-function taskHandleFromSummary(summary: Record<string, unknown>): string {
-  if (typeof summary.taskHandle !== 'string') {
-    throw new TypeError('expected taskHandle summary field')
+function taskHandleFromSummary(summary: SuccessEnvelope["summary"]): string {
+  if (typeof summary.task_handle !== "string") {
+    throw new TypeError("expected task_handle summary field");
   }
 
-  return summary.taskHandle
+  return summary.task_handle;
+}
+
+function targetsFromSummary(summary: SuccessEnvelope["summary"]): TargetListSummary[] {
+  if (!Array.isArray(summary.targets)) {
+    throw new TypeError("expected summary.targets");
+  }
+
+  return summary.targets;
 }
 
 function json(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.statusCode = statusCode
-  res.setHeader('Content-Type', 'application/json')
-  res.end(JSON.stringify(body))
+  res.statusCode = statusCode;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
 }
 
 function writeSse(res: ServerResponse, body: unknown): void {
-  res.write(`data: ${JSON.stringify(body)}\n\n`)
+  res.write(`data: ${JSON.stringify(body)}\n\n`);
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readJson(req: IncomingMessage): Promise<JsonObject> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer | string) => {
-      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
-    })
-    req.on('end', () => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer | string) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    });
+    req.on("end", () => {
       try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        resolve(asRecord(parsed))
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        resolve(asRecord(parsed));
       } catch (error) {
-        reject(error)
+        reject(error);
       }
-    })
-    req.on('error', reject)
-  })
+    });
+    req.on("error", reject);
+  });
 }
 
 function sequenceValue<T>(values: T[] | undefined, index: number): T | undefined {
   if (!values || values.length === 0) {
-    return undefined
+    return undefined;
   }
 
-  return values[Math.min(index, values.length - 1)]
+  return values[Math.min(index, values.length - 1)];
 }
 
 async function sendRpcResponse(
@@ -152,1564 +157,649 @@ async function sendRpcResponse(
   fallbackResult: JsonObject,
 ): Promise<void> {
   if (response?.delayMs) {
-    await sleep(response.delayMs)
+    await sleep(response.delayMs);
   }
 
   json(res, 200, {
-    jsonrpc: '2.0',
+    jsonrpc: "2.0",
     id,
     ...(response?.result !== undefined
       ? { result: response.result }
       : response?.error !== undefined
         ? { error: response.error }
         : { result: fallbackResult }),
-  })
+  });
 }
 
 async function sendSseResponses(
   res: ServerResponse,
   id: unknown,
-  responses: SseResponse[],
+  responses: RpcResponse[],
 ): Promise<void> {
-  res.statusCode = 200
-  res.setHeader('Content-Type', 'text/event-stream')
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/event-stream");
 
   for (const response of responses) {
     if (response.delayMs) {
-      await sleep(response.delayMs)
+      await sleep(response.delayMs);
     }
 
     writeSse(res, {
-      jsonrpc: '2.0',
+      jsonrpc: "2.0",
       id,
       ...(response.result !== undefined
         ? { result: response.result }
-        : { error: response.error ?? { code: -32004, message: 'stream failure' } }),
-    })
+        : { error: response.error ?? { code: -32004, message: "stream failure" } }),
+    });
   }
 
-  res.end()
+  res.end();
 }
 
 function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
-  const cardPath = options.cardPath ?? '/.well-known/agent-card.json'
-  const rpcPath = options.rpcPath ?? '/a2a/jsonrpc'
+  const cardPath = options.cardPath ?? "/.well-known/agent-card.json";
+  const rpcPath = options.rpcPath ?? "/a2a/jsonrpc";
 
   const state: PeerState = {
-    lastRpcHeaders: undefined,
-    lastSendParams: undefined,
-    lastGetTaskParams: undefined,
-    getTaskHeaders: [],
-    getTaskParams: [],
-    lastStreamParams: undefined,
-    lastResubscribeParams: undefined,
+    cardRequests: 0,
     sendCalls: 0,
     streamCalls: 0,
     getCalls: 0,
     cancelCalls: 0,
     resubscribeCalls: 0,
-  }
+  };
 
   const server = http.createServer(async (req, res) => {
-    const address = server.address()
-    if (!address || typeof address === 'string') {
-      throw new TypeError('expected bound server address')
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new TypeError("expected bound server address");
     }
-    const baseUrl = `http://127.0.0.1:${address.port}`
 
-    if (req.method === 'GET' && req.url === cardPath) {
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    if (req.method === "GET" && req.url === cardPath) {
+      state.cardRequests += 1;
       return json(res, 200, {
-        name: 'Mock Peer',
-        description: 'Mock A2A peer for tests',
-        protocolVersion: '0.3.0',
-        version: '0.1.0',
+        name: "Mock Peer",
+        description: "Mock A2A peer for tests",
+        protocolVersion: "0.3.0",
+        version: "0.1.0",
         url: `${baseUrl}${rpcPath}`,
-        preferredTransport: 'JSONRPC',
+        preferredTransport: "JSONRPC",
         capabilities: {
           streaming: options.streaming ?? false,
           pushNotifications: false,
           stateTransitionHistory: false,
         },
-        defaultInputModes: ['text/plain'],
-        defaultOutputModes: ['text/plain'],
+        defaultInputModes: ["text/plain"],
+        defaultOutputModes: ["text/plain"],
         skills: [
           {
-            id: 'mock',
-            name: 'mock',
-            description: 'mock skill',
-            tags: ['test'],
+            id: "mock",
+            name: "Mock Skill",
+            description: "mock skill",
+            tags: ["test"],
+            examples: ["Do the mock thing"],
           },
         ],
-      })
+      });
     }
 
-    if (req.method === 'POST' && req.url === rpcPath) {
-      state.lastRpcHeaders = req.headers
-      const payload = await readJson(req)
-      const payloadParams = isRecord(payload.params) ? payload.params : {}
+    if (req.method === "POST" && req.url === rpcPath) {
+      const payload = await readJson(req);
+      const payloadParams = isRecord(payload.params) ? payload.params : {};
 
-      if (payload.method === 'message/send') {
-        state.sendCalls += 1
-        state.lastSendParams = payloadParams
-
-        if (options.sendDelayMs) {
-          await sleep(options.sendDelayMs)
-        }
+      if (payload.method === "message/send") {
+        state.sendCalls += 1;
+        state.lastSendParams = payloadParams;
 
         return json(res, 200, {
-          jsonrpc: '2.0',
+          jsonrpc: "2.0",
           id: payload.id,
           result:
             options.sendResult ?? {
-              kind: 'message',
-              messageId: 'message-1',
-              role: 'agent',
-              parts: [{ kind: 'text', text: 'ack' }],
+              kind: "message",
+              messageId: "message-1",
+              role: "agent",
+              parts: [{ kind: "text", text: "ack" }],
             },
-        })
+        });
       }
 
-      if (payload.method === 'message/stream') {
-        state.streamCalls += 1
-        state.lastStreamParams = payloadParams
+      if (payload.method === "message/stream") {
+        state.streamCalls += 1;
+        state.lastSendParams = payloadParams;
 
-        return await sendSseResponses(res, payload.id, options.streamResponses ?? [])
+        return sendSseResponses(res, payload.id, options.streamResponses ?? []);
       }
 
-      if (payload.method === 'tasks/get') {
-        state.getCalls += 1
-        state.lastGetTaskParams = payloadParams
-        state.getTaskHeaders.push(req.headers)
-        state.getTaskParams.push(payloadParams)
+      if (payload.method === "tasks/get") {
+        state.getCalls += 1;
+        state.lastGetTaskParams = payloadParams;
 
-        return await sendRpcResponse(
+        return sendRpcResponse(
           res,
           payload.id,
-          sequenceValue(options.getTaskResponses, state.getCalls - 1),
+          undefined,
           options.getTaskResult ?? {
-            kind: 'task',
+            kind: "task",
             id: payloadParams.id,
-            contextId: 'ctx-1',
+            contextId: "ctx-1",
             status: {
-              state: 'completed',
+              state: "completed",
             },
           },
-        )
+        );
       }
 
-      if (payload.method === 'tasks/cancel') {
-        state.cancelCalls += 1
+      if (payload.method === "tasks/cancel") {
+        state.cancelCalls += 1;
+        state.lastCancelParams = payloadParams;
 
         return json(res, 200, {
-          jsonrpc: '2.0',
+          jsonrpc: "2.0",
           id: payload.id,
           result:
             options.cancelTaskResult ?? {
-              kind: 'task',
+              kind: "task",
               id: payloadParams.id,
-              contextId: 'ctx-1',
+              contextId: "ctx-1",
               status: {
-                state: 'canceled',
+                state: "canceled",
               },
             },
-        })
+        });
       }
 
-      if (payload.method === 'tasks/resubscribe') {
-        state.resubscribeCalls += 1
-        state.lastResubscribeParams = payloadParams
+      if (payload.method === "tasks/resubscribe") {
+        state.resubscribeCalls += 1;
+        state.lastResubscribeParams = payloadParams;
 
-        return await sendSseResponses(
+        return sendSseResponses(
           res,
           payload.id,
           options.resubscribeResponses ?? [],
-        )
+        );
       }
 
       return json(res, 200, {
-        jsonrpc: '2.0',
+        jsonrpc: "2.0",
         id: payload.id,
         error: {
           code: -32601,
-          message: 'method not found',
+          message: "method not found",
         },
-      })
+      });
     }
 
-    json(res, 404, { error: 'not found' })
-  })
+    json(res, 404, { error: "not found" });
+  });
 
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      if (!address || typeof address === 'string') {
-        throw new TypeError('expected bound server address')
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new TypeError("expected bound server address");
       }
+
       resolve({
         server,
         state,
         baseUrl: `http://127.0.0.1:${address.port}`,
         cardPath,
-      })
-    })
-  })
+      });
+    });
+  });
 }
 
-function buildService(config: ServiceConfigOverrides = {}): A2AOutboundService {
-  return new A2AOutboundService({
-    config: {
-      enabled: true,
-      defaults: {
-        timeoutMs: 250,
-        cardPath: '/.well-known/agent-card.json',
-        preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-        serviceParameters: {},
-      },
-      policy: {
-        acceptedOutputModes: [],
-        normalizeBaseUrl: true,
-        enforceSupportedTransports: true,
-        allowTargetUrlOverride: false,
-      },
-      ...config,
+function buildParsedConfig(
+  overrides: ServiceConfigOverrides = {},
+): A2AOutboundPluginConfig {
+  return parseA2AOutboundPluginConfig({
+    enabled: true,
+    defaults: {
+      timeoutMs: 250,
+      cardPath: "/.well-known/agent-card.json",
+      preferredTransports: ["JSONRPC", "HTTP+JSON"],
+      serviceParameters: {},
+      ...overrides.defaults,
     },
+    targets: overrides.targets,
+    taskHandles: {
+      ttlMs: 60_000,
+      maxEntries: 100,
+      ...overrides.taskHandles,
+    },
+    policy: {
+      acceptedOutputModes: [],
+      normalizeBaseUrl: true,
+      enforceSupportedTransports: true,
+      allowTargetUrlOverride: false,
+      ...overrides.policy,
+    },
+  });
+}
+
+function buildService(
+  configOverrides: ServiceConfigOverrides = {},
+  extraOptions: Partial<A2AOutboundServiceOptions> = {},
+): { parsedConfig: A2AOutboundPluginConfig; service: A2AOutboundService } {
+  const parsedConfig = buildParsedConfig(configOverrides);
+  const service = new A2AOutboundService({
+    parsedConfig,
     logger: {
       info() {},
       warn() {},
       error() {},
     },
-  })
-}
+    ...extraOptions,
+  });
 
-function userMessageRequest(text: string): UserMessageRequest {
   return {
-    message: {
-      kind: 'message',
-      messageId: 'user-msg-1',
-      role: 'user',
-      parts: [{ kind: 'text', text }],
-    },
-  }
+    parsedConfig,
+    service,
+  };
 }
 
-test('delegate success returns normalized envelope and raw payload', async (t) => {
-  const peer = await startPeer({
-    sendResult: {
-      kind: 'message',
-      messageId: 'agent-msg-1',
-      role: 'agent',
-      parts: [{ kind: 'text', text: 'done' }],
-    },
-  })
-  t.after(() => peer.server.close())
+function configuredTarget(
+  peer: StartedPeer,
+  overrides: Partial<A2AOutboundPluginConfig["targets"][number]> = {},
+): A2AOutboundPluginConfig["targets"][number] {
+  return {
+    alias: "support",
+    baseUrl: peer.baseUrl,
+    tags: ["test"],
+    cardPath: peer.cardPath,
+    preferredTransports: ["JSONRPC", "HTTP+JSON"],
+    examples: [],
+    default: false,
+    ...overrides,
+  };
+}
 
-  const service = buildService()
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('hello'),
-  })
+function resolvedTarget(
+  peer: StartedPeer,
+  overrides: Partial<ResolvedTarget> = {},
+): ResolvedTarget {
+  return {
+    baseUrl: `${peer.baseUrl}/`,
+    cardPath: peer.cardPath,
+    preferredTransports: ["JSONRPC", "HTTP+JSON"],
+    ...overrides,
+  };
+}
 
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
+test("send routes through an explicit target_alias", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
 
-  assert.equal(success.operation, 'a2a_delegate')
-  assert.equal(success.target.baseUrl, `${peer.baseUrl}/`)
-  assert.equal(success.summary.kind, 'message')
-  assert.equal(raw.kind, 'message')
-  assert.equal(peer.state.sendCalls, 1)
-})
-
-test('delegate returns summary.taskHandle when the remote returns a task', async (t) => {
-  const peer = await startPeer({
-    sendResult: {
-      kind: 'task',
-      id: 'task-delegate-1',
-      contextId: 'ctx-delegate-1',
-      status: {
-        state: 'submitted',
-      },
-    },
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('start task'),
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.kind, 'task')
-  assert.equal(success.summary.taskId, 'task-delegate-1')
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-})
-
-test('delegate success accepts fully valid SDK message shape', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      message: {
-        kind: 'message',
-        messageId: 'user-msg-full-1',
-        role: 'user',
-        contextId: 'ctx-1',
-        taskId: 'task-seed',
-        extensions: ['urn:openclaw:test-extension'],
-        referenceTaskIds: ['task-0'],
-        metadata: {
-          traceId: 'trace-1',
-        },
-        parts: [
-          { kind: 'text', text: 'hello full message' },
-          {
-            kind: 'file',
-            file: {
-              uri: 'https://example.com/file.txt',
-              name: 'file.txt',
-              mimeType: 'text/plain',
-            },
-          },
-          {
-            kind: 'file',
-            file: {
-              bytes: 'Zm9v',
-              name: 'inline.txt',
-              mimeType: 'text/plain',
-            },
-          },
-          {
-            kind: 'data',
-            data: {
-              ticket: '123',
-            },
-          },
-        ],
-      },
-      metadata: {
-        requestId: 'req-1',
-      },
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.operation, 'a2a_delegate')
-  assert.equal(success.summary.kind, 'message')
-  assert.equal(peer.state.sendCalls, 1)
-})
-
-test('delegate attaches configured target metadata when raw baseUrl matches a registered target', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService({
+  const { service } = buildService({
     targets: [
-      {
-        alias: 'support',
-        baseUrl: `${peer.baseUrl}/`,
-        description: 'Primary support agent',
-        tags: ['support'],
-        cardPath: peer.cardPath,
-        preferredTransports: ['JSONRPC'],
-        examples: [],
-        default: false,
-      },
+      configuredTarget(peer, {
+        alias: "support",
+        default: true,
+        description: "Primary support lane",
+      }),
     ],
-  })
+  });
 
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('hello with catalog metadata'),
-  })
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    input: "hello",
+  });
 
-  const success = asSuccess(result)
+  const success = asSuccess(result);
+  const raw = asRecord(success.raw);
+  const message = asRecord(asRecord(peer.state.lastSendParams ?? {}).message);
+  const parts = message.parts as Array<Record<string, unknown>>;
 
-  assert.equal(success.target.baseUrl, `${peer.baseUrl}/`)
-  assert.equal(success.target.alias, 'support')
-  assert.equal(success.target.description, 'Primary support agent')
-  assert.equal(peer.state.sendCalls, 1)
-})
+  assert.equal(success.operation, "remote_agent");
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.target_alias, "support");
+  assert.equal(success.summary.target_url, `${peer.baseUrl}/`);
+  assert.equal(success.summary.message_text, "ack");
+  assert.equal(raw.kind, "message");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(message.role, "user");
+  assert.equal(parts[0]?.kind, "text");
+  assert.equal(parts[0]?.text, "hello");
+});
 
-test('delegate forwards request.configuration unchanged in message/send params', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
+test("send falls back to the configured default target", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
 
-  const service = buildService({
-    policy: {
-      acceptedOutputModes: ['text/plain'],
-      normalizeBaseUrl: true,
-      enforceSupportedTransports: true,
-      allowTargetUrlOverride: false,
-    },
-  })
-  const message = {
-    kind: 'message' as const,
-    messageId: 'user-msg-config-1',
-    role: 'user' as const,
-    parts: [{ kind: 'text' as const, text: 'configuration passthrough' }],
-  }
-  const metadata = {
-    requestId: 'req-config-1',
-  }
-  const configuration = {
-    blocking: true,
-    acceptedOutputModes: ['application/json'],
-    historyLength: 5,
-    pushNotificationConfig: {
-      url: 'https://notify.example/hooks/123',
-      id: 'push-1',
-      token: 'push-token',
-      authentication: {
-        schemes: ['Bearer', 'Basic'],
-        credentials: 'credential-1',
-      },
-    },
-  }
+  const { service } = buildService({
+    targets: [
+      configuredTarget(peer, {
+        alias: "support",
+        default: true,
+      }),
+    ],
+  });
 
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      message,
-      metadata,
-      configuration,
-    },
-  })
+  const result = await service.execute({
+    action: "send",
+    input: "hello default",
+  });
 
-  asSuccess(result)
+  const success = asSuccess(result);
 
-  assert.ok(peer.state.lastSendParams)
-  assert.deepEqual(peer.state.lastSendParams, {
-    message,
-    metadata,
-    configuration,
-  })
-})
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.target_alias, "support");
+  assert.equal(success.summary.target_url, `${peer.baseUrl}/`);
+  assert.equal(peer.state.sendCalls, 1);
+});
 
-test('delegate stream success returns event log and emits updates', async (t) => {
+test("send with follow_updates=true emits send updates and returns a task_handle", async (t) => {
   const peer = await startPeer({
     streaming: true,
     streamResponses: [
       {
         result: {
-          kind: 'task',
-          id: 'task-stream-1',
-          contextId: 'ctx-stream-1',
+          kind: "task",
+          id: "task-stream-1",
+          contextId: "ctx-stream-1",
           status: {
-            state: 'submitted',
+            state: "submitted",
           },
         },
       },
       {
         result: {
-          kind: 'status-update',
-          taskId: 'task-stream-1',
-          contextId: 'ctx-stream-1',
+          kind: "status-update",
+          taskId: "task-stream-1",
+          contextId: "ctx-stream-1",
           status: {
-            state: 'completed',
+            state: "completed",
           },
           final: true,
         },
       },
     ],
-  })
-  t.after(() => peer.server.close())
+  });
+  t.after(() => peer.server.close());
 
-  const service = buildService()
-  const updates: Array<Record<string, unknown>> = []
-  const result = await service.delegateStream(
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+  const updates: StreamUpdateEnvelope<"send">[] = [];
+
+  const result = await service.execute(
     {
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: userMessageRequest('stream hello'),
+      action: "send",
+      target_alias: "support",
+      input: "stream hello",
+      follow_updates: true,
     },
     {
       onUpdate(update) {
-        updates.push(asRecord(update))
+        updates.push(update as StreamUpdateEnvelope<"send">);
       },
     },
-  )
+  );
 
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
+  const success = asSuccess(result);
+  const raw = asRecord(success.raw);
 
-  assert.equal(success.operation, 'a2a_delegate_stream')
-  assert.equal(success.summary.kind, 'stream')
-  assert.equal(success.summary.eventCount, 2)
-  assert.equal(success.summary.finalEventKind, 'status-update')
-  assert.equal(success.summary.taskId, 'task-stream-1')
-  assert.equal(success.summary.status, 'completed')
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-  assert.ok(Array.isArray(raw.events))
-  assert.equal((raw.events as unknown[]).length, 2)
-  assert.equal(asRecord(raw.finalEvent).kind, 'status-update')
-  assert.equal(peer.state.streamCalls, 1)
-  assert.equal(
-    asRecord(asRecord(peer.state.lastStreamParams ?? {}).message).messageId,
-    'user-msg-1',
-  )
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.task_id, "task-stream-1");
+  assert.equal(success.summary.status, "completed");
+  assert.match(taskHandleFromSummary(success.summary), /^rah_/);
+  assert.equal(peer.state.streamCalls, 1);
+  assert.ok(Array.isArray(raw.events));
+  assert.equal((raw.events as unknown[]).length, 2);
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0]?.action, "send");
+  assert.equal(updates[0]?.phase, "update");
+  assert.equal(updates[1]?.summary.status, "completed");
+});
 
-  assert.equal(updates.length, 2)
-  assert.equal(updates[0].operation, 'a2a_delegate_stream')
-  assert.equal(updates[0].phase, 'update')
-  assert.equal(asRecord(updates[0].summary).kind, 'task')
-  assert.equal(asRecord(updates[1].summary).kind, 'status-update')
-  assert.equal(asRecord(updates[1].summary).status, 'completed')
-})
+test("watch with a valid task_handle emits watch updates", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    resubscribeResponses: [
+      {
+        result: {
+          kind: "task",
+          id: "task-watch-1",
+          contextId: "ctx-watch-1",
+          status: {
+            state: "working",
+          },
+        },
+      },
+      {
+        result: {
+          kind: "status-update",
+          taskId: "task-watch-1",
+          contextId: "ctx-watch-1",
+          status: {
+            state: "completed",
+          },
+          final: true,
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
 
-test('delegate stream falls back to a single non-streaming send result', async (t) => {
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-watch-1",
+  }).taskHandle;
+
+  const { service } = buildService(
+    {},
+    {
+      taskHandleRegistry,
+    },
+  );
+  const updates: StreamUpdateEnvelope<"watch">[] = [];
+
+  const result = await service.execute(
+    {
+      action: "watch",
+      task_handle: handle,
+    },
+    {
+      onUpdate(update) {
+        updates.push(update as StreamUpdateEnvelope<"watch">);
+      },
+    },
+  );
+
+  const success = asSuccess(result);
+  const raw = asRecord(success.raw);
+
+  assert.equal(success.action, "watch");
+  assert.equal(success.summary.task_id, "task-watch-1");
+  assert.equal(success.summary.status, "completed");
+  assert.equal(success.summary.task_handle, handle);
+  assert.equal(peer.state.resubscribeCalls, 1);
+  assert.ok(Array.isArray(raw.events));
+  assert.equal((raw.events as unknown[]).length, 2);
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0]?.action, "watch");
+  assert.equal(updates[1]?.summary.status, "completed");
+});
+
+test("status and cancel both work from task_handle context", async (t) => {
+  const peer = await startPeer({
+    getTaskResult: {
+      kind: "task",
+      id: "task-follow-up-1",
+      contextId: "ctx-follow-up-1",
+      status: {
+        state: "completed",
+      },
+    },
+    cancelTaskResult: {
+      kind: "task",
+      id: "task-follow-up-1",
+      contextId: "ctx-follow-up-1",
+      status: {
+        state: "canceled",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-follow-up-1",
+  }).taskHandle;
+
+  const { service } = buildService(
+    {},
+    {
+      taskHandleRegistry,
+    },
+  );
+
+  const statusResult = await service.execute({
+    action: "status",
+    task_handle: handle,
+    history_length: 2,
+  });
+  const cancelResult = await service.execute({
+    action: "cancel",
+    task_handle: handle,
+  });
+
+  const status = asSuccess(statusResult);
+  const cancel = asSuccess(cancelResult);
+
+  assert.equal(status.action, "status");
+  assert.equal(status.summary.task_handle, handle);
+  assert.equal(status.summary.task_id, "task-follow-up-1");
+  assert.equal(status.summary.status, "completed");
+  assert.equal(cancel.action, "cancel");
+  assert.equal(cancel.summary.task_handle, handle);
+  assert.equal(cancel.summary.status, "canceled");
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.cancelCalls, 1);
+  assert.equal(peer.state.lastGetTaskParams?.id, "task-follow-up-1");
+  assert.equal(peer.state.lastGetTaskParams?.historyLength, 2);
+});
+
+test("list_targets returns configured targets plus cached metadata without forcing hydration", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+  });
+  t.after(() => peer.server.close());
+
+  const parsedConfig = buildParsedConfig({
+    targets: [
+      configuredTarget(peer, {
+        alias: "support",
+        default: true,
+        description: "Primary support lane",
+      }),
+    ],
+  });
+  const clientPool = createClientPool({
+    defaultCardPath: parsedConfig.defaults.cardPath,
+    preferredTransports: parsedConfig.defaults.preferredTransports,
+    acceptedOutputModes: parsedConfig.policy.acceptedOutputModes,
+    normalizeBaseUrl: parsedConfig.policy.normalizeBaseUrl,
+    enforceSupportedTransports: parsedConfig.policy.enforceSupportedTransports,
+  });
+  const targetCatalog = createTargetCatalog({
+    config: parsedConfig,
+    clientPool,
+  });
+
+  await targetCatalog.hydrateConfiguredTarget("support");
+  assert.equal(peer.state.cardRequests, 1);
+
+  const service = new A2AOutboundService({
+    parsedConfig,
+    clientPool,
+    targetCatalog,
+    logger: {
+      info() {},
+      warn() {},
+      error() {},
+    },
+  });
+  const result = await service.execute({
+    action: "list_targets",
+  });
+
+  const success = asSuccess(result);
+  const targets = targetsFromSummary(success.summary);
+
+  assert.equal(success.action, "list_targets");
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0]?.target_alias, "support");
+  assert.equal(targets[0]?.target_name, "Mock Peer");
+  assert.equal(targets[0]?.description, "Primary support lane");
+  assert.equal(targets[0]?.streaming_supported, true);
+  assert.equal(peer.state.cardRequests, 1);
+  assert.ok(Array.isArray(success.raw));
+});
+
+test("send fails validation when no target can be resolved", async () => {
+  const { service } = buildService();
+
+  const result = await service.execute({
+    action: "send",
+    input: "hello",
+  });
+
+  const failure = asFailure(result);
+
+  assert.equal(failure.operation, "remote_agent");
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+});
+
+test("watch returns an actionable failure when the target is known not to support streaming", async (t) => {
   const peer = await startPeer({
     streaming: false,
-    sendResult: {
-      kind: 'message',
-      messageId: 'fallback-message-1',
-      role: 'agent',
-      parts: [{ kind: 'text', text: 'fallback' }],
-    },
-  })
-  t.after(() => peer.server.close())
+  });
+  t.after(() => peer.server.close());
 
-  const service = buildService()
-  const result = await service.delegateStream({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('fallback please'),
-  })
-
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
-
-  assert.equal(success.operation, 'a2a_delegate_stream')
-  assert.equal(success.summary.kind, 'stream')
-  assert.equal(success.summary.eventCount, 1)
-  assert.equal(success.summary.finalEventKind, 'message')
-  assert.equal(success.summary.messageId, 'fallback-message-1')
-  assert.equal(success.summary.taskHandle, undefined)
-  assert.ok(Array.isArray(raw.events))
-  assert.equal((raw.events as unknown[]).length, 1)
-  assert.equal(peer.state.sendCalls, 1)
-  assert.equal(peer.state.streamCalls, 0)
-})
-
-test('task status success returns normalized envelope and raw payload', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.status({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-99',
-      historyLength: 3,
-    },
-  })
-
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
-
-  assert.equal(success.operation, 'a2a_task_status')
-  assert.equal(success.summary.taskId, 'task-99')
-  assert.equal(success.summary.status, 'completed')
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-  assert.equal(raw.id, 'task-99')
-  assert.equal(peer.state.getCalls, 1)
-  assert.ok(peer.state.lastGetTaskParams)
-  assert.equal(peer.state.lastGetTaskParams.id, 'task-99')
-  assert.equal(peer.state.lastGetTaskParams.historyLength, 3)
-})
-
-test('task wait returns terminal success from the first poll', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-1',
-          contextId: 'ctx-wait-1',
-          status: {
-            state: 'completed',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-1',
-      waitTimeoutMs: 200,
-      initialDelayMs: 10,
-      maxDelayMs: 20,
-    },
-  })
-
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
-
-  assert.equal(success.operation, 'a2a_task_wait')
-  assert.equal(success.summary.taskId, 'task-wait-1')
-  assert.equal(success.summary.status, 'completed')
-  assert.equal(success.summary.attempts, 1)
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-  assert.equal(raw.id, 'task-wait-1')
-  assert.equal(peer.state.getCalls, 1)
-})
-
-test('task wait polls through non-terminal states and sends history/service parameters on every poll', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-2',
-          contextId: 'ctx-wait-2',
-          status: {
-            state: 'submitted',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-2',
-          contextId: 'ctx-wait-2',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-2',
-          contextId: 'ctx-wait-2',
-          status: {
-            state: 'completed',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 250,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {
-        'X-From-Config': 'config',
-      },
-    },
-  })
-
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-2',
-      waitTimeoutMs: 250,
-      historyLength: 4,
-      initialDelayMs: 5,
-      maxDelayMs: 10,
-      serviceParameters: {
-        'X-From-Config': 'override',
-        'X-From-Input': 'input',
-      },
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.status, 'completed')
-  assert.equal(success.summary.attempts, 3)
-  assert.equal(peer.state.getCalls, 3)
-  assert.equal(peer.state.getTaskParams.length, 3)
-  assert.equal(peer.state.getTaskHeaders.length, 3)
-
-  for (const params of peer.state.getTaskParams) {
-    assert.equal(params.id, 'task-wait-2')
-    assert.equal(params.historyLength, 4)
-  }
-
-  for (const headers of peer.state.getTaskHeaders) {
-    assert.equal(headers['x-from-config'], 'override')
-    assert.equal(headers['x-from-input'], 'input')
-  }
-})
-
-test('task wait treats input-required and auth-required as non-terminal states', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-3',
-          contextId: 'ctx-wait-3',
-          status: {
-            state: 'input-required',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-3',
-          contextId: 'ctx-wait-3',
-          status: {
-            state: 'auth-required',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-3',
-          contextId: 'ctx-wait-3',
-          status: {
-            state: 'completed',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-3',
-      waitTimeoutMs: 250,
-      initialDelayMs: 5,
-      maxDelayMs: 10,
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.status, 'completed')
-  assert.equal(success.summary.attempts, 3)
-  assert.equal(peer.state.getCalls, 3)
-})
-
-test('task wait treats unknown as a terminal success state', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-4',
-          contextId: 'ctx-wait-4',
-          status: {
-            state: 'unknown',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-4',
-      waitTimeoutMs: 200,
-      initialDelayMs: 5,
-      maxDelayMs: 10,
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.status, 'unknown')
-  assert.equal(success.summary.attempts, 1)
-  assert.equal(peer.state.getCalls, 1)
-})
-
-test('task wait returns WAIT_TIMEOUT with the latest task snapshot', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-timeout',
-          contextId: 'ctx-wait-timeout',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-      {
-        delayMs: 80,
-        result: {
-          kind: 'task',
-          id: 'task-wait-timeout',
-          contextId: 'ctx-wait-timeout',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 20,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {},
-    },
-  })
-
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-timeout',
-      waitTimeoutMs: 60,
-      initialDelayMs: 10,
-      maxDelayMs: 10,
-    },
-  })
-
-  const failure = asFailure(result)
-  const details = asRecord(failure.error.details)
-  const lastTask = asRecord(details.lastTask)
-  const lastError = asRecord(details.lastError)
-
-  assert.equal(failure.operation, 'a2a_task_wait')
-  assert.equal(failure.error.code, 'WAIT_TIMEOUT')
-  assert.equal(details.taskId, 'task-wait-timeout')
-  assert.equal(details.waitTimeoutMs, 60)
-  assert.ok((details.attempts as number) >= 2)
-  assert.equal(lastTask.id, 'task-wait-timeout')
-  assert.equal(asRecord(lastTask.status).state, 'working')
-  assert.equal(lastError.code, 'A2A_SDK_ERROR')
-})
-
-test('task wait retries transient poll failures until a later poll succeeds', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        delayMs: 40,
-        result: {
-          kind: 'task',
-          id: 'task-wait-retry',
-          contextId: 'ctx-wait-retry',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'task',
-          id: 'task-wait-retry',
-          contextId: 'ctx-wait-retry',
-          status: {
-            state: 'completed',
-          },
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 10,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {},
-    },
-  })
-
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-retry',
-      waitTimeoutMs: 150,
-      initialDelayMs: 5,
-      maxDelayMs: 10,
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.status, 'completed')
-  assert.equal(success.summary.attempts, 2)
-  assert.equal(peer.state.getCalls, 2)
-})
-
-test('task wait aborts immediately on non-retryable poll failures', async (t) => {
-  const peer = await startPeer({
-    getTaskResponses: [
-      {
-        error: {
-          code: -32601,
-          message: 'method not found',
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.wait({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-wait-method-missing',
-      waitTimeoutMs: 150,
-      initialDelayMs: 5,
-      maxDelayMs: 10,
-    },
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.operation, 'a2a_task_wait')
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.match(failure.error.message, /method not found/i)
-  assert.equal(peer.state.getCalls, 1)
-})
-
-test('task resubscribe success returns normalized stream envelope', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    resubscribeResponses: [
-      {
-        result: {
-          kind: 'status-update',
-          taskId: 'task-resubscribe-1',
-          contextId: 'ctx-resubscribe-1',
-          status: {
-            state: 'working',
-          },
-          final: false,
-        },
-      },
-      {
-        result: {
-          kind: 'artifact-update',
-          taskId: 'task-resubscribe-1',
-          contextId: 'ctx-resubscribe-1',
-          artifact: {
-            artifactId: 'artifact-1',
-            parts: [{ kind: 'text', text: 'artifact chunk' }],
-          },
-          lastChunk: true,
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.resubscribe({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-resubscribe-1',
-    },
-  })
-
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
-
-  assert.equal(success.operation, 'a2a_task_resubscribe')
-  assert.equal(success.summary.kind, 'stream')
-  assert.equal(success.summary.eventCount, 2)
-  assert.equal(success.summary.finalEventKind, 'artifact-update')
-  assert.equal(success.summary.taskId, 'task-resubscribe-1')
-  assert.equal(success.summary.artifactId, 'artifact-1')
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-  assert.ok(Array.isArray(raw.events))
-  assert.equal((raw.events as unknown[]).length, 2)
-  assert.equal(asRecord(raw.finalEvent).kind, 'artifact-update')
-  assert.equal(peer.state.resubscribeCalls, 1)
-  assert.equal(asRecord(peer.state.lastResubscribeParams ?? {}).id, 'task-resubscribe-1')
-})
-
-test('task cancel success returns normalized envelope and raw payload', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.cancel({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-13',
-    },
-  })
-
-  const success = asSuccess(result)
-  const raw = asRecord(success.raw)
-
-  assert.equal(success.operation, 'a2a_task_cancel')
-  assert.equal(success.summary.taskId, 'task-13')
-  assert.equal(success.summary.status, 'canceled')
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/)
-  assert.equal(raw.id, 'task-13')
-  assert.equal(peer.state.cancelCalls, 1)
-})
-
-test('status, wait, cancel, and resubscribe accept request.taskHandle without explicit target', async (t) => {
-  const peer = await startPeer({
-    sendResult: {
-      kind: 'task',
-      id: 'task-handle-1',
-      contextId: 'ctx-handle-1',
-      status: {
-        state: 'submitted',
-      },
-    },
-    resubscribeResponses: [
-      {
-        result: {
-          kind: 'status-update',
-          taskId: 'task-handle-1',
-          contextId: 'ctx-handle-1',
-          status: {
-            state: 'completed',
-          },
-          final: true,
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const delegated = asSuccess(
-    await service.delegate({
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: userMessageRequest('begin handle flow'),
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, {
+      alias: "support",
+      streamingSupported: false,
     }),
-  )
-  const taskHandle = taskHandleFromSummary(delegated.summary)
+    taskId: "task-no-stream-1",
+  }).taskHandle;
 
-  const status = asSuccess(
-    await service.status({
-      request: {
-        taskHandle,
-      },
-    }),
-  )
-  const waited = asSuccess(
-    await service.wait({
-      request: {
-        taskHandle,
-        waitTimeoutMs: 150,
-        initialDelayMs: 5,
-        maxDelayMs: 10,
-      },
-    }),
-  )
-  const canceled = asSuccess(
-    await service.cancel({
-      request: {
-        taskHandle,
-      },
-    }),
-  )
-  const resubscribed = asSuccess(
-    await service.resubscribe({
-      request: {
-        taskHandle,
-      },
-    }),
-  )
-
-  assert.equal(taskHandleFromSummary(status.summary), taskHandle)
-  assert.equal(taskHandleFromSummary(waited.summary), taskHandle)
-  assert.equal(taskHandleFromSummary(canceled.summary), taskHandle)
-  assert.equal(taskHandleFromSummary(resubscribed.summary), taskHandle)
-  assert.equal(peer.state.getCalls, 2)
-  assert.equal(peer.state.cancelCalls, 1)
-  assert.equal(peer.state.resubscribeCalls, 1)
-})
-
-test('follow-up calls refresh the same task handle', async (t) => {
-  const peer = await startPeer({
-    sendResult: {
-      kind: 'task',
-      id: 'task-refresh-1',
-      contextId: 'ctx-refresh-1',
-      status: {
-        state: 'submitted',
-      },
-    },
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    taskHandles: {
-      ttlMs: 50,
-      maxEntries: 1000,
-    },
-  })
-  const delegated = asSuccess(
-    await service.delegate({
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: userMessageRequest('begin refresh flow'),
-    }),
-  )
-  const taskHandle = taskHandleFromSummary(delegated.summary)
-
-  await sleep(30)
-  const firstStatus = asSuccess(
-    await service.status({
-      request: {
-        taskHandle,
-      },
-    }),
-  )
-
-  await sleep(30)
-  const secondStatus = asSuccess(
-    await service.status({
-      request: {
-        taskHandle,
-      },
-    }),
-  )
-
-  assert.equal(taskHandleFromSummary(firstStatus.summary), taskHandle)
-  assert.equal(taskHandleFromSummary(secondStatus.summary), taskHandle)
-  assert.equal(peer.state.getCalls, 2)
-})
-
-test('explicit target plus taskId still works after a handle expires', async (t) => {
-  const peer = await startPeer({
-    sendResult: {
-      kind: 'task',
-      id: 'task-expire-1',
-      contextId: 'ctx-expire-1',
-      status: {
-        state: 'submitted',
-      },
-    },
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    taskHandles: {
-      ttlMs: 20,
-      maxEntries: 1000,
-    },
-  })
-  const delegated = asSuccess(
-    await service.delegate({
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: userMessageRequest('begin expiry flow'),
-    }),
-  )
-  const expiredHandle = taskHandleFromSummary(delegated.summary)
-
-  await sleep(30)
-
-  const expired = asFailure(
-    await service.status({
-      request: {
-        taskHandle: expiredHandle,
-      },
-    }),
-  )
-  const explicit = asSuccess(
-    await service.status({
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: {
-        taskId: 'task-expire-1',
-      },
-    }),
-  )
-
-  assert.equal(expired.error.code, 'EXPIRED_TASK_HANDLE')
-  assert.equal(explicit.summary.taskId, 'task-expire-1')
-  assert.match(taskHandleFromSummary(explicit.summary), /^rah_/)
-})
-
-test('task resubscribe omits taskHandle when the stream never exposes a taskId', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    resubscribeResponses: [
-      {
-        result: {
-          kind: 'message',
-          messageId: 'message-no-task-1',
-          role: 'agent',
-          parts: [{ kind: 'text', text: 'no task id here' }],
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.resubscribe({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      taskId: 'task-resubscribe-no-handle',
-    },
-  })
-
-  const success = asSuccess(result)
-
-  assert.equal(success.summary.taskHandle, undefined)
-  assert.equal(success.summary.finalEventKind, 'message')
-})
-
-test('delegate stream treats an empty stream as failure', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    streamResponses: [],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.delegateStream({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('empty stream'),
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.operation, 'a2a_delegate_stream')
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.equal(failure.error.message, 'stream ended without events')
-})
-
-test('delegate stream decorates mid-stream failures with partial event details', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    streamResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-partial-1',
-          contextId: 'ctx-partial-1',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-      {
-        error: {
-          code: -32004,
-          message: 'stream exploded',
-        },
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.delegateStream({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('partial stream'),
-  })
-
-  const failure = asFailure(result)
-  const details = asRecord(failure.error.details)
-
-  assert.equal(failure.operation, 'a2a_delegate_stream')
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.equal(details.partialEventCount, 1)
-  assert.equal(asRecord(details.latestEventSummary).kind, 'task')
-  assert.equal(asRecord(details.latestEventSummary).taskId, 'task-partial-1')
-})
-
-test('delegate stream timeout handling maps to SDK timeout error', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    streamResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-timeout-1',
-          contextId: 'ctx-timeout-1',
-          status: {
-            state: 'submitted',
-          },
-        },
-        delayMs: 80,
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 10,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {},
-    },
-  })
-
-  const result = await service.delegateStream({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('slow stream'),
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.equal(failure.error.message, 'request timed out')
-})
-
-test('delegate stream abort handling preserves partial event details', async (t) => {
-  const peer = await startPeer({
-    streaming: true,
-    streamResponses: [
-      {
-        result: {
-          kind: 'task',
-          id: 'task-abort-1',
-          contextId: 'ctx-abort-1',
-          status: {
-            state: 'working',
-          },
-        },
-      },
-      {
-        result: {
-          kind: 'status-update',
-          taskId: 'task-abort-1',
-          contextId: 'ctx-abort-1',
-          status: {
-            state: 'completed',
-          },
-          final: true,
-        },
-        delayMs: 80,
-      },
-    ],
-  })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 500,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {},
-    },
-  })
-  const controller = new AbortController()
-
-  const result = await service.delegateStream(
+  const { service } = buildService(
+    {},
     {
-      target: {
-        baseUrl: peer.baseUrl,
-        cardPath: peer.cardPath,
-      },
-      request: userMessageRequest('abort stream'),
+      taskHandleRegistry,
     },
-    {
-      signal: controller.signal,
-      onUpdate() {
-        controller.abort()
-      },
-    },
-  )
+  );
 
-  const failure = asFailure(result)
-  const details = asRecord(failure.error.details)
+  const result = await service.execute({
+    action: "watch",
+    task_handle: handle,
+  });
 
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.equal(failure.error.message, 'request timed out')
-  assert.equal(details.partialEventCount, 1)
-  assert.equal(asRecord(details.latestEventSummary).taskId, 'task-abort-1')
-})
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
 
-test('malformed input returns validation envelope', async () => {
-  const service = buildService()
-  const result = await service.delegate({
-    target: {
-      baseUrl: 'http://peer.example',
-    },
-    request: {
-      message: {
-        kind: 'message',
-        messageId: 'msg-1',
-        role: 'user',
-        parts: [{ kind: 'audio', data: {} }],
-      },
-    },
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.operation, 'a2a_delegate')
-  assert.equal(failure.error.code, 'VALIDATION_ERROR')
-  const details = asRecord(failure.error.details)
-  assert.equal(details.source, 'ajv')
-  assert.ok(Array.isArray(details.errors))
-  assert.ok((details.errors as unknown[]).length > 0)
-})
-
-test('transport mismatch returns deterministic SDK error envelope', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService()
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      preferredTransports: ['GRPC'],
-    },
-    request: userMessageRequest('transport mismatch'),
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.operation, 'a2a_delegate')
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-  assert.match(failure.error.message, /unsupported preferred transport/i)
-})
-
-test('delegate timeout handling maps to SDK timeout error', async (t) => {
-  const peer = await startPeer({ sendDelayMs: 80 })
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 10,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {},
-    },
-  })
-
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: userMessageRequest('slow request'),
-  })
-
-  const failure = asFailure(result)
-
-  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
-})
-
-test('serviceParameters merge defaults and per-call overrides', async (t) => {
-  const peer = await startPeer()
-  t.after(() => peer.server.close())
-
-  const service = buildService({
-    defaults: {
-      timeoutMs: 250,
-      cardPath: '/.well-known/agent-card.json',
-      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
-      serviceParameters: {
-        'X-From-Config': 'config',
-      },
-    },
-  })
-
-  const result = await service.delegate({
-    target: {
-      baseUrl: peer.baseUrl,
-      cardPath: peer.cardPath,
-    },
-    request: {
-      ...userMessageRequest('header test'),
-      serviceParameters: {
-        'X-From-Input': 'input',
-        'X-From-Config': 'override',
-      },
-    },
-  })
-
-  asSuccess(result)
-
-  assert.ok(peer.state.lastRpcHeaders)
-  assert.ok(peer.state.lastSendParams)
-  assert.equal(peer.state.lastRpcHeaders['x-from-input'], 'input')
-  assert.equal(peer.state.lastRpcHeaders['x-from-config'], 'override')
-  assert.equal('serviceParameters' in peer.state.lastSendParams, false)
-})
+  assert.equal(failure.action, "watch");
+  assert.equal(failure.error.code, "A2A_SDK_ERROR");
+  assert.match(failure.error.message, /action=status/);
+  assert.equal(details.recommended_action, "status");
+  assert.equal(peer.state.resubscribeCalls, 0);
+});

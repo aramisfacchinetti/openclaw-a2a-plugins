@@ -10,7 +10,7 @@ import {
   type A2AOutboundPluginConfig,
 } from "./config.js";
 import { log } from "./logging.js";
-import { TOOL_DEFINITIONS } from "./schemas.js";
+import { buildRemoteAgentToolDefinition } from "./schemas.js";
 import { buildService } from "./service.js";
 
 type SDKPluginEntry = {
@@ -73,51 +73,34 @@ function registerTools(api: OpenClawPluginApi): void {
   }
 
   const service = buildService({
-    config: api.pluginConfig,
+    parsedConfig: config,
     logger: api.logger,
   });
 
-  const delegateTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_delegate,
+  const remoteAgentTool: AnyAgentTool = {
+    ...buildRemoteAgentToolDefinition(config),
     execute: async (...args: unknown[]) => {
-      const { params, signal } = resolveExecuteArgs(args);
-      return jsonResult(await service.delegate(params, { signal }));
+      const { params, signal, onUpdate } = resolveExecuteArgs(args);
+      return jsonResult(
+        await service.execute(params, {
+          signal,
+          ...(onUpdate !== undefined
+            ? {
+                onUpdate(update) {
+                  onUpdate(jsonResult(update));
+                },
+              }
+            : {}),
+        }),
+      );
     },
   };
 
-  const statusTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_task_status,
-    execute: async (...args: unknown[]) => {
-      const { params, signal } = resolveExecuteArgs(args);
-      return jsonResult(await service.status(params, { signal }));
-    },
-  };
-
-  const waitTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_task_wait,
-    execute: async (...args: unknown[]) => {
-      const { params, signal } = resolveExecuteArgs(args);
-      return jsonResult(await service.wait(params, { signal }));
-    },
-  };
-
-  const cancelTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_task_cancel,
-    execute: async (...args: unknown[]) => {
-      const { params, signal } = resolveExecuteArgs(args);
-      return jsonResult(await service.cancel(params, { signal }));
-    },
-  };
-
-  const registeredTools = [delegateTool, statusTool, waitTool, cancelTool];
-
-  for (const tool of registeredTools) {
-    api.registerTool(tool, { optional: true });
-  }
+  api.registerTool(remoteAgentTool, { optional: true });
 
   log(api.logger, "info", "a2a.plugin.loaded", {
     pluginId: PLUGIN_ID,
-    tools: registeredTools.map((tool) => tool.name),
+    tools: [remoteAgentTool.name],
   });
 }
 

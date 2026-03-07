@@ -1,16 +1,5 @@
-import type {
-  Task,
-  TaskIdParams,
-  TaskQueryParams,
-} from "@a2a-js/sdk";
-import {
-  AuthenticatedExtendedCardNotConfiguredError,
-  ContentTypeNotSupportedError,
-  InvalidAgentResponseError,
-  TaskNotFoundError,
-  UnsupportedOperationError,
-} from "@a2a-js/sdk/client";
-import { setTimeout as sleepTimeout } from "node:timers/promises";
+import type { Task, TaskIdParams, TaskQueryParams } from "@a2a-js/sdk";
+import { UnsupportedOperationError } from "@a2a-js/sdk/client";
 import {
   parseA2AOutboundPluginConfig,
   type A2AOutboundPluginConfig,
@@ -24,26 +13,24 @@ import {
 } from "./errors.js";
 import { log, startSpan, type LoggerLike, type TracerLike } from "./logging.js";
 import {
-  delegateFailure,
-  delegateSuccess,
-  delegateStreamFailure,
-  delegateStreamSuccess,
-  OPERATIONS,
+  cancelSuccess,
+  listTargetsSuccess,
+  remoteAgentFailure,
+  sendStreamSuccess,
+  sendSuccess,
+  statusSuccess,
   streamUpdate,
   summarizeStreamEvent,
-  taskCancelFailure,
-  taskCancelSuccess,
-  taskResubscribeFailure,
-  taskResubscribeSuccess,
-  taskStatusFailure,
-  taskStatusSuccess,
-  taskWaitFailure,
-  taskWaitSuccess,
+  watchSuccess,
   type A2AStreamEventData,
   type A2AToolResult,
-  type StreamOperation,
   type StreamUpdateEnvelope,
+  type StreamingAction,
 } from "./result-shape.js";
+import {
+  buildRequestOptions,
+  normalizePlainIntentRequest,
+} from "./request-normalization.js";
 import {
   createClientPool,
   type ResolvedTarget,
@@ -51,22 +38,20 @@ import {
   type SDKClientPoolEntry,
 } from "./sdk-client-pool.js";
 import {
-  buildRequestOptions,
-  normalizeLegacyDelegateRequest,
-} from "./request-normalization.js";
+  buildRemoteAgentToolDefinition,
+  createRemoteAgentInputValidator,
+  type CancelActionInput,
+  type RemoteAgentAction,
+  type RemoteAgentToolInput,
+  type SendActionInput,
+  type StatusActionInput,
+  type ToolDefinition,
+  type WatchActionInput,
+} from "./schemas.js";
 import {
   createTargetCatalog,
   type TargetCatalog,
 } from "./target-catalog.js";
-import {
-  type A2ATargetInput,
-  validateCancelInput,
-  validateDelegateInput,
-  validateDelegateStreamInput,
-  validateResubscribeInput,
-  validateStatusInput,
-  validateWaitInput,
-} from "./schemas.js";
 import {
   createTaskHandleRegistry,
   type TaskHandleRegistry,
@@ -76,7 +61,7 @@ type ExecutionOptions = {
   signal?: AbortSignal;
 };
 
-type StreamExecutionOptions<T extends StreamOperation> = ExecutionOptions & {
+type StreamExecutionOptions<T extends StreamingAction> = ExecutionOptions & {
   onUpdate?: (update: StreamUpdateEnvelope<T>) => void;
 };
 
@@ -85,14 +70,16 @@ type StreamState = {
   latestSummary?: ReturnType<typeof summarizeStreamEvent>;
 };
 
-type FollowUpRequestInput = {
-  taskId?: string;
-  taskHandle?: string;
+type TargetContextInput = {
+  target_alias?: string;
+  target_url?: string;
 };
 
-type FollowUpToolInput = {
-  target?: A2ATargetInput;
-  request: FollowUpRequestInput;
+type FollowUpActionInput = WatchActionInput | StatusActionInput | CancelActionInput;
+
+type ResolvedClientContext = {
+  target: ResolvedTarget;
+  clientEntry: SDKClientPoolEntry;
 };
 
 type ResolvedTaskContext = ResolvedClientContext & {
@@ -100,140 +87,6 @@ type ResolvedTaskContext = ResolvedClientContext & {
   taskHandle?: string;
 };
 
-const TERMINAL_TASK_STATES = new Set<Task["status"]["state"]>([
-  "completed",
-  "canceled",
-  "failed",
-  "rejected",
-  "unknown",
-]);
-
-function isTerminalTaskState(state: Task["status"]["state"]): boolean {
-  return TERMINAL_TASK_STATES.has(state);
-}
-
-function calculateBackoffDelay(
-  iteration: number,
-  initialDelayMs: number,
-  maxDelayMs: number,
-  backoffMultiplier: number,
-): number {
-  const exponent = Math.max(0, iteration - 1);
-  const delayMs = initialDelayMs * backoffMultiplier ** exponent;
-
-  return Math.min(maxDelayMs, Math.round(delayMs));
-}
-
-function remainingTimeMs(deadlineMs: number): number {
-  return Math.max(0, deadlineMs - Date.now());
-}
-
-function elapsedTimeMs(startedAtMs: number, capMs?: number): number {
-  const elapsedMs = Date.now() - startedAtMs;
-  return capMs === undefined ? elapsedMs : Math.min(elapsedMs, capMs);
-}
-
-function errorCode(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-
-  if ("code" in error && typeof (error as { code?: unknown }).code === "string") {
-    return (error as { code: string }).code;
-  }
-
-  const cause = (error as { cause?: unknown }).cause;
-  if (
-    cause &&
-    typeof cause === "object" &&
-    "code" in cause &&
-    typeof (cause as { code?: unknown }).code === "string"
-  ) {
-    return (cause as { code: string }).code;
-  }
-
-  return undefined;
-}
-
-function isAbortOrTimeoutError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const name = String((error as { name?: unknown }).name ?? "");
-  return name === "AbortError" || name === "TimeoutError";
-}
-
-function isNetworkError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const code = errorCode(error);
-  if (
-    code !== undefined &&
-    /^(ECONNRESET|ECONNREFUSED|EPIPE|EAI_AGAIN|ENOTFOUND|ETIMEDOUT|UND_ERR_.*)$/i.test(
-      code,
-    )
-  ) {
-    return true;
-  }
-
-  return /fetch failed|network|socket|connection|terminated/i.test(error.message);
-}
-
-function isProtocolOrTaskError(error: unknown): boolean {
-  if (
-    error instanceof TaskNotFoundError ||
-    error instanceof UnsupportedOperationError ||
-    error instanceof InvalidAgentResponseError ||
-    error instanceof ContentTypeNotSupportedError ||
-    error instanceof AuthenticatedExtendedCardNotConfiguredError
-  ) {
-    return true;
-  }
-
-  return (
-    error instanceof Error &&
-    /^(JSON-RPC error:|REST error:)/.test(error.message)
-  );
-}
-
-function isTransientPollError(error: unknown): boolean {
-  if (isAbortOrTimeoutError(error)) {
-    return true;
-  }
-
-  if (isProtocolOrTaskError(error)) {
-    return false;
-  }
-
-  return isNetworkError(error);
-}
-
-async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
-  if (delayMs <= 0) {
-    return;
-  }
-
-  await sleepTimeout(delayMs, undefined, { signal });
-}
-
-function mergeSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
-  const availableSignals = signals.filter(
-    (signal): signal is AbortSignal => signal !== undefined,
-  );
-
-  if (availableSignals.length === 0) {
-    throw new TypeError("expected at least one signal");
-  }
-
-  if (availableSignals.length === 1) {
-    return availableSignals[0];
-  }
-
-  return AbortSignal.any(availableSignals);
-}
 function fallbackErrorCode(error: unknown): A2AOutboundErrorCode {
   if (error instanceof A2AOutboundError) {
     return error.code;
@@ -244,6 +97,44 @@ function fallbackErrorCode(error: unknown): A2AOutboundErrorCode {
   }
 
   return ERROR_CODES.INTERNAL_ERROR;
+}
+
+function targetIdentity(target: ResolvedTarget): string {
+  return JSON.stringify([
+    target.baseUrl,
+    target.cardPath,
+    ...target.preferredTransports,
+  ]);
+}
+
+function targetSummary(target: ResolvedTarget): Record<string, unknown> {
+  return {
+    baseUrl: target.baseUrl,
+    cardPath: target.cardPath,
+    preferredTransports: [...target.preferredTransports],
+    ...(target.alias !== undefined ? { alias: target.alias } : {}),
+  };
+}
+
+function firstStreamTaskId(
+  events: readonly A2AStreamEventData[],
+): string | undefined {
+  for (const event of events) {
+    switch (event.kind) {
+      case "message":
+        if (event.taskId !== undefined) {
+          return event.taskId;
+        }
+        break;
+      case "task":
+        return event.id;
+      case "status-update":
+      case "artifact-update":
+        return event.taskId;
+    }
+  }
+
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -280,23 +171,6 @@ function withErrorDetails(
   };
 }
 
-function targetIdentity(target: ResolvedTarget): string {
-  return JSON.stringify([
-    target.baseUrl,
-    target.cardPath,
-    ...target.preferredTransports,
-  ]);
-}
-
-function targetSummary(target: ResolvedTarget): Record<string, unknown> {
-  return {
-    baseUrl: target.baseUrl,
-    cardPath: target.cardPath,
-    preferredTransports: [...target.preferredTransports],
-    ...(target.alias !== undefined ? { alias: target.alias } : {}),
-  };
-}
-
 function taskHandleTargetMismatchError(
   taskHandle: string,
   handleTarget: ResolvedTarget,
@@ -304,11 +178,11 @@ function taskHandleTargetMismatchError(
 ): A2AOutboundError {
   return new A2AOutboundError(
     ERROR_CODES.VALIDATION_ERROR,
-    `request.taskHandle "${taskHandle}" does not match the explicit target`,
+    `task_handle "${taskHandle}" does not match the explicit target`,
     {
-      taskHandle,
-      handleTarget: targetSummary(handleTarget),
-      explicitTarget: targetSummary(explicitTarget),
+      task_handle: taskHandle,
+      handle_target: targetSummary(handleTarget),
+      explicit_target: targetSummary(explicitTarget),
     },
   );
 }
@@ -320,83 +194,79 @@ function taskHandleTaskIdMismatchError(
 ): A2AOutboundError {
   return new A2AOutboundError(
     ERROR_CODES.VALIDATION_ERROR,
-    `request.taskHandle "${taskHandle}" does not match request.taskId "${explicitTaskId}"`,
+    `task_handle "${taskHandle}" does not match task_id "${explicitTaskId}"`,
     {
-      taskHandle,
-      handleTaskId,
-      explicitTaskId,
+      task_handle: taskHandle,
+      handle_task_id: handleTaskId,
+      explicit_task_id: explicitTaskId,
     },
   );
 }
 
-function missingTaskContextError(): A2AOutboundError {
-  return new A2AOutboundError(
-    ERROR_CODES.VALIDATION_ERROR,
-    "request must include request.taskHandle or the explicit target + request.taskId path",
-  );
+function missingTargetContextError(action: "send" | "watch" | "status" | "cancel") {
+  const message =
+    action === "send"
+      ? "send requires target_alias, target_url, or a configured default target"
+      : `${action} requires task_handle, or task_id plus target_alias/target_url, or a configured default target`;
+
+  return new A2AOutboundError(ERROR_CODES.VALIDATION_ERROR, message);
 }
 
-function waitTimeoutError(
+function streamingNotSupportedError(
+  target: ResolvedTarget,
   taskId: string,
-  waitTimeoutMs: number,
-  attempts: number,
-  startedAtMs: number,
-  lastTask: Task | undefined,
-  lastError: ToolError | undefined,
 ): A2AOutboundError {
   return new A2AOutboundError(
-    ERROR_CODES.WAIT_TIMEOUT,
-    `timed out waiting for task ${taskId}`,
+    ERROR_CODES.A2A_SDK_ERROR,
+    `streaming updates are not available for task ${taskId}; retry with action=status`,
     {
-      taskId,
-      waitTimeoutMs,
-      attempts,
-      elapsedMs: elapsedTimeMs(startedAtMs, waitTimeoutMs),
-      lastTask: lastTask ?? null,
-      ...(lastError !== undefined ? { lastError } : {}),
+      task_id: taskId,
+      target_url: target.baseUrl,
+      ...(target.alias !== undefined ? { target_alias: target.alias } : {}),
+      ...(target.streamingSupported !== undefined
+        ? { streaming_supported: target.streamingSupported }
+        : {}),
+      recommended_action: "status",
     },
   );
 }
 
-function firstStreamTaskId(
-  events: readonly A2AStreamEventData[],
-): string | undefined {
-  for (const event of events) {
-    const summary = summarizeStreamEvent(event);
-    if (summary.taskId !== undefined) {
-      return summary.taskId;
-    }
-  }
-
-  return undefined;
-}
-
-async function consumeStream<T extends StreamOperation>(
+async function consumeStream<T extends StreamingAction>(
   stream: AsyncIterable<A2AStreamEventData>,
+  action: T,
   target: ResolvedTarget,
-  operation: T,
   state: StreamState,
   onUpdate?: (update: StreamUpdateEnvelope<T>) => void,
 ): Promise<void> {
   for await (const event of stream) {
     state.events.push(event);
-    state.latestSummary = summarizeStreamEvent(event);
-    onUpdate?.(streamUpdate(operation, target, event));
+    state.latestSummary = summarizeStreamEvent(target, event);
+    onUpdate?.(streamUpdate(action, target, event));
   }
+}
+
+function requestedAction(input: unknown): string {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "action" in input &&
+    typeof (input as { action?: unknown }).action === "string"
+  ) {
+    return (input as { action: string }).action;
+  }
+
+  return "unknown";
 }
 
 export interface A2AOutboundServiceOptions {
   config?: unknown;
+  parsedConfig?: A2AOutboundPluginConfig;
   logger?: LoggerLike;
   tracer?: TracerLike;
   clientPool?: SDKClientPool;
+  targetCatalog?: TargetCatalog;
   taskHandleRegistry?: TaskHandleRegistry;
 }
-
-type ResolvedClientContext = {
-  target: ResolvedTarget;
-  clientEntry: SDKClientPoolEntry;
-};
 
 export class A2AOutboundService {
   private readonly logger: LoggerLike | undefined;
@@ -411,10 +281,15 @@ export class A2AOutboundService {
 
   private readonly taskHandleRegistry: TaskHandleRegistry;
 
+  private readonly validateInput: (input: unknown) => RemoteAgentToolInput;
+
+  private readonly toolDefinition: ToolDefinition;
+
   constructor(options: A2AOutboundServiceOptions = {}) {
     this.logger = options.logger;
     this.tracer = options.tracer;
-    this.config = parseA2AOutboundPluginConfig(options.config);
+    this.config =
+      options.parsedConfig ?? parseA2AOutboundPluginConfig(options.config);
 
     this.clientPool =
       options.clientPool ??
@@ -427,10 +302,12 @@ export class A2AOutboundService {
           this.config.policy.enforceSupportedTransports,
       });
 
-    this.targetCatalog = createTargetCatalog({
-      config: this.config,
-      clientPool: this.clientPool,
-    });
+    this.targetCatalog =
+      options.targetCatalog ??
+      createTargetCatalog({
+        config: this.config,
+        clientPool: this.clientPool,
+      });
 
     this.taskHandleRegistry =
       options.taskHandleRegistry ??
@@ -438,67 +315,150 @@ export class A2AOutboundService {
         ttlMs: this.config.taskHandles.ttlMs,
         maxEntries: this.config.taskHandles.maxEntries,
       });
+
+    this.validateInput = createRemoteAgentInputValidator(this.config);
+    this.toolDefinition = buildRemoteAgentToolDefinition(this.config);
   }
 
-  private async resolveClient(
-    target: A2ATargetInput,
-  ): Promise<ResolvedClientContext> {
-    const resolvedTarget = this.targetCatalog.resolveRawTarget(target);
-    const clientEntry = await this.clientPool.get(resolvedTarget);
+  getToolDefinition(): ToolDefinition {
+    return {
+      ...this.toolDefinition,
+      parameters: {
+        ...this.toolDefinition.parameters,
+      },
+    };
+  }
+
+  async execute(
+    input: unknown,
+    options: StreamExecutionOptions<StreamingAction> = {},
+  ): Promise<A2AToolResult> {
+    let validated: RemoteAgentToolInput;
+
+    try {
+      validated = this.validateInput(input);
+    } catch (error) {
+      const action = requestedAction(input);
+      const toolError = toToolError(error, fallbackErrorCode(error));
+
+      log(this.logger, "error", "a2a.remote_agent.validation_error", {
+        action,
+        error: toolError,
+      });
+
+      return remoteAgentFailure(action, toolError);
+    }
+
+    switch (validated.action) {
+      case "list_targets":
+        return this.listTargets();
+      case "send":
+        return validated.follow_updates === true
+          ? this.sendStream(validated, { signal: options.signal, onUpdate: options.onUpdate })
+          : this.send(validated, { signal: options.signal });
+      case "watch":
+        return this.watch(validated, {
+          signal: options.signal,
+          onUpdate: options.onUpdate,
+        });
+      case "status":
+        return this.status(validated, { signal: options.signal });
+      case "cancel":
+        return this.cancel(validated, { signal: options.signal });
+    }
+  }
+
+  private async resolveClient(target: ResolvedTarget): Promise<ResolvedClientContext> {
+    const clientEntry = await this.clientPool.get(target);
 
     return {
-      target: resolvedTarget,
+      target,
       clientEntry,
     };
   }
 
+  private resolveExplicitTarget(
+    input: TargetContextInput,
+  ): ResolvedTarget | undefined {
+    if (input.target_alias !== undefined) {
+      return this.targetCatalog.resolveAlias(input.target_alias);
+    }
+
+    if (input.target_url !== undefined) {
+      return this.targetCatalog.resolveRawTarget({
+        baseUrl: input.target_url,
+      });
+    }
+
+    return undefined;
+  }
+
+  private async resolveSendTarget(
+    input: SendActionInput,
+  ): Promise<ResolvedClientContext> {
+    const explicitTarget = this.resolveExplicitTarget(input);
+    const target = explicitTarget ?? this.targetCatalog.resolveDefaultTarget();
+
+    if (!target) {
+      throw missingTargetContextError("send");
+    }
+
+    return this.resolveClient(target);
+  }
+
   private async resolveTaskContext(
-    input: FollowUpToolInput,
+    input: FollowUpActionInput,
   ): Promise<ResolvedTaskContext> {
-    const { taskHandle, taskId } = input.request;
+    if (input.task_handle !== undefined) {
+      const handleRecord = this.taskHandleRegistry.resolve(input.task_handle);
 
-    if (taskHandle !== undefined) {
-      const handleRecord = this.taskHandleRegistry.resolve(taskHandle);
-
-      if (taskId !== undefined && taskId !== handleRecord.taskId) {
+      if (input.task_id !== undefined && input.task_id !== handleRecord.taskId) {
         throw taskHandleTaskIdMismatchError(
-          taskHandle,
+          input.task_handle,
           handleRecord.taskId,
-          taskId,
+          input.task_id,
         );
       }
 
-      if (input.target !== undefined) {
-        const explicitTarget = this.targetCatalog.resolveRawTarget(input.target);
-
-        if (targetIdentity(explicitTarget) !== targetIdentity(handleRecord.target)) {
-          throw taskHandleTargetMismatchError(
-            taskHandle,
-            handleRecord.target,
-            explicitTarget,
-          );
-        }
+      const explicitTarget = this.resolveExplicitTarget(input);
+      if (
+        explicitTarget !== undefined &&
+        targetIdentity(explicitTarget) !== targetIdentity(handleRecord.target)
+      ) {
+        throw taskHandleTargetMismatchError(
+          input.task_handle,
+          handleRecord.target,
+          explicitTarget,
+        );
       }
 
       const clientEntry = await this.clientPool.get(handleRecord.target);
 
       return {
-        target: clientEntry.target,
+        target: handleRecord.target,
         clientEntry,
         taskId: handleRecord.taskId,
-        taskHandle,
+        taskHandle: input.task_handle,
       };
     }
 
-    if (input.target === undefined || taskId === undefined) {
-      throw missingTaskContextError();
+    if (input.task_id === undefined) {
+      throw missingTargetContextError(input.action);
     }
 
-    const resolved = await this.resolveClient(input.target);
+    const target =
+      this.resolveExplicitTarget(input) ?? this.targetCatalog.resolveDefaultTarget();
+
+    if (!target) {
+      throw missingTargetContextError(input.action);
+    }
+
+    const clientEntry = await this.clientPool.get(target);
 
     return {
-      ...resolved,
-      taskId,
+      target,
+      clientEntry,
+      taskId: input.task_id,
     };
   }
 
@@ -527,18 +487,35 @@ export class A2AOutboundService {
       : undefined;
   }
 
-  async delegate(
-    input: unknown,
-    options: ExecutionOptions = {},
-  ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.delegate");
-    let target;
+  private async listTargets(): Promise<A2AToolResult> {
+    const span = startSpan(this.tracer, "a2a.remote_agent.list_targets");
 
     try {
-      const validated = validateDelegateInput(input);
-      const resolved = await this.resolveClient(validated.target);
+      return listTargetsSuccess(this.targetCatalog.listEntries());
+    } catch (error) {
+      const toolError = toToolError(error, fallbackErrorCode(error));
+
+      log(this.logger, "error", "a2a.remote_agent.list_targets.error", {
+        error: toolError,
+      });
+
+      return remoteAgentFailure("list_targets", toolError);
+    } finally {
+      span.end?.();
+    }
+  }
+
+  private async send(
+    input: SendActionInput,
+    options: ExecutionOptions,
+  ): Promise<A2AToolResult> {
+    const span = startSpan(this.tracer, "a2a.remote_agent.send");
+    let target: ResolvedTarget | undefined;
+
+    try {
+      const resolved = await this.resolveSendTarget(input);
       target = resolved.target;
-      const normalized = normalizeLegacyDelegateRequest(validated.request, {
+      const normalized = normalizePlainIntentRequest(input, {
         defaultTimeoutMs: this.config.defaults.timeoutMs,
         defaultServiceParameters: this.config.defaults.serviceParameters,
         signal: options.signal,
@@ -552,36 +529,35 @@ export class A2AOutboundService {
       const taskHandle =
         raw.kind === "task" ? this.bindTaskHandle(target, raw.id) : undefined;
 
-      return delegateSuccess(target, raw, taskHandle);
+      return sendSuccess(target, raw, taskHandle);
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
-      log(this.logger, "error", "a2a.delegate.error", {
+      log(this.logger, "error", "a2a.remote_agent.send.error", {
         target,
         error: toolError,
       });
 
-      return delegateFailure(target, toolError);
+      return remoteAgentFailure("send", toolError);
     } finally {
       span.end?.();
     }
   }
 
-  async delegateStream(
-    input: unknown,
-    options: StreamExecutionOptions<typeof OPERATIONS.DELEGATE_STREAM> = {},
+  private async sendStream(
+    input: SendActionInput,
+    options: StreamExecutionOptions<"send">,
   ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.delegate_stream");
-    let target;
+    const span = startSpan(this.tracer, "a2a.remote_agent.send_stream");
+    let target: ResolvedTarget | undefined;
     const state: StreamState = {
       events: [],
     };
 
     try {
-      const validated = validateDelegateStreamInput(input);
-      const resolved = await this.resolveClient(validated.target);
+      const resolved = await this.resolveSendTarget(input);
       target = resolved.target;
-      const normalized = normalizeLegacyDelegateRequest(validated.request, {
+      const normalized = normalizePlainIntentRequest(input, {
         defaultTimeoutMs: this.config.defaults.timeoutMs,
         defaultServiceParameters: this.config.defaults.serviceParameters,
         signal: options.signal,
@@ -592,8 +568,8 @@ export class A2AOutboundService {
           normalized.sendParams,
           normalized.requestOptions,
         ),
+        "send",
         target,
-        OPERATIONS.DELEGATE_STREAM,
         state,
         options.onUpdate,
       );
@@ -605,7 +581,7 @@ export class A2AOutboundService {
         );
       }
 
-      return delegateStreamSuccess(
+      return sendStreamSuccess(
         target,
         state.events,
         this.bindStreamTaskHandle(target, state.events),
@@ -615,227 +591,92 @@ export class A2AOutboundService {
 
       if (state.events.length > 0 && state.latestSummary) {
         toolError = withErrorDetails(toolError, {
-          partialEventCount: state.events.length,
-          latestEventSummary: state.latestSummary,
+          partial_event_count: state.events.length,
+          latest_event_summary: state.latestSummary,
         });
       }
 
-      log(this.logger, "error", "a2a.delegate_stream.error", {
+      log(this.logger, "error", "a2a.remote_agent.send_stream.error", {
         target,
         error: toolError,
       });
 
-      return delegateStreamFailure(target, toolError);
+      return remoteAgentFailure("send", toolError);
     } finally {
       span.end?.();
     }
   }
 
-  async status(
-    input: unknown,
-    options: ExecutionOptions = {},
+  private async status(
+    input: StatusActionInput,
+    options: ExecutionOptions,
   ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.status");
-    let target;
+    const span = startSpan(this.tracer, "a2a.remote_agent.status");
+    let target: ResolvedTarget | undefined;
     let taskId: string | undefined;
 
     try {
-      const validated = validateStatusInput(input);
-      const resolved = await this.resolveTaskContext(validated);
-      taskId = resolved.taskId;
+      const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
+      taskId = resolved.taskId;
 
       const params: TaskQueryParams = {
         id: resolved.taskId,
-        ...(validated.request.historyLength !== undefined
-          ? { historyLength: validated.request.historyLength }
+        ...(input.history_length !== undefined
+          ? { historyLength: input.history_length }
           : {}),
       };
 
       const raw = await resolved.clientEntry.client.getTask(
         params,
         buildRequestOptions(
-          validated.request.timeoutMs,
+          input.timeout_ms,
           this.config.defaults.timeoutMs,
           this.config.defaults.serviceParameters,
-          validated.request.serviceParameters,
+          input.service_parameters,
           options.signal,
         ),
       );
 
-      return taskStatusSuccess(
+      return statusSuccess(
         target,
-        raw.id,
         raw,
         this.bindTaskHandle(target, raw.id, resolved.taskHandle),
       );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
-      log(this.logger, "error", "a2a.status.error", {
+      log(this.logger, "error", "a2a.remote_agent.status.error", {
         target,
         taskId,
         error: toolError,
       });
 
-      return taskStatusFailure(target, toolError);
+      return remoteAgentFailure("status", toolError);
     } finally {
       span.end?.();
     }
   }
 
-  async wait(
-    input: unknown,
-    options: ExecutionOptions = {},
+  private async watch(
+    input: WatchActionInput,
+    options: StreamExecutionOptions<"watch">,
   ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.wait");
-    const startedAtMs = Date.now();
-    let target;
-    let taskId: string | undefined;
-    let attempts = 0;
-
-    try {
-      const validated = validateWaitInput(input);
-      const resolved = await this.resolveTaskContext(validated);
-      taskId = resolved.taskId;
-      const deadlineMs = startedAtMs + validated.request.waitTimeoutMs;
-      target = resolved.target;
-
-      const params: TaskQueryParams = {
-        id: resolved.taskId,
-        ...(validated.request.historyLength !== undefined
-          ? { historyLength: validated.request.historyLength }
-          : {}),
-      };
-
-      let lastTask: Task | undefined;
-      let lastError: ToolError | undefined;
-      let retryCycle = 0;
-
-      while (true) {
-        const remainingPollBudgetMs = remainingTimeMs(deadlineMs);
-        if (remainingPollBudgetMs <= 0) {
-          throw waitTimeoutError(
-            resolved.taskId,
-            validated.request.waitTimeoutMs,
-            attempts,
-            startedAtMs,
-            lastTask,
-            lastError,
-          );
-        }
-
-        attempts += 1;
-
-        try {
-          const raw = await resolved.clientEntry.client.getTask(
-            params,
-            buildRequestOptions(
-              validated.request.timeoutMs,
-              this.config.defaults.timeoutMs,
-              this.config.defaults.serviceParameters,
-              validated.request.serviceParameters,
-              mergeSignals([
-                options.signal,
-                AbortSignal.timeout(remainingPollBudgetMs),
-              ]),
-            ),
-          );
-
-          lastTask = raw;
-
-          if (isTerminalTaskState(raw.status.state)) {
-            return taskWaitSuccess(
-              target,
-              raw.id,
-              raw,
-              attempts,
-              elapsedTimeMs(startedAtMs),
-              this.bindTaskHandle(target, raw.id, resolved.taskHandle),
-            );
-          }
-        } catch (error) {
-          if (options.signal?.aborted === true) {
-            throw error;
-          }
-
-          if (!isTransientPollError(error)) {
-            throw error;
-          }
-
-          lastError = toToolError(error, fallbackErrorCode(error));
-
-          if (remainingTimeMs(deadlineMs) <= 0) {
-            throw waitTimeoutError(
-              resolved.taskId,
-              validated.request.waitTimeoutMs,
-              attempts,
-              startedAtMs,
-              lastTask,
-              lastError,
-            );
-          }
-        }
-
-        retryCycle += 1;
-        const remainingSleepBudgetMs = remainingTimeMs(deadlineMs);
-
-        if (remainingSleepBudgetMs <= 0) {
-          throw waitTimeoutError(
-            resolved.taskId,
-            validated.request.waitTimeoutMs,
-            attempts,
-            startedAtMs,
-            lastTask,
-            lastError,
-          );
-        }
-
-        await sleep(
-          Math.min(
-            calculateBackoffDelay(
-              retryCycle,
-              validated.request.initialDelayMs,
-              validated.request.maxDelayMs,
-              validated.request.backoffMultiplier,
-            ),
-            remainingSleepBudgetMs,
-          ),
-          options.signal,
-        );
-      }
-    } catch (error) {
-      const toolError = toToolError(error, fallbackErrorCode(error));
-
-      log(this.logger, "error", "a2a.wait.error", {
-        target,
-        taskId,
-        attempts,
-        error: toolError,
-      });
-
-      return taskWaitFailure(target, toolError);
-    } finally {
-      span.end?.();
-    }
-  }
-
-  async resubscribe(
-    input: unknown,
-    options: StreamExecutionOptions<typeof OPERATIONS.TASK_RESUBSCRIBE> = {},
-  ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.resubscribe");
-    let target;
+    const span = startSpan(this.tracer, "a2a.remote_agent.watch");
+    let target: ResolvedTarget | undefined;
     let taskId: string | undefined;
     const state: StreamState = {
       events: [],
     };
 
     try {
-      const validated = validateResubscribeInput(input);
-      const resolved = await this.resolveTaskContext(validated);
-      taskId = resolved.taskId;
+      const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
+      taskId = resolved.taskId;
+
+      if (resolved.target.streamingSupported === false) {
+        throw streamingNotSupportedError(resolved.target, resolved.taskId);
+      }
 
       const params: TaskIdParams = {
         id: resolved.taskId,
@@ -845,15 +686,15 @@ export class A2AOutboundService {
         resolved.clientEntry.client.resubscribeTask(
           params,
           buildRequestOptions(
-            validated.request.timeoutMs,
+            input.timeout_ms,
             this.config.defaults.timeoutMs,
             this.config.defaults.serviceParameters,
-            validated.request.serviceParameters,
+            input.service_parameters,
             options.signal,
           ),
         ),
+        "watch",
         target,
-        OPERATIONS.TASK_RESUBSCRIBE,
         state,
         options.onUpdate,
       );
@@ -865,46 +706,55 @@ export class A2AOutboundService {
         );
       }
 
-      return taskResubscribeSuccess(
+      return watchSuccess(
         target,
         state.events,
         this.bindStreamTaskHandle(target, state.events, resolved.taskHandle),
       );
     } catch (error) {
-      let toolError = toToolError(error, fallbackErrorCode(error));
+      let effectiveError = error;
+
+      if (
+        effectiveError instanceof UnsupportedOperationError &&
+        target !== undefined &&
+        taskId !== undefined
+      ) {
+        effectiveError = streamingNotSupportedError(target, taskId);
+      }
+
+      let toolError = toToolError(effectiveError, fallbackErrorCode(effectiveError));
 
       if (state.events.length > 0 && state.latestSummary) {
         toolError = withErrorDetails(toolError, {
-          partialEventCount: state.events.length,
-          latestEventSummary: state.latestSummary,
+          partial_event_count: state.events.length,
+          latest_event_summary: state.latestSummary,
         });
       }
 
-      log(this.logger, "error", "a2a.resubscribe.error", {
+      log(this.logger, "error", "a2a.remote_agent.watch.error", {
         target,
         taskId,
         error: toolError,
       });
 
-      return taskResubscribeFailure(target, toolError);
+      return remoteAgentFailure("watch", toolError);
     } finally {
       span.end?.();
     }
   }
 
-  async cancel(
-    input: unknown,
-    options: ExecutionOptions = {},
+  private async cancel(
+    input: CancelActionInput,
+    options: ExecutionOptions,
   ): Promise<A2AToolResult> {
-    const span = startSpan(this.tracer, "a2a.cancel");
-    let target;
+    const span = startSpan(this.tracer, "a2a.remote_agent.cancel");
+    let target: ResolvedTarget | undefined;
     let taskId: string | undefined;
 
     try {
-      const validated = validateCancelInput(input);
-      const resolved = await this.resolveTaskContext(validated);
-      taskId = resolved.taskId;
+      const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
+      taskId = resolved.taskId;
 
       const params: TaskIdParams = {
         id: resolved.taskId,
@@ -913,30 +763,29 @@ export class A2AOutboundService {
       const raw = await resolved.clientEntry.client.cancelTask(
         params,
         buildRequestOptions(
-          validated.request.timeoutMs,
+          input.timeout_ms,
           this.config.defaults.timeoutMs,
           this.config.defaults.serviceParameters,
-          validated.request.serviceParameters,
+          input.service_parameters,
           options.signal,
         ),
       );
 
-      return taskCancelSuccess(
+      return cancelSuccess(
         target,
-        raw.id,
         raw,
         this.bindTaskHandle(target, raw.id, resolved.taskHandle),
       );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
-      log(this.logger, "error", "a2a.cancel.error", {
+      log(this.logger, "error", "a2a.remote_agent.cancel.error", {
         target,
         taskId,
         error: toolError,
       });
 
-      return taskCancelFailure(target, toolError);
+      return remoteAgentFailure("cancel", toolError);
     } finally {
       span.end?.();
     }
