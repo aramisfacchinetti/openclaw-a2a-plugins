@@ -85,22 +85,6 @@ function registerTools(api: OpenClawPluginApi): void {
     },
   };
 
-  const delegateStreamTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_delegate_stream,
-    execute: async (...args: unknown[]) => {
-      const { params, signal, onUpdate } = resolveExecuteArgs(args);
-      return jsonResult(
-        await service.delegateStream(params, {
-          signal,
-          onUpdate:
-            onUpdate !== undefined
-              ? (update) => onUpdate(jsonResult(update))
-              : undefined,
-        }),
-      );
-    },
-  };
-
   const statusTool: AnyAgentTool = {
     ...TOOL_DEFINITIONS.a2a_task_status,
     execute: async (...args: unknown[]) => {
@@ -109,19 +93,11 @@ function registerTools(api: OpenClawPluginApi): void {
     },
   };
 
-  const resubscribeTool: AnyAgentTool = {
-    ...TOOL_DEFINITIONS.a2a_task_resubscribe,
+  const waitTool: AnyAgentTool = {
+    ...TOOL_DEFINITIONS.a2a_task_wait,
     execute: async (...args: unknown[]) => {
-      const { params, signal, onUpdate } = resolveExecuteArgs(args);
-      return jsonResult(
-        await service.resubscribe(params, {
-          signal,
-          onUpdate:
-            onUpdate !== undefined
-              ? (update) => onUpdate(jsonResult(update))
-              : undefined,
-        }),
-      );
+      const { params, signal } = resolveExecuteArgs(args);
+      return jsonResult(await service.wait(params, { signal }));
     },
   };
 
@@ -133,19 +109,15 @@ function registerTools(api: OpenClawPluginApi): void {
     },
   };
 
-  api.registerTool(delegateTool, { optional: true });
+  const registeredTools = [delegateTool, statusTool, waitTool, cancelTool];
 
-  api.registerTool(delegateStreamTool, { optional: true });
-
-  api.registerTool(statusTool, { optional: true });
-
-  api.registerTool(resubscribeTool, { optional: true });
-
-  api.registerTool(cancelTool, { optional: true });
+  for (const tool of registeredTools) {
+    api.registerTool(tool, { optional: true });
+  }
 
   log(api.logger, "info", "a2a.plugin.loaded", {
     pluginId: PLUGIN_ID,
-    tools: Object.keys(TOOL_DEFINITIONS),
+    tools: registeredTools.map((tool) => tool.name),
   });
 }
 

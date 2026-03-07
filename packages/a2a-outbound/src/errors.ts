@@ -1,6 +1,7 @@
 export const ERROR_CODES = {
   VALIDATION_ERROR: "VALIDATION_ERROR",
   A2A_SDK_ERROR: "A2A_SDK_ERROR",
+  WAIT_TIMEOUT: "WAIT_TIMEOUT",
   INTERNAL_ERROR: "INTERNAL_ERROR",
 } as const;
 
@@ -93,6 +94,52 @@ function summarizeUnknown(value: unknown): unknown {
   return String(value);
 }
 
+type ErrorResponseShape = {
+  error?: {
+    code?: unknown;
+    message?: unknown;
+    data?: unknown;
+  };
+};
+
+function errorResponseDetails(error: unknown): Record<string, unknown> | undefined {
+  if (!error || typeof error !== "object" || !("errorResponse" in error)) {
+    return undefined;
+  }
+
+  const errorResponse = (error as { errorResponse?: unknown })
+    .errorResponse as ErrorResponseShape | undefined;
+
+  if (!errorResponse?.error || typeof errorResponse.error !== "object") {
+    return undefined;
+  }
+
+  const details: Record<string, unknown> = {};
+
+  if (typeof errorResponse.error.code === "number") {
+    details.rpcCode = errorResponse.error.code;
+  }
+
+  if (errorResponse.error.data !== undefined) {
+    details.rpcData = summarizeUnknown(errorResponse.error.data);
+  }
+
+  return Object.keys(details).length > 0 ? details : undefined;
+}
+
+function errorResponseMessage(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("errorResponse" in error)) {
+    return undefined;
+  }
+
+  const errorResponse = (error as { errorResponse?: unknown })
+    .errorResponse as ErrorResponseShape | undefined;
+
+  return typeof errorResponse?.error?.message === "string"
+    ? errorResponse.error.message
+    : undefined;
+}
+
 function isAbortOrTimeoutError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -141,9 +188,14 @@ export function toToolError(
       details.cause = cause;
     }
 
+    const rpcDetails = errorResponseDetails(error);
+    if (rpcDetails !== undefined) {
+      Object.assign(details, rpcDetails);
+    }
+
     return {
       code: fallbackCode,
-      message: error.message,
+      message: error.message || errorResponseMessage(error) || "request failed",
       details,
     };
   }

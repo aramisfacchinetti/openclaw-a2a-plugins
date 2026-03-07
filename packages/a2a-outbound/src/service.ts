@@ -1,9 +1,18 @@
 import type {
   MessageSendParams,
+  Task,
   TaskIdParams,
   TaskQueryParams,
 } from "@a2a-js/sdk";
-import type { RequestOptions } from "@a2a-js/sdk/client";
+import {
+  AuthenticatedExtendedCardNotConfiguredError,
+  ContentTypeNotSupportedError,
+  InvalidAgentResponseError,
+  TaskNotFoundError,
+  UnsupportedOperationError,
+  type RequestOptions,
+} from "@a2a-js/sdk/client";
+import { setTimeout as sleepTimeout } from "node:timers/promises";
 import {
   parseA2AOutboundPluginConfig,
   type A2AOutboundPluginConfig,
@@ -12,6 +21,7 @@ import {
   type A2AOutboundErrorCode,
   A2AOutboundError,
   ERROR_CODES,
+  type ToolError,
   toToolError,
 } from "./errors.js";
 import { log, startSpan, type LoggerLike, type TracerLike } from "./logging.js";
@@ -29,6 +39,8 @@ import {
   taskResubscribeSuccess,
   taskStatusFailure,
   taskStatusSuccess,
+  taskWaitFailure,
+  taskWaitSuccess,
   type A2AStreamEventData,
   type A2AToolResult,
   type StreamOperation,
@@ -45,6 +57,7 @@ import {
   validateDelegateStreamInput,
   validateResubscribeInput,
   validateStatusInput,
+  validateWaitInput,
 } from "./schemas.js";
 
 type ExecutionOptions = {
@@ -59,6 +72,125 @@ type StreamState = {
   events: A2AStreamEventData[];
   latestSummary?: ReturnType<typeof summarizeStreamEvent>;
 };
+
+const TERMINAL_TASK_STATES = new Set<Task["status"]["state"]>([
+  "completed",
+  "canceled",
+  "failed",
+  "rejected",
+  "unknown",
+]);
+
+function isTerminalTaskState(state: Task["status"]["state"]): boolean {
+  return TERMINAL_TASK_STATES.has(state);
+}
+
+function calculateBackoffDelay(
+  iteration: number,
+  initialDelayMs: number,
+  maxDelayMs: number,
+  backoffMultiplier: number,
+): number {
+  const exponent = Math.max(0, iteration - 1);
+  const delayMs = initialDelayMs * backoffMultiplier ** exponent;
+
+  return Math.min(maxDelayMs, Math.round(delayMs));
+}
+
+function remainingTimeMs(deadlineMs: number): number {
+  return Math.max(0, deadlineMs - Date.now());
+}
+
+function elapsedTimeMs(startedAtMs: number, capMs?: number): number {
+  const elapsedMs = Date.now() - startedAtMs;
+  return capMs === undefined ? elapsedMs : Math.min(elapsedMs, capMs);
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  if ("code" in error && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code;
+  }
+
+  const cause = (error as { cause?: unknown }).cause;
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "code" in cause &&
+    typeof (cause as { code?: unknown }).code === "string"
+  ) {
+    return (cause as { code: string }).code;
+  }
+
+  return undefined;
+}
+
+function isAbortOrTimeoutError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const name = String((error as { name?: unknown }).name ?? "");
+  return name === "AbortError" || name === "TimeoutError";
+}
+
+function isNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const code = errorCode(error);
+  if (
+    code !== undefined &&
+    /^(ECONNRESET|ECONNREFUSED|EPIPE|EAI_AGAIN|ENOTFOUND|ETIMEDOUT|UND_ERR_.*)$/i.test(
+      code,
+    )
+  ) {
+    return true;
+  }
+
+  return /fetch failed|network|socket|connection|terminated/i.test(error.message);
+}
+
+function isProtocolOrTaskError(error: unknown): boolean {
+  if (
+    error instanceof TaskNotFoundError ||
+    error instanceof UnsupportedOperationError ||
+    error instanceof InvalidAgentResponseError ||
+    error instanceof ContentTypeNotSupportedError ||
+    error instanceof AuthenticatedExtendedCardNotConfiguredError
+  ) {
+    return true;
+  }
+
+  return (
+    error instanceof Error &&
+    /^(JSON-RPC error:|REST error:)/.test(error.message)
+  );
+}
+
+function isTransientPollError(error: unknown): boolean {
+  if (isAbortOrTimeoutError(error)) {
+    return true;
+  }
+
+  if (isProtocolOrTaskError(error)) {
+    return false;
+  }
+
+  return isNetworkError(error);
+}
+
+async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) {
+    return;
+  }
+
+  await sleepTimeout(delayMs, undefined, { signal });
+}
 
 function mergeServiceParameters(
   base: Record<string, string>,
@@ -153,6 +285,28 @@ function withErrorDetails(
       ...details,
     },
   };
+}
+
+function waitTimeoutError(
+  taskId: string,
+  waitTimeoutMs: number,
+  attempts: number,
+  startedAtMs: number,
+  lastTask: Task | undefined,
+  lastError: ToolError | undefined,
+): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.WAIT_TIMEOUT,
+    `timed out waiting for task ${taskId}`,
+    {
+      taskId,
+      waitTimeoutMs,
+      attempts,
+      elapsedMs: elapsedTimeMs(startedAtMs, waitTimeoutMs),
+      lastTask: lastTask ?? null,
+      ...(lastError !== undefined ? { lastError } : {}),
+    },
+  );
 }
 
 async function consumeStream<T extends StreamOperation>(
@@ -364,6 +518,141 @@ export class A2AOutboundService {
       });
 
       return taskStatusFailure(target, toolError);
+    } finally {
+      span.end?.();
+    }
+  }
+
+  async wait(
+    input: unknown,
+    options: ExecutionOptions = {},
+  ): Promise<A2AToolResult> {
+    const span = startSpan(this.tracer, "a2a.wait");
+    const startedAtMs = Date.now();
+    let target;
+    let taskId: string | undefined;
+    let attempts = 0;
+
+    try {
+      const validated = validateWaitInput(input);
+      taskId = validated.request.taskId;
+      const deadlineMs = startedAtMs + validated.request.waitTimeoutMs;
+      const resolved = await this.clientPool.get(validated.target);
+      target = resolved.target;
+
+      const params: TaskQueryParams = {
+        id: validated.request.taskId,
+        ...(validated.request.historyLength !== undefined
+          ? { historyLength: validated.request.historyLength }
+          : {}),
+      };
+
+      let lastTask: Task | undefined;
+      let lastError: ToolError | undefined;
+      let retryCycle = 0;
+
+      while (true) {
+        const remainingPollBudgetMs = remainingTimeMs(deadlineMs);
+        if (remainingPollBudgetMs <= 0) {
+          throw waitTimeoutError(
+            validated.request.taskId,
+            validated.request.waitTimeoutMs,
+            attempts,
+            startedAtMs,
+            lastTask,
+            lastError,
+          );
+        }
+
+        attempts += 1;
+
+        try {
+          const raw = await resolved.client.getTask(
+            params,
+            requestOptions(
+              validated.request.timeoutMs,
+              this.config.defaults.timeoutMs,
+              this.config.defaults.serviceParameters,
+              validated.request.serviceParameters,
+              mergeSignals([
+                options.signal,
+                AbortSignal.timeout(remainingPollBudgetMs),
+              ]),
+            ),
+          );
+
+          lastTask = raw;
+
+          if (isTerminalTaskState(raw.status.state)) {
+            return taskWaitSuccess(
+              target,
+              validated.request.taskId,
+              raw,
+              attempts,
+              elapsedTimeMs(startedAtMs),
+            );
+          }
+        } catch (error) {
+          if (options.signal?.aborted === true) {
+            throw error;
+          }
+
+          if (!isTransientPollError(error)) {
+            throw error;
+          }
+
+          lastError = toToolError(error, fallbackErrorCode(error));
+
+          if (remainingTimeMs(deadlineMs) <= 0) {
+            throw waitTimeoutError(
+              validated.request.taskId,
+              validated.request.waitTimeoutMs,
+              attempts,
+              startedAtMs,
+              lastTask,
+              lastError,
+            );
+          }
+        }
+
+        retryCycle += 1;
+        const remainingSleepBudgetMs = remainingTimeMs(deadlineMs);
+
+        if (remainingSleepBudgetMs <= 0) {
+          throw waitTimeoutError(
+            validated.request.taskId,
+            validated.request.waitTimeoutMs,
+            attempts,
+            startedAtMs,
+            lastTask,
+            lastError,
+          );
+        }
+
+        await sleep(
+          Math.min(
+            calculateBackoffDelay(
+              retryCycle,
+              validated.request.initialDelayMs,
+              validated.request.maxDelayMs,
+              validated.request.backoffMultiplier,
+            ),
+            remainingSleepBudgetMs,
+          ),
+          options.signal,
+        );
+      }
+    } catch (error) {
+      const toolError = toToolError(error, fallbackErrorCode(error));
+
+      log(this.logger, "error", "a2a.wait.error", {
+        target,
+        taskId,
+        attempts,
+        error: toolError,
+      });
+
+      return taskWaitFailure(target, toolError);
     } finally {
       span.end?.();
     }

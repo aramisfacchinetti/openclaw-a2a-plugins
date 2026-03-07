@@ -55,15 +55,14 @@ test('integration smoke: plugin loads with official OpenClawPluginApi shape', ()
 
   plugin.register(api)
 
-  assert.equal(registrations.length, 5)
+  assert.equal(registrations.length, 4)
   assert.deepEqual(
     registrations.map((entry) => entry.tool.name).sort(),
     [
       'a2a_delegate',
-      'a2a_delegate_stream',
       'a2a_task_cancel',
-      'a2a_task_resubscribe',
       'a2a_task_status',
+      'a2a_task_wait',
     ],
   )
 

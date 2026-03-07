@@ -17,6 +17,7 @@ export const OPERATIONS = {
   DELEGATE: "a2a_delegate",
   DELEGATE_STREAM: "a2a_delegate_stream",
   TASK_STATUS: "a2a_task_status",
+  TASK_WAIT: "a2a_task_wait",
   TASK_RESUBSCRIBE: "a2a_task_resubscribe",
   TASK_CANCEL: "a2a_task_cancel",
 } as const;
@@ -51,6 +52,7 @@ export type OperationRawMap = {
   [OPERATIONS.DELEGATE]: SendMessageResult;
   [OPERATIONS.DELEGATE_STREAM]: StreamRawResult;
   [OPERATIONS.TASK_STATUS]: Task;
+  [OPERATIONS.TASK_WAIT]: Task;
   [OPERATIONS.TASK_RESUBSCRIBE]: StreamRawResult;
   [OPERATIONS.TASK_CANCEL]: Task;
 };
@@ -250,6 +252,34 @@ export function taskStatusFailure(
   error: ToolError,
 ): FailureEnvelope {
   return failureEnvelope(OPERATIONS.TASK_STATUS, target, error);
+}
+
+export function taskWaitSuccess(
+  target: ResolvedTarget,
+  taskId: string,
+  raw: Task,
+  attempts: number,
+  elapsedMs: number,
+): SuccessEnvelope<typeof OPERATIONS.TASK_WAIT> {
+  return {
+    ok: true,
+    operation: OPERATIONS.TASK_WAIT,
+    target,
+    summary: {
+      taskId,
+      status: taskState(raw),
+      attempts,
+      elapsedMs,
+    },
+    raw,
+  };
+}
+
+export function taskWaitFailure(
+  target: ResolvedTarget | undefined,
+  error: ToolError,
+): FailureEnvelope {
+  return failureEnvelope(OPERATIONS.TASK_WAIT, target, error);
 }
 
 export function taskResubscribeSuccess(

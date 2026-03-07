@@ -12,11 +12,13 @@ import type { A2AOutboundPluginConfig } from '../dist/config.js'
 
 type JsonObject = Record<string, unknown>
 
-type SseResponse = {
+type RpcResponse = {
   result?: JsonObject
   error?: JsonObject
   delayMs?: number
 }
+
+type SseResponse = RpcResponse
 
 type StartPeerOptions = {
   cardPath?: string
@@ -25,6 +27,7 @@ type StartPeerOptions = {
   sendDelayMs?: number
   sendResult?: JsonObject
   getTaskResult?: JsonObject
+  getTaskResponses?: RpcResponse[]
   cancelTaskResult?: JsonObject
   streamResponses?: SseResponse[]
   resubscribeResponses?: SseResponse[]
@@ -34,6 +37,8 @@ type PeerState = {
   lastRpcHeaders?: IncomingHttpHeaders
   lastSendParams?: JsonObject
   lastGetTaskParams?: JsonObject
+  getTaskHeaders: IncomingHttpHeaders[]
+  getTaskParams: JsonObject[]
   lastStreamParams?: JsonObject
   lastResubscribeParams?: JsonObject
   sendCalls: number
@@ -124,6 +129,35 @@ function readJson(req: IncomingMessage): Promise<JsonObject> {
   })
 }
 
+function sequenceValue<T>(values: T[] | undefined, index: number): T | undefined {
+  if (!values || values.length === 0) {
+    return undefined
+  }
+
+  return values[Math.min(index, values.length - 1)]
+}
+
+async function sendRpcResponse(
+  res: ServerResponse,
+  id: unknown,
+  response: RpcResponse | undefined,
+  fallbackResult: JsonObject,
+): Promise<void> {
+  if (response?.delayMs) {
+    await sleep(response.delayMs)
+  }
+
+  json(res, 200, {
+    jsonrpc: '2.0',
+    id,
+    ...(response?.result !== undefined
+      ? { result: response.result }
+      : response?.error !== undefined
+        ? { error: response.error }
+        : { result: fallbackResult }),
+  })
+}
+
 async function sendSseResponses(
   res: ServerResponse,
   id: unknown,
@@ -157,6 +191,8 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
     lastRpcHeaders: undefined,
     lastSendParams: undefined,
     lastGetTaskParams: undefined,
+    getTaskHeaders: [],
+    getTaskParams: [],
     lastStreamParams: undefined,
     lastResubscribeParams: undefined,
     sendCalls: 0,
@@ -235,20 +271,22 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
       if (payload.method === 'tasks/get') {
         state.getCalls += 1
         state.lastGetTaskParams = payloadParams
+        state.getTaskHeaders.push(req.headers)
+        state.getTaskParams.push(payloadParams)
 
-        return json(res, 200, {
-          jsonrpc: '2.0',
-          id: payload.id,
-          result:
-            options.getTaskResult ?? {
-              kind: 'task',
-              id: payloadParams.id,
-              contextId: 'ctx-1',
-              status: {
-                state: 'completed',
-              },
+        return await sendRpcResponse(
+          res,
+          payload.id,
+          sequenceValue(options.getTaskResponses, state.getCalls - 1),
+          options.getTaskResult ?? {
+            kind: 'task',
+            id: payloadParams.id,
+            contextId: 'ctx-1',
+            status: {
+              state: 'completed',
             },
-        })
+          },
+        )
       }
 
       if (payload.method === 'tasks/cancel') {
@@ -624,6 +662,386 @@ test('task status success returns normalized envelope and raw payload', async (t
   assert.ok(peer.state.lastGetTaskParams)
   assert.equal(peer.state.lastGetTaskParams.id, 'task-99')
   assert.equal(peer.state.lastGetTaskParams.historyLength, 3)
+})
+
+test('task wait returns terminal success from the first poll', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-1',
+          contextId: 'ctx-wait-1',
+          status: {
+            state: 'completed',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-1',
+      waitTimeoutMs: 200,
+      initialDelayMs: 10,
+      maxDelayMs: 20,
+    },
+  })
+
+  const success = asSuccess(result)
+  const raw = asRecord(success.raw)
+
+  assert.equal(success.operation, 'a2a_task_wait')
+  assert.equal(success.summary.taskId, 'task-wait-1')
+  assert.equal(success.summary.status, 'completed')
+  assert.equal(success.summary.attempts, 1)
+  assert.equal(raw.id, 'task-wait-1')
+  assert.equal(peer.state.getCalls, 1)
+})
+
+test('task wait polls through non-terminal states and sends history/service parameters on every poll', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-2',
+          contextId: 'ctx-wait-2',
+          status: {
+            state: 'submitted',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-2',
+          contextId: 'ctx-wait-2',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-2',
+          contextId: 'ctx-wait-2',
+          status: {
+            state: 'completed',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    defaults: {
+      timeoutMs: 250,
+      cardPath: '/.well-known/agent-card.json',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+      serviceParameters: {
+        'X-From-Config': 'config',
+      },
+    },
+  })
+
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-2',
+      waitTimeoutMs: 250,
+      historyLength: 4,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+      serviceParameters: {
+        'X-From-Config': 'override',
+        'X-From-Input': 'input',
+      },
+    },
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.status, 'completed')
+  assert.equal(success.summary.attempts, 3)
+  assert.equal(peer.state.getCalls, 3)
+  assert.equal(peer.state.getTaskParams.length, 3)
+  assert.equal(peer.state.getTaskHeaders.length, 3)
+
+  for (const params of peer.state.getTaskParams) {
+    assert.equal(params.id, 'task-wait-2')
+    assert.equal(params.historyLength, 4)
+  }
+
+  for (const headers of peer.state.getTaskHeaders) {
+    assert.equal(headers['x-from-config'], 'override')
+    assert.equal(headers['x-from-input'], 'input')
+  }
+})
+
+test('task wait treats input-required and auth-required as non-terminal states', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-3',
+          contextId: 'ctx-wait-3',
+          status: {
+            state: 'input-required',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-3',
+          contextId: 'ctx-wait-3',
+          status: {
+            state: 'auth-required',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-3',
+          contextId: 'ctx-wait-3',
+          status: {
+            state: 'completed',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-3',
+      waitTimeoutMs: 250,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+    },
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.status, 'completed')
+  assert.equal(success.summary.attempts, 3)
+  assert.equal(peer.state.getCalls, 3)
+})
+
+test('task wait treats unknown as a terminal success state', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-4',
+          contextId: 'ctx-wait-4',
+          status: {
+            state: 'unknown',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-4',
+      waitTimeoutMs: 200,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+    },
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.status, 'unknown')
+  assert.equal(success.summary.attempts, 1)
+  assert.equal(peer.state.getCalls, 1)
+})
+
+test('task wait returns WAIT_TIMEOUT with the latest task snapshot', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-timeout',
+          contextId: 'ctx-wait-timeout',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+      {
+        delayMs: 80,
+        result: {
+          kind: 'task',
+          id: 'task-wait-timeout',
+          contextId: 'ctx-wait-timeout',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    defaults: {
+      timeoutMs: 20,
+      cardPath: '/.well-known/agent-card.json',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+      serviceParameters: {},
+    },
+  })
+
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-timeout',
+      waitTimeoutMs: 60,
+      initialDelayMs: 10,
+      maxDelayMs: 10,
+    },
+  })
+
+  const failure = asFailure(result)
+  const details = asRecord(failure.error.details)
+  const lastTask = asRecord(details.lastTask)
+  const lastError = asRecord(details.lastError)
+
+  assert.equal(failure.operation, 'a2a_task_wait')
+  assert.equal(failure.error.code, 'WAIT_TIMEOUT')
+  assert.equal(details.taskId, 'task-wait-timeout')
+  assert.equal(details.waitTimeoutMs, 60)
+  assert.ok((details.attempts as number) >= 2)
+  assert.equal(lastTask.id, 'task-wait-timeout')
+  assert.equal(asRecord(lastTask.status).state, 'working')
+  assert.equal(lastError.code, 'A2A_SDK_ERROR')
+})
+
+test('task wait retries transient poll failures until a later poll succeeds', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        delayMs: 40,
+        result: {
+          kind: 'task',
+          id: 'task-wait-retry',
+          contextId: 'ctx-wait-retry',
+          status: {
+            state: 'working',
+          },
+        },
+      },
+      {
+        result: {
+          kind: 'task',
+          id: 'task-wait-retry',
+          contextId: 'ctx-wait-retry',
+          status: {
+            state: 'completed',
+          },
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService({
+    defaults: {
+      timeoutMs: 10,
+      cardPath: '/.well-known/agent-card.json',
+      preferredTransports: ['JSONRPC', 'HTTP+JSON'],
+      serviceParameters: {},
+    },
+  })
+
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-retry',
+      waitTimeoutMs: 150,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+    },
+  })
+
+  const success = asSuccess(result)
+
+  assert.equal(success.summary.status, 'completed')
+  assert.equal(success.summary.attempts, 2)
+  assert.equal(peer.state.getCalls, 2)
+})
+
+test('task wait aborts immediately on non-retryable poll failures', async (t) => {
+  const peer = await startPeer({
+    getTaskResponses: [
+      {
+        error: {
+          code: -32601,
+          message: 'method not found',
+        },
+      },
+    ],
+  })
+  t.after(() => peer.server.close())
+
+  const service = buildService()
+  const result = await service.wait({
+    target: {
+      baseUrl: peer.baseUrl,
+      cardPath: peer.cardPath,
+    },
+    request: {
+      taskId: 'task-wait-method-missing',
+      waitTimeoutMs: 150,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+    },
+  })
+
+  const failure = asFailure(result)
+
+  assert.equal(failure.operation, 'a2a_task_wait')
+  assert.equal(failure.error.code, 'A2A_SDK_ERROR')
+  assert.match(failure.error.message, /method not found/i)
+  assert.equal(peer.state.getCalls, 1)
 })
 
 test('task resubscribe success returns normalized stream envelope', async (t) => {

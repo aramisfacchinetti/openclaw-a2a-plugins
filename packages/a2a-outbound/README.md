@@ -2,12 +2,11 @@
 
 Native OpenClaw outbound A2A delegation plugin.
 
-This package registers five optional tools in OpenClaw:
+This package registers four optional tools in OpenClaw:
 
 - `a2a_delegate`
-- `a2a_delegate_stream`
 - `a2a_task_status`
-- `a2a_task_resubscribe`
+- `a2a_task_wait`
 - `a2a_task_cancel`
 
 ## Installation
@@ -73,76 +72,82 @@ The `error.details.errors` array contains Ajv `ErrorObject` entries. See the [Aj
 ## Tool Summary
 
 - `a2a_delegate`: send one outbound A2A request and return the final `Message` or `Task`.
-- `a2a_delegate_stream`: same input contract as `a2a_delegate`, but bridges every yielded A2A stream event into OpenClaw `onUpdate(...)` callbacks and returns the full event transcript at completion.
 - `a2a_task_status`: fetch the current state of a remote task.
-- `a2a_task_resubscribe`: reconnect to a remote task stream using `target` plus `request.taskId`, `timeoutMs`, and `serviceParameters`.
+- `a2a_task_wait`: repeatedly call `tasks/get` until the task reaches a terminal state or `request.waitTimeoutMs` expires. `request.timeoutMs` stays a per-poll RPC timeout.
 - `a2a_task_cancel`: request cancellation for a remote task.
 
-`a2a_delegate_stream` uses the SDK's built-in fallback behavior. If the peer card reports `streaming: false`, the SDK yields a single fallback `Message` or `Task`, and the tool still returns a normal stream transcript envelope. `a2a_task_resubscribe` requires peer streaming support and surfaces the SDK error when it is unavailable.
+## Delegate Then Wait
 
-## Streaming Results
+When `a2a_delegate` returns a task, pass that `taskId` into `a2a_task_wait`:
 
-Streaming tools emit one OpenClaw tool update per yielded A2A event. Each update is wrapped with the normal `jsonResult(...)` helper and carries this payload:
+```json
+{
+  "delegateResult": {
+    "ok": true,
+    "operation": "a2a_delegate",
+    "summary": {
+      "kind": "task",
+      "taskId": "task-123",
+      "status": "submitted"
+    }
+  },
+  "waitRequest": {
+    "target": {
+      "baseUrl": "https://peer.example"
+    },
+    "request": {
+      "taskId": "task-123",
+      "waitTimeoutMs": 60000,
+      "timeoutMs": 10000
+    }
+  }
+}
+```
+
+On success, `a2a_task_wait` returns the last observed task plus a compact wait summary:
 
 ```json
 {
   "ok": true,
-  "operation": "a2a_delegate_stream",
-  "phase": "update",
-  "target": {
-    "baseUrl": "https://peer.example/",
-    "cardPath": "/.well-known/agent-card.json",
-    "preferredTransports": ["JSONRPC"]
-  },
+  "operation": "a2a_task_wait",
   "summary": {
-    "kind": "status-update",
     "taskId": "task-123",
-    "status": "working"
+    "status": "completed",
+    "attempts": 3,
+    "elapsedMs": 842
   },
   "raw": {
-    "kind": "status-update",
-    "taskId": "task-123",
+    "kind": "task",
+    "id": "task-123",
     "contextId": "ctx-123",
-    "status": { "state": "working" },
-    "final": false
+    "status": { "state": "completed" }
   }
 }
 ```
 
-On success, both streaming tools return a self-contained transcript payload:
-
-```json
-{
-  "ok": true,
-  "operation": "a2a_task_resubscribe",
-  "summary": {
-    "kind": "stream",
-    "eventCount": 2,
-    "finalEventKind": "artifact-update",
-    "taskId": "task-123",
-    "artifactId": "artifact-1"
-  },
-  "raw": {
-    "events": [{ "...": "all yielded events in order" }],
-    "finalEvent": { "...": "the terminal event object" }
-  }
-}
-```
-
-If a stream finishes without yielding any events, the tool returns:
+If the overall wait deadline expires first, the tool returns a timeout envelope with the latest task snapshot:
 
 ```json
 {
   "ok": false,
-  "operation": "a2a_delegate_stream",
+  "operation": "a2a_task_wait",
   "error": {
-    "code": "A2A_SDK_ERROR",
-    "message": "stream ended without events"
+    "code": "WAIT_TIMEOUT",
+    "message": "timed out waiting for task task-123",
+    "details": {
+      "taskId": "task-123",
+      "waitTimeoutMs": 60000,
+      "attempts": 4,
+      "elapsedMs": 60000,
+      "lastTask": {
+        "kind": "task",
+        "id": "task-123",
+        "status": { "state": "working" }
+      }
+    }
   }
 }
 ```
-
-If a stream fails after already yielding events, the error envelope still follows the normal failure shape and adds `partialEventCount` plus `latestEventSummary` to `error.details`.
 
 ## Development
 

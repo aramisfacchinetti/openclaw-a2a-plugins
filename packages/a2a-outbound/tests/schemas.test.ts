@@ -7,6 +7,7 @@ import {
   validateDelegateStreamInput,
   validateResubscribeInput,
   validateStatusInput,
+  validateWaitInput,
 } from '../dist/schemas.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -555,6 +556,101 @@ test('validateStatusInput enforces nested request.taskId contract', () => {
   )
 })
 
+test('validateWaitInput accepts nested request.taskId and applies backoff defaults', () => {
+  const out = validateWaitInput({
+    target: {
+      baseUrl: 'http://peer.example',
+      cardPath: '/agent-card.json',
+    },
+    request: {
+      taskId: 'task-wait-1',
+      waitTimeoutMs: 15000,
+      historyLength: 3,
+      timeoutMs: 700,
+      serviceParameters: {
+        'X-Trace-Id': 'trace-wait-1',
+      },
+    },
+  })
+
+  assert.equal(out.target.cardPath, '/agent-card.json')
+  assert.equal(out.request.taskId, 'task-wait-1')
+  assert.equal(out.request.waitTimeoutMs, 15000)
+  assert.equal(out.request.historyLength, 3)
+  assert.equal(out.request.timeoutMs, 700)
+  assert.equal(out.request.serviceParameters?.['X-Trace-Id'], 'trace-wait-1')
+  assert.equal(out.request.initialDelayMs, 250)
+  assert.equal(out.request.maxDelayMs, 5000)
+  assert.equal(out.request.backoffMultiplier, 2)
+})
+
+test('validateWaitInput rejects missing request.taskId', () => {
+  assert.throws(
+    () =>
+      validateWaitInput({
+        target: {
+          baseUrl: 'http://peer.example',
+        },
+        request: {
+          waitTimeoutMs: 15000,
+        },
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'required' &&
+          e.instancePath === '/request' &&
+          isRecord(e.params) &&
+          e.params.missingProperty === 'taskId',
+      ),
+  )
+})
+
+test('validateWaitInput rejects missing request.waitTimeoutMs', () => {
+  assert.throws(
+    () =>
+      validateWaitInput({
+        target: {
+          baseUrl: 'http://peer.example',
+        },
+        request: {
+          taskId: 'task-wait-2',
+        },
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (e) =>
+          e.keyword === 'required' &&
+          e.instancePath === '/request' &&
+          isRecord(e.params) &&
+          e.params.missingProperty === 'waitTimeoutMs',
+      ),
+  )
+})
+
+test('validateWaitInput rejects invalid backoff combinations', () => {
+  assert.throws(
+    () =>
+      validateWaitInput({
+        target: {
+          baseUrl: 'http://peer.example',
+        },
+        request: {
+          taskId: 'task-wait-3',
+          waitTimeoutMs: 15000,
+          initialDelayMs: 1000,
+          maxDelayMs: 500,
+          backoffMultiplier: 0.5,
+        },
+      }),
+    (error: unknown) => isValidationError(error),
+  )
+})
+
 test('validateResubscribeInput enforces nested request.taskId contract', () => {
   const out = validateResubscribeInput({
     target: {
@@ -621,13 +717,14 @@ test('validateCancelInput enforces nested request.taskId contract', () => {
   )
 })
 
-test('TOOL_DEFINITIONS exposes all five outbound A2A tools', () => {
+test('TOOL_DEFINITIONS exposes all six outbound A2A tool schemas', () => {
   assert.deepEqual(Object.keys(TOOL_DEFINITIONS).sort(), [
     'a2a_delegate',
     'a2a_delegate_stream',
     'a2a_task_cancel',
     'a2a_task_resubscribe',
     'a2a_task_status',
+    'a2a_task_wait',
   ])
 
   assert.equal(TOOL_DEFINITIONS.a2a_delegate_stream.name, 'a2a_delegate_stream')
@@ -635,6 +732,7 @@ test('TOOL_DEFINITIONS exposes all five outbound A2A tools', () => {
     TOOL_DEFINITIONS.a2a_task_resubscribe.name,
     'a2a_task_resubscribe',
   )
+  assert.equal(TOOL_DEFINITIONS.a2a_task_wait.name, 'a2a_task_wait')
   assert.deepEqual(
     TOOL_DEFINITIONS.a2a_delegate_stream.parameters,
     TOOL_DEFINITIONS.a2a_delegate.parameters,

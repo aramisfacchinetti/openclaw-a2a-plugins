@@ -1,8 +1,15 @@
 import type { Message, MessageSendParams } from "@a2a-js/sdk";
 import { ALL_TRANSPORTS, type A2ATransport } from "./constants.js";
-import { createA2AOutboundAjv, toValidationError } from "./ajv-validator.js";
+import {
+  createA2AOutboundAjv,
+  toValidationError,
+  type ErrorObject,
+} from "./ajv-validator.js";
 
 const MESSAGE_ROLES = ["user", "agent"] as const;
+const DEFAULT_WAIT_INITIAL_DELAY_MS = 250;
+const DEFAULT_WAIT_MAX_DELAY_MS = 5000;
+const DEFAULT_WAIT_BACKOFF_MULTIPLIER = 2;
 
 const TARGET_SCHEMA = {
   type: "object",
@@ -269,6 +276,66 @@ export const STATUS_INPUT_SCHEMA = {
   required: ["target", "request"],
 };
 
+export const WAIT_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    target: TARGET_SCHEMA,
+    request: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskId: {
+          type: "string",
+          minLength: 1,
+          description: "Remote task id to wait for.",
+        },
+        waitTimeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Required overall wait deadline for repeated tasks/get polling.",
+        },
+        historyLength: {
+          type: "integer",
+          minimum: 0,
+          description: "Optional history window length.",
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional per-poll RPC timeout override.",
+        },
+        serviceParameters: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Optional service parameters for every poll.",
+        },
+        initialDelayMs: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Optional initial delay between polls. Defaults to 250ms.",
+        },
+        maxDelayMs: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Optional maximum delay between polls. Defaults to 5000ms.",
+        },
+        backoffMultiplier: {
+          type: "number",
+          minimum: 1,
+          description:
+            "Optional exponential backoff multiplier. Defaults to 2.",
+        },
+      },
+      required: ["taskId", "waitTimeoutMs"],
+    },
+  },
+  required: ["target", "request"],
+};
+
 export const CANCEL_INPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -360,6 +427,13 @@ export const TOOL_DEFINITIONS = {
     description: "Fetch status for an external A2A task.",
     parameters: STATUS_INPUT_SCHEMA,
   },
+  a2a_task_wait: {
+    name: "a2a_task_wait",
+    label: "A2A Task Wait",
+    description:
+      "Poll task status for an external A2A task until it reaches a terminal state or the overall wait deadline expires.",
+    parameters: WAIT_INPUT_SCHEMA,
+  },
   a2a_task_resubscribe: {
     name: "a2a_task_resubscribe",
     label: "A2A Task Resubscribe",
@@ -397,6 +471,17 @@ export interface StatusRequestInput {
   serviceParameters?: Record<string, string>;
 }
 
+export interface WaitRequestInput {
+  taskId: string;
+  waitTimeoutMs: number;
+  historyLength?: number;
+  timeoutMs?: number;
+  serviceParameters?: Record<string, string>;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+}
+
 export interface ResubscribeRequestInput {
   taskId: string;
   timeoutMs?: number;
@@ -424,6 +509,11 @@ export interface StatusToolInput {
   request: StatusRequestInput;
 }
 
+export interface WaitToolInput {
+  target: A2ATargetInput;
+  request: WaitRequestInput;
+}
+
 export interface ResubscribeToolInput {
   target: A2ATargetInput;
   request: ResubscribeRequestInput;
@@ -439,8 +529,34 @@ const ajv = createA2AOutboundAjv();
 const validateDelegateSchema = ajv.compile(DELEGATE_INPUT_SCHEMA);
 const validateDelegateStreamSchema = ajv.compile(DELEGATE_STREAM_INPUT_SCHEMA);
 const validateStatusSchema = ajv.compile(STATUS_INPUT_SCHEMA);
+const validateWaitSchema = ajv.compile(WAIT_INPUT_SCHEMA);
 const validateResubscribeSchema = ajv.compile(RESUBSCRIBE_INPUT_SCHEMA);
 const validateCancelSchema = ajv.compile(CANCEL_INPUT_SCHEMA);
+
+function toWaitValidationErrors(
+  request: Partial<Pick<WaitRequestInput, "initialDelayMs" | "maxDelayMs">>,
+): ErrorObject[] {
+  if (
+    request.initialDelayMs === undefined ||
+    request.maxDelayMs === undefined ||
+    request.maxDelayMs >= request.initialDelayMs
+  ) {
+    return [];
+  }
+
+  return [
+    {
+      instancePath: "/request/maxDelayMs",
+      schemaPath: "#/request/maxDelayMs",
+      keyword: "minimum",
+      params: {
+        comparison: ">=",
+        limit: request.initialDelayMs,
+      },
+      message: `must be greater than or equal to ${request.initialDelayMs}`,
+    } as ErrorObject,
+  ];
+}
 
 export function validateDelegateInput(input: unknown): DelegateToolInput {
   if (!validateDelegateSchema(input)) {
@@ -466,6 +582,46 @@ export function validateStatusInput(input: unknown): StatusToolInput {
     toValidationError("a2a_task_status", [...validateStatusSchema.errors!]);
   }
   return input as unknown as StatusToolInput;
+}
+
+export function validateWaitInput(input: unknown): WaitToolInput {
+  if (!validateWaitSchema(input)) {
+    toValidationError("a2a_task_wait", [...validateWaitSchema.errors!]);
+  }
+
+  const validated = input as unknown as {
+    target: A2ATargetInput;
+    request: Pick<WaitRequestInput, "taskId" | "waitTimeoutMs"> &
+      Partial<
+        Omit<
+          WaitRequestInput,
+          "taskId" | "waitTimeoutMs" | "initialDelayMs" | "maxDelayMs" | "backoffMultiplier"
+        >
+      > & {
+        initialDelayMs?: number;
+        maxDelayMs?: number;
+        backoffMultiplier?: number;
+      };
+  };
+  const normalized: WaitToolInput = {
+    target: validated.target,
+    request: {
+      ...validated.request,
+      initialDelayMs:
+        validated.request.initialDelayMs ?? DEFAULT_WAIT_INITIAL_DELAY_MS,
+      maxDelayMs: validated.request.maxDelayMs ?? DEFAULT_WAIT_MAX_DELAY_MS,
+      backoffMultiplier:
+        validated.request.backoffMultiplier ??
+        DEFAULT_WAIT_BACKOFF_MULTIPLIER,
+    },
+  };
+
+  const errors = toWaitValidationErrors(normalized.request);
+  if (errors.length > 0) {
+    toValidationError("a2a_task_wait", errors);
+  }
+
+  return normalized;
 }
 
 export function validateResubscribeInput(
