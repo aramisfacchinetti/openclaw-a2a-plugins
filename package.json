@@ -1,6 +1,7 @@
 {
   "name": "openclaw-a2a-plugin",
   "private": true,
+  "license": "MIT",
   "packageManager": "pnpm@10.17.1",
   "scripts": {
     "build": "tsc -b",

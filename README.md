@@ -80,5 +80,3 @@ Releases are managed with [Changesets](https://github.com/changesets/changesets)
 ## License
 
 See the root [`LICENSE`](./LICENSE).
-
-This repository does not currently include a root `LICENSE` file in the workspace, so add it before publishing the repository.
