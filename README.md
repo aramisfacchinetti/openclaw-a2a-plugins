@@ -11,7 +11,7 @@ Today, the only implemented package intended for use is [`@aramisfa/openclaw-a2a
 
 ## Getting Started
 
-Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). It is the supported package in this repository today. It lets OpenClaw delegate work to external A2A agents, stream live updates, resubscribe to running tasks, and track or cancel delegated work.
+Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound). It is the supported package in this repository today. It lets OpenClaw discover configured targets, delegate work to external A2A agents, watch live task updates, poll delegated task status, and cancel delegated work through one unified tool: `remote_agent`.
 
 ### Prerequisites
 
@@ -48,22 +48,26 @@ Use [`packages/a2a-outbound/README.md`](./packages/a2a-outbound/README.md) for f
 
 | Package | Status | Notes |
 | --- | --- | --- |
-| [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound) | Available now | Outbound OpenClaw plugin for delegating work to external A2A agents. |
+| [`@aramisfa/openclaw-a2a-outbound`](./packages/a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
 | [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound) | Placeholder / experimental | Stub package only. Do not assume installation or usage guidance exists yet. |
 
 ## Current Capabilities
 
 Current usable functionality is provided by `@aramisfa/openclaw-a2a-outbound` only.
 
-It registers these OpenClaw tools:
+It registers one optional OpenClaw tool:
 
-- `a2a_delegate`
-- `a2a_delegate_stream`
-- `a2a_task_status`
-- `a2a_task_resubscribe`
-- `a2a_task_cancel`
+- `remote_agent`
 
-The streaming tools emit OpenClaw tool updates for each A2A stream event and finish with a self-contained transcript payload containing the full event log.
+`remote_agent` exposes these actions:
+
+- `list_targets`: discover configured targets and refreshed target-card metadata.
+- `send`: route work to a configured alias, an allowed explicit URL, or the configured default target.
+- `watch`: stream updates for a delegated task.
+- `status`: fetch the latest snapshot for a delegated task.
+- `cancel`: request cancellation for a delegated task.
+
+Follow-up actions prefer `task_handle` first, then `target_alias` + `task_id` when the handle has expired or is unavailable.
 
 Plugin id: `a2a-outbound`
 
