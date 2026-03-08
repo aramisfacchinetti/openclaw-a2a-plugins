@@ -7,25 +7,32 @@ import {
   resolveInboundRouteEnvelopeBuilderWithRuntime,
   type ChannelGatewayContext,
   type ChannelLogSink,
+  type PluginRuntime,
 } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID } from "./constants.js";
+import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { log } from "./logging.js";
-import {
-  collectReplyText,
-  createAgentTextMessage,
-  summarizeBufferedReplies,
-} from "./response-mapping.js";
+import { createAgentTextMessage } from "./response-mapping.js";
 import { buildInboundRouteContext } from "./session-routing.js";
+import {
+  A2ATaskExecutionCoordinator,
+  type OpenClawExecutionEvent,
+} from "./task-execution-coordinator.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
 type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
+type OpenClawRuntimeEvent = Parameters<
+  Parameters<PluginRuntime["events"]["onAgentEvent"]>[0]
+>[0];
 
 export interface OpenClawA2AExecutorOptions {
   accountId: string;
   account: A2AInboundAccountConfig;
   cfg: OpenClawConfig;
-  runtime: ChannelRuntime;
+  channelRuntime: ChannelRuntime;
+  pluginRuntime: PluginRuntime;
+  liveExecutions: A2ALiveExecutionRegistry;
   log?: ChannelLogSink;
 }
 
@@ -52,6 +59,14 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       return;
     }
 
+    const coordinator = new A2ATaskExecutionCoordinator(
+      requestContext,
+      eventBus,
+      this.options.liveExecutions,
+    );
+
+    let unsubscribeAgentEvents: (() => boolean) | undefined;
+
     try {
       const peer = {
         kind: "direct" as const,
@@ -67,7 +82,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
           channel: CHANNEL_ID,
           accountId: this.options.accountId,
           peer,
-          runtime: this.options.runtime as never,
+          runtime: this.options.channelRuntime as never,
           sessionStore: this.options.account.sessionStore,
         },
       );
@@ -79,7 +94,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         timestamp: inbound.timestamp,
       });
 
-      const ctxPayload = this.options.runtime.reply.finalizeInboundContext({
+      const ctxPayload = this.options.channelRuntime.reply.finalizeInboundContext({
         Body: body,
         BodyForAgent: inbound.body,
         RawBody: inbound.body,
@@ -102,7 +117,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         Timestamp: inbound.timestamp,
       });
 
-      await this.options.runtime.session.recordInboundSession({
+      await this.options.channelRuntime.session.recordInboundSession({
         storePath,
         sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
         ctx: ctxPayload,
@@ -114,37 +129,61 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         },
       });
 
-      const chunks: string[] = [];
+      unsubscribeAgentEvents = this.options.pluginRuntime.events.onAgentEvent(
+        (event: OpenClawRuntimeEvent) => {
+          coordinator.handleAgentEvent(event as OpenClawExecutionEvent);
+        },
+      );
 
-      await this.options.runtime.reply.dispatchReplyWithBufferedBlockDispatcher({
+      coordinator.prepareForExecution();
+
+      await this.options.channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
         ctx: ctxPayload,
         cfg: this.options.cfg,
         dispatcherOptions: {
-          deliver: async (payload) => {
-            collectReplyText(chunks, payload);
+          deliver: async (payload, info) => {
+            coordinator.handleReplyPayload(payload, info.kind);
           },
+        },
+        replyOptions: {
+          abortSignal: coordinator.signal,
+          onAgentRunStart: (runId) => coordinator.handleAgentRunStart(runId),
+          onAssistantMessageStart: () => coordinator.handleAssistantMessageStart(),
         },
       });
 
-      eventBus.publish(
-        createAgentTextMessage({
-          contextId: requestContext.contextId,
-          text:
-            summarizeBufferedReplies(chunks) ??
-            "OpenClaw completed the request without a text reply.",
-        }),
-      );
-      eventBus.finished();
+      await coordinator.finalizeSuccess();
     } catch (error) {
       log(this.options.log, "error", "a2a.inbound.execute.error", {
         accountId: this.options.accountId,
         error: String(error),
       });
-      throw error;
+      await coordinator.finalizeError(error);
+    } finally {
+      unsubscribeAgentEvents?.();
+      eventBus.finished();
     }
   }
 
-  async cancelTask(): Promise<void> {}
+  async cancelTask(
+    taskId: string,
+    _eventBus: ExecutionEventBus,
+  ): Promise<void> {
+    const record = this.options.liveExecutions.requestCancellation(taskId);
+
+    if (!record) {
+      return;
+    }
+
+    if (record.cancel) {
+      await record.cancel();
+      return;
+    }
+
+    record.abortController.abort(
+      new DOMException("A2A task canceled.", "AbortError"),
+    );
+  }
 }
 
 export function createOpenClawA2AExecutor(

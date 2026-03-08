@@ -41,7 +41,7 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
     runtime: {
       logging: {},
       ...runtimeHelper,
-    } as OpenClawPluginApi["runtime"],
+    } as unknown as OpenClawPluginApi["runtime"],
     logger: {
       debug() {},
       info() {},
