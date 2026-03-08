@@ -47,7 +47,8 @@
     "typecheck:tests": "tsc -p tsconfig.tests.json --pretty false",
     "typecheck": "corepack pnpm run typecheck:src && corepack pnpm run typecheck:tests",
     "test": "corepack pnpm run build && node --import tsx --test tests/*.test.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "node ../../scripts/publish-guard.cjs package --package=@aramisfa/openclaw-a2a-outbound"
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.10",

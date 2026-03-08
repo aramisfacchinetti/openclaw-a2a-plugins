@@ -7,7 +7,7 @@
 
 `openclaw-a2a-plugins` is a monorepo for OpenClaw Agent-to-Agent (A2A) plugins.
 
-Today, the only implemented package intended for use is [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound). The inbound package, [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound), is currently a placeholder and is not documented or ready for general use.
+Today, the repository includes one production-oriented package, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound), and one inbound channel scaffold, [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound). The inbound package now has a concrete OpenClaw channel/plugin skeleton, but it is still exploratory and not ready to treat as a finished production integration.
 
 ## Getting Started
 
@@ -18,25 +18,42 @@ Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/o
 - Node.js `>=22.12.0`
 - OpenClaw `2026.3.2`
 
-### Install the Package
+### Install the Plugin
 
 ```bash
-npm install @aramisfa/openclaw-a2a-outbound
+openclaw plugins install @aramisfa/openclaw-a2a-outbound
 ```
 
-### Enable the Plugin
+### Quickstart
 
-Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config. The outbound config starts with this top-level shape:
+1. Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config and add at least one target:
 
 ```json
 {
   "enabled": true,
-  "defaults": {
-    "timeoutMs": 120000
-  },
-  "policy": {
-    "normalizeBaseUrl": true
-  }
+  "targets": [
+    {
+      "alias": "support",
+      "baseUrl": "https://support.example",
+      "default": true
+    }
+  ]
+}
+```
+
+2. In OpenClaw, call `remote_agent` with:
+
+```json
+{ "action": "list_targets" }
+```
+
+3. Send work to a configured alias:
+
+```json
+{
+  "action": "send",
+  "target_alias": "support",
+  "input": "Summarize this incident and propose next steps."
 }
 ```
 
@@ -49,11 +66,11 @@ Use [`packages/openclaw-a2a-outbound/README.md`](./packages/openclaw-a2a-outboun
 | Package | Status | Notes |
 | --- | --- | --- |
 | [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
-| [`@aramisfa/openclaw-a2a-inbound`](./packages/a2a-inbound) | Placeholder / experimental | Stub package only. Do not assume installation or usage guidance exists yet. |
+| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Exploratory scaffold | Concrete inbound channel/plugin skeleton using the official A2A SDK handlers, but task streaming and production-hardening remain unfinished. |
 
 ## Current Capabilities
 
-Current usable functionality is provided by `@aramisfa/openclaw-a2a-outbound` only.
+Current production-ready functionality is provided by `@aramisfa/openclaw-a2a-outbound`. The inbound package now provides a concrete scaffold for follow-on implementation work.
 
 It registers one optional OpenClaw tool:
 
@@ -74,7 +91,7 @@ Plugin id: `openclaw-a2a-outbound`
 ## Repository Layout
 
 - [`packages/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound): implemented outbound A2A plugin package, including docs, source, tests, and plugin manifest.
-- [`packages/a2a-inbound`](./packages/a2a-inbound): placeholder inbound workspace package that is not yet ready for general use.
+- [`packages/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound): inbound A2A channel/plugin scaffold with config schema, route registration, and A2A/OpenClaw bridge structure.
 - Workspace root: shared `pnpm` workspace tooling, TypeScript project configuration, and Changesets release management.
 
 ## Development
@@ -91,6 +108,17 @@ pnpm clean
 ```
 
 Releases are managed with [Changesets](https://github.com/changesets/changesets).
+
+Create version intent locally with:
+
+```bash
+pnpm changeset
+pnpm version-packages
+```
+
+Do not run `pnpm release` or `npm publish` for real publishes from a local checkout. Publishing is CI-only through [`.github/workflows/release.yml`](./.github/workflows/release.yml) on `master`, which opens or updates the Changesets release PR, publishes to npm after merge, and creates package-specific GitHub Releases. Local verification should use `npm publish --dry-run`.
+
+The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`.
 
 ## License
 

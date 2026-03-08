@@ -2,6 +2,6 @@
   "files": [],
   "references": [
     { "path": "./packages/openclaw-a2a-outbound" },
-    { "path": "./packages/a2a-inbound" },
+    { "path": "./packages/openclaw-a2a-inbound" },
   ],
 }

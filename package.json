@@ -6,11 +6,13 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "corepack pnpm -r --if-present run test",
+    "test:root": "node --test tests/*.test.js",
+    "test:packages": "corepack pnpm -r --filter \"./packages/*\" --if-present run test",
+    "test": "corepack pnpm run test:root && corepack pnpm run test:packages",
     "clean": "corepack pnpm -r run clean",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "changeset publish"
+    "release": "node ./scripts/run-release.cjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.6",
