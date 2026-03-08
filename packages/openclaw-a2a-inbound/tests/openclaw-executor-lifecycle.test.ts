@@ -45,6 +45,30 @@ function getArtifactText(event: TaskArtifactUpdateEvent): string | undefined {
   return textPart?.kind === "text" ? textPart.text : undefined;
 }
 
+function getArtifactData(
+  event: TaskArtifactUpdateEvent,
+): Record<string, unknown> | undefined {
+  const dataPart = event.artifact.parts.find((part) => part.kind === "data");
+  return dataPart?.kind === "data"
+    ? (dataPart.data as Record<string, unknown>)
+    : undefined;
+}
+
+function getStatusMessageText(event: TaskStatusUpdateEvent): string | undefined {
+  const part = event.status.message?.parts[0];
+  return part?.kind === "text" ? part.text : undefined;
+}
+
+function getArtifactUpdates(
+  events: readonly (Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent)[],
+  artifactId: string,
+): TaskArtifactUpdateEvent[] {
+  return events.filter(
+    (event): event is TaskArtifactUpdateEvent =>
+      isArtifactUpdate(event) && event.artifact.artifactId === artifactId,
+  );
+}
+
 function createExecutorHarness(script: Parameters<typeof createPluginRuntimeHarness>[0]) {
   const { pluginRuntime } = createPluginRuntimeHarness(script);
   const liveExecutions = new A2ALiveExecutionRegistry();
@@ -151,10 +175,7 @@ test("non_blocking mode publishes a Task before a simple terminal reply", async 
   await executor.execute(requestContext, recorder.bus);
   await recorder.finished;
 
-  const assistantUpdates = recorder.events.filter(
-    (event) =>
-      isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output",
-  );
+  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
 
   assert.equal(recorder.events[0]?.kind, "task");
   assert.equal(recorder.events.some(isMessage), false);
@@ -201,10 +222,7 @@ test("streaming mode publishes task-first assistant progress and closes the arti
   await executor.execute(requestContext, recorder.bus);
   await recorder.finished;
 
-  const assistantUpdates = recorder.events.filter(
-    (event) =>
-      isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output",
-  );
+  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
   const closingUpdate = assistantUpdates.at(-1);
 
   assert.equal(recorder.events[0]?.kind, "task");
@@ -329,6 +347,140 @@ test("lifecycle error produces a failed task state", async () => {
       ? finalStatus.status.message.parts[0].text
       : undefined,
     "Run exploded",
+  );
+});
+
+test("approval-pending tool results publish input-required without completing", async () => {
+  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-approval-pending");
+    emit({
+      runId: "run-approval-pending",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-approval-pending",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "exec",
+        toolCallId: "exec/1",
+        isError: false,
+        result: {
+          status: "approval-pending",
+          requiresApproval: {
+            type: "approval_request",
+          },
+          command: "npm publish",
+        },
+      },
+    });
+    emit({
+      runId: "run-approval-pending",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const statusEvents = recorder.events.filter(isStatusUpdate);
+  const inputRequired = statusEvents.at(-1);
+  const toolProgress = getArtifactUpdates(recorder.events, "tool-progress-exec_1").at(0);
+
+  assert.deepEqual(
+    statusEvents.map((event) => [event.status.state, event.final]),
+    [
+      ["submitted", false],
+      ["working", false],
+      ["input-required", false],
+    ],
+  );
+  assert.equal(
+    statusEvents.some((event) => event.status.state === "completed"),
+    false,
+  );
+  assert.ok(inputRequired);
+  assert.equal(
+    inputRequired ? getStatusMessageText(inputRequired) : undefined,
+    "OpenClaw is waiting for tool approval to continue.",
+  );
+  assert.ok(toolProgress);
+  assert.deepEqual(toolProgress ? getArtifactData(toolProgress) : undefined, {
+    phase: "result",
+    name: "exec",
+    toolCallId: "exec/1",
+    isError: false,
+    result: {
+      status: "approval-pending",
+      requiresApproval: {
+        type: "approval_request",
+      },
+      command: "npm publish",
+    },
+  });
+  assert.equal(liveExecutions.has(requestContext.taskId), false);
+});
+
+test("needs_approval tool results use requiresApproval.prompt for input-required", async () => {
+  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-needs-approval");
+    emit({
+      runId: "run-needs-approval",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-needs-approval",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "shell",
+        toolCallId: "shell/1",
+        isError: false,
+        result: {
+          status: "needs_approval",
+          requiresApproval: {
+            type: "approval_request",
+            prompt: "Approve shell command?",
+          },
+          command: "rm -rf ./build",
+        },
+      },
+    });
+    emit({
+      runId: "run-needs-approval",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const statusEvents = recorder.events.filter(isStatusUpdate);
+  const inputRequired = statusEvents.at(-1);
+
+  assert.deepEqual(
+    statusEvents.map((event) => [event.status.state, event.final]),
+    [
+      ["submitted", false],
+      ["working", false],
+      ["input-required", false],
+    ],
+  );
+  assert.equal(
+    statusEvents.some((event) => event.status.state === "auth-required"),
+    false,
+  );
+  assert.equal(
+    inputRequired ? getStatusMessageText(inputRequired) : undefined,
+    "Approve shell command?",
   );
 });
 
