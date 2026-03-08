@@ -53,12 +53,12 @@ test("package channel metadata stays aligned with the exported channel id", () =
   assert.equal(channel.id, CHANNEL_ID);
 });
 
-test("exploratory inbound scaffold stays private until intentionally published", () => {
+test("inbound package stays publishable", () => {
   const rawPackage = readFileSync(
     new URL("../package.json", import.meta.url),
     "utf8",
   );
   const packageJson = asRecord(JSON.parse(rawPackage));
 
-  assert.equal(packageJson.private, true);
+  assert.notEqual(packageJson.private, true);
 });

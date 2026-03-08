@@ -3,7 +3,7 @@
   "name": "Inbound A2A Channel",
   "version": "0.1.0",
   "entry": "./dist/index.js",
-  "description": "Accept inbound A2A requests and route them into OpenClaw agents through a channel plugin scaffold.",
+  "description": "Accept inbound A2A requests and route them into OpenClaw agents through a native channel plugin.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
