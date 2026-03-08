@@ -1,6 +1,7 @@
 import type { Message, Part } from "@a2a-js/sdk";
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 import { DEFAULT_OUTPUT_MODES } from "./config.js";
+import { hasFileParts } from "./file-delivery.js";
 import type {
   A2AInitialResponseMode,
   A2ALiveExecutionRegistry,
@@ -27,6 +28,7 @@ import {
   type ReplyVendorMetadata,
   type ToolProgressPhase,
 } from "./response-mapping.js";
+import type { A2ATaskRuntimeStore } from "./task-store.js";
 
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
@@ -239,6 +241,9 @@ export class A2ATaskExecutionCoordinator {
     private readonly requestContext: RequestContext,
     private readonly eventBus: ExecutionEventBus,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
+    private readonly taskRuntime: A2ATaskRuntimeStore,
+    private readonly publicBaseUrl: string,
+    private readonly filesBasePath: string,
     expectedSessionKey?: string,
     private readonly onRunIdCaptured?: (runId: string) => void,
   ) {
@@ -438,8 +443,9 @@ export class A2ATaskExecutionCoordinator {
       const directContent = directStage
         ? this.buildAssistantStageContent(directStage, true)
         : undefined;
+      const directHasFiles = directContent ? hasFileParts(directContent) : false;
 
-      if (directContent?.parts.length) {
+      if (directContent?.parts.length && !directHasFiles) {
         this.eventBus.publish(
           createAgentMessage({
             contextId: this.requestContext.contextId,
@@ -451,7 +457,7 @@ export class A2ATaskExecutionCoordinator {
         return;
       }
 
-      if (directContent?.hasCandidates) {
+      if (directContent?.hasCandidates && !directHasFiles) {
         throw createContentTypeNotSupportedError({
           acceptedOutputModes: this.acceptedOutputModes,
           availableOutputModes: directContent.availableOutputModes,
@@ -781,6 +787,23 @@ export class A2ATaskExecutionCoordinator {
     });
   }
 
+  private registerTaskBackedReplyContent(
+    artifactId: string,
+    content: BuiltReplyContent,
+  ): BuiltReplyContent {
+    if (!hasFileParts(content)) {
+      return content;
+    }
+
+    return this.taskRuntime.registerReplyContentFiles({
+      taskId: this.requestContext.taskId,
+      artifactId,
+      publicBaseUrl: this.publicBaseUrl,
+      filesBasePath: this.filesBasePath,
+      content,
+    });
+  }
+
   private promoteToTask(_reason: string): void {
     if (this.promoted) {
       return;
@@ -976,9 +999,10 @@ export class A2ATaskExecutionCoordinator {
       return false;
     }
 
-    const content = this.buildAssistantStageContent(
-      stage,
-      params.preferTerminalText,
+    const artifactId = this.assistantArtifactId(stage.index);
+    const content = this.registerTaskBackedReplyContent(
+      artifactId,
+      this.buildAssistantStageContent(stage, params.preferTerminalText),
     );
 
     if (content.parts.length === 0) {
@@ -994,7 +1018,7 @@ export class A2ATaskExecutionCoordinator {
           createReplyArtifactUpdate({
             taskId: this.requestContext.taskId,
             contextId: this.requestContext.contextId,
-            artifactId: this.assistantArtifactId(stage.index),
+            artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
             eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
@@ -1027,7 +1051,7 @@ export class A2ATaskExecutionCoordinator {
           createReplyArtifactUpdate({
             taskId: this.requestContext.taskId,
             contextId: this.requestContext.contextId,
-            artifactId: this.assistantArtifactId(stage.index),
+            artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
             eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
@@ -1042,7 +1066,7 @@ export class A2ATaskExecutionCoordinator {
           createReplyArtifactUpdate({
             taskId: this.requestContext.taskId,
             contextId: this.requestContext.contextId,
-            artifactId: this.assistantArtifactId(stage.index),
+            artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
             eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
@@ -1061,7 +1085,7 @@ export class A2ATaskExecutionCoordinator {
         createReplyArtifactUpdate({
           taskId: this.requestContext.taskId,
           contextId: this.requestContext.contextId,
-          artifactId: this.assistantArtifactId(stage.index),
+          artifactId,
           name: `assistant-output-${stage.index}`,
           sequence: this.nextArtifactSequence(),
           eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
@@ -1082,10 +1106,14 @@ export class A2ATaskExecutionCoordinator {
     payload: NormalizedReplyPayload,
     eventMetadata?: JsonRecord,
   ): void {
-    const content = buildReplyContent({
-      payload,
-      acceptedOutputModes: this.acceptedOutputModes,
-    });
+    const artifactId = `tool-result-${String(this.toolArtifactCount + 1).padStart(4, "0")}`;
+    const content = this.registerTaskBackedReplyContent(
+      artifactId,
+      buildReplyContent({
+        payload,
+        acceptedOutputModes: this.acceptedOutputModes,
+      }),
+    );
 
     if (content.parts.length === 0) {
       if (content.hasCandidates) {
@@ -1104,7 +1132,7 @@ export class A2ATaskExecutionCoordinator {
       createReplyArtifactUpdate({
         taskId: this.requestContext.taskId,
         contextId: this.requestContext.contextId,
-        artifactId: `tool-result-${String(this.toolArtifactCount).padStart(4, "0")}`,
+        artifactId,
         name: `tool-result-${this.toolArtifactCount}`,
         sequence: this.nextArtifactSequence(),
         eventMetadata: eventMetadata ?? this.buildBaseEventMetadata(),
@@ -1117,7 +1145,10 @@ export class A2ATaskExecutionCoordinator {
     const stages = [...this.assistantStages].reverse();
 
     for (const stage of stages) {
-      const content = this.buildAssistantStageContent(stage, true);
+      const content = this.registerTaskBackedReplyContent(
+        this.assistantArtifactId(stage.index),
+        this.buildAssistantStageContent(stage, true),
+      );
 
       if (content.parts.length === 0) {
         continue;

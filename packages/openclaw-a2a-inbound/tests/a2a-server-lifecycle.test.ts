@@ -11,6 +11,10 @@ import type {
 } from "@a2a-js/sdk";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
 import {
+  buildTaskFileUrl,
+  deriveFilesBasePath,
+} from "../dist/file-delivery.js";
+import {
   createPluginRuntimeHarness,
   createTestAccount,
   createUserMessage,
@@ -179,14 +183,50 @@ function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
 ) {
+  const account = createTestAccount(accountOverrides);
   const { pluginRuntime } = createPluginRuntimeHarness(script);
-  return createA2AInboundServer({
+  const server = createA2AInboundServer({
     accountId: "default",
-    account: createTestAccount(accountOverrides),
+    account,
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
   });
+
+  return {
+    ...server,
+    account,
+  };
+}
+
+function buildExpectedTaskFileUri(params: {
+  server: ReturnType<typeof createServerHarness>;
+  taskId: string;
+  artifactId: string;
+  fileId?: string;
+}): string {
+  return buildTaskFileUrl({
+    publicBaseUrl: params.server.account.publicBaseUrl ?? "https://agents.example.com",
+    filesBasePath: deriveFilesBasePath(params.server.account.jsonRpcPath),
+    taskId: params.taskId,
+    artifactId: params.artifactId,
+    fileId: params.fileId ?? "ignored",
+  });
+}
+
+function assertTaskFileUriMatches(params: {
+  server: ReturnType<typeof createServerHarness>;
+  uri: string;
+  taskId: string;
+  artifactId: string;
+}): void {
+  const expectedPrefix = buildExpectedTaskFileUri({
+    server: params.server,
+    taskId: params.taskId,
+    artifactId: params.artifactId,
+  }).replace(/ignored$/, "");
+
+  assert.equal(params.uri.startsWith(expectedPrefix), true, params.uri);
 }
 
 async function collectStream(
@@ -266,7 +306,7 @@ test("sendMessage keeps a blocking delayed terminal run as one direct Message", 
   );
 });
 
-test("sendMessage returns one multipart Message when the final reply includes text and media", async () => {
+test("sendMessage promotes blocking file replies to a Task with plugin-owned file URIs", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct-multipart");
     emit({
@@ -292,19 +332,28 @@ test("sendMessage returns one multipart Message when the final reply includes te
     message: createUserMessage(),
   });
 
-  assert.equal(result.kind, "message");
+  assert.equal(result.kind, "task");
   assert.deepEqual(
-    result.parts.map((part) => part.kind),
+    result.status.message?.parts.map((part) => part.kind),
     ["text", "file"],
   );
   assert.equal(
-    result.parts[0] && "text" in result.parts[0] ? result.parts[0].text : undefined,
+    result.status.message?.parts[0] && "text" in result.status.message.parts[0]
+      ? result.status.message.parts[0].text
+      : undefined,
     "Direct reply with attachment",
   );
-  assert.deepEqual(getPartFileUris(result.parts), ["https://example.com/report.pdf"]);
+  const fileUri = getPartFileUris(result.status.message?.parts ?? [])[0];
+  assert.ok(fileUri);
+  assertTaskFileUriMatches({
+    server,
+    uri: fileUri!,
+    taskId: result.id,
+    artifactId: "assistant-output-0001",
+  });
 });
 
-test("sendMessage returns a direct file-only Message when octet-stream is accepted", async () => {
+test("sendMessage promotes blocking file-only replies to a Task when octet-stream is accepted", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct-file");
     emit({
@@ -332,9 +381,16 @@ test("sendMessage returns a direct file-only Message when octet-stream is accept
     },
   });
 
-  assert.equal(result.kind, "message");
-  assert.deepEqual(result.parts.map((part) => part.kind), ["file"]);
-  assert.deepEqual(getPartFileUris(result.parts), ["https://example.com/image.png"]);
+  assert.equal(result.kind, "task");
+  assert.deepEqual(result.status.message?.parts.map((part) => part.kind), ["file"]);
+  const fileUri = getPartFileUris(result.status.message?.parts ?? [])[0];
+  assert.ok(fileUri);
+  assertTaskFileUriMatches({
+    server,
+    uri: fileUri!,
+    taskId: result.id,
+    artifactId: "assistant-output-0001",
+  });
 });
 
 test("acceptedOutputModes text/plain strips vendor data and file parts when text remains", async () => {
@@ -1036,7 +1092,13 @@ test("streaming assistant artifacts replace the full artifact when media appears
   });
 
   const streamed = await collectStream(server);
+  const task = streamed.find(isTask);
   const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+
+  assert.ok(task);
+  if (!task || !isTask(task)) {
+    assert.fail("expected task snapshot");
+  }
 
   assert.equal(assistantUpdates.length, 3);
   assert.equal(getArtifactText(assistantUpdates[0]), "Preview text");
@@ -1047,10 +1109,14 @@ test("streaming assistant artifacts replace the full artifact when media appears
     assistantUpdates[1].artifact.parts.map((part) => part.kind),
     ["text", "file"],
   );
-  assert.deepEqual(
-    getPartFileUris(assistantUpdates[1].artifact.parts),
-    ["https://example.com/preview.png"],
-  );
+  const previewUri = getPartFileUris(assistantUpdates[1].artifact.parts)[0];
+  assert.ok(previewUri);
+  assertTaskFileUriMatches({
+    server,
+    uri: previewUri!,
+    taskId: task.id,
+    artifactId: assistantUpdates[1].artifact.artifactId,
+  });
   assert.equal(assistantUpdates[2].lastChunk, true);
   assert.equal(assistantUpdates[2].append, true);
 });
@@ -1082,11 +1148,17 @@ test("tool-result artifacts emit file parts when tool payloads contain media URL
   });
 
   const streamed = await collectStream(server);
+  const task = streamed.find(isTask);
   const toolArtifact = streamed.find(
     (event) =>
       isArtifactUpdate(event) &&
       event.artifact.artifactId.startsWith("tool-result-"),
   );
+
+  assert.ok(task);
+  if (!task || !isTask(task)) {
+    assert.fail("expected task snapshot");
+  }
 
   assert.ok(toolArtifact);
   if (!toolArtifact || !isArtifactUpdate(toolArtifact)) {
@@ -1097,10 +1169,14 @@ test("tool-result artifacts emit file parts when tool payloads contain media URL
     toolArtifact.artifact.parts.map((part) => part.kind),
     ["text", "file"],
   );
-  assert.deepEqual(
-    getPartFileUris(toolArtifact.artifact.parts),
-    ["https://example.com/tool-output.png"],
-  );
+  const toolFileUri = getPartFileUris(toolArtifact.artifact.parts)[0];
+  assert.ok(toolFileUri);
+  assertTaskFileUriMatches({
+    server,
+    uri: toolFileUri!,
+    taskId: task.id,
+    artifactId: toolArtifact.artifact.artifactId,
+  });
 });
 
 test("terminal task status.message uses the canonical multipart assistant Message", async () => {
@@ -1155,9 +1231,20 @@ test("terminal task status.message uses the canonical multipart assistant Messag
     persisted.status.message?.parts.map((part) => part.kind),
     ["text", "file"],
   );
+  const statusFileUri = getPartFileUris(persisted.status.message?.parts ?? [])[0];
+  assert.ok(statusFileUri);
+  assertTaskFileUriMatches({
+    server,
+    uri: statusFileUri!,
+    taskId: result.id,
+    artifactId: "assistant-output-0001",
+  });
   assert.deepEqual(
-    getPartFileUris(persisted.status.message?.parts ?? []),
-    ["https://example.com/status.pdf"],
+    getPartFileUris(
+      persisted.artifacts?.find((artifact) => artifact.artifactId === "assistant-output-0001")
+        ?.parts ?? [],
+    ),
+    [statusFileUri],
   );
 });
 

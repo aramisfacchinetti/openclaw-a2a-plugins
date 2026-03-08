@@ -1,25 +1,33 @@
 import { randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import {
   appendFile,
+  mkdtemp,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import {
+  createReadStream,
   existsSync,
   closeSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
   Message,
@@ -28,8 +36,27 @@ import type {
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
-import type { A2AInboundTaskStoreConfig } from "./config.js";
+import { fetchWithSsrFGuard } from "openclaw/plugin-sdk";
+import type {
+  A2AInboundAuthConfig,
+  A2AInboundTaskStoreConfig,
+} from "./config.js";
+import { resolveConfiguredAuthToken } from "./config.js";
 import {
+  MAX_MATERIALIZED_FILE_BYTES,
+  buildContentDispositionHeader,
+  buildTaskFileLogicalKey,
+  buildTaskFileUrl,
+  decodeTaskStorageId,
+  encodeTaskStorageId,
+  mapBuiltReplyContentFiles,
+  parseContentDispositionFilename,
+  type StoredTaskArtifactFileIndex,
+  type StoredTaskFileDescriptor,
+  type StoredTaskFileMeta,
+} from "./file-delivery.js";
+import {
+  type BuiltReplyContent,
   classifyTaskState,
   createTaskStatusUpdate,
   isActiveExecutionTaskState,
@@ -129,6 +156,38 @@ type MaterializedTaskState = {
   runtime: StoredTaskRuntime;
 };
 
+type LiveTaskFileDescriptor = StoredTaskFileDescriptor & {
+  dirty: boolean;
+};
+
+type LiveTaskArtifactFileIndex = {
+  artifactId: string;
+  dirty: boolean;
+  fileIdsByLogicalKey: Map<string, string>;
+};
+
+type TaskFileDownload = {
+  blobPath: string;
+  descriptor: StoredTaskFileDescriptor;
+  meta?: StoredTaskFileMeta;
+  contentDisposition?: string;
+  contentLength?: number;
+  contentType: string;
+};
+
+type TaskFileRegistrySnapshot = {
+  descriptors: StoredTaskFileDescriptor[];
+  indexes: StoredTaskArtifactFileIndex[];
+};
+
+type TaskFileFetchLike = typeof fetch;
+type TaskFileLookupFn = typeof dnsLookup;
+
+type TaskStoreOptions = {
+  fetchImpl?: TaskFileFetchLike;
+  lookupFn?: TaskFileLookupFn;
+};
+
 interface TaskRuntimeStorage {
   readonly kind: A2AInboundTaskStoreConfig["kind"];
   close(): void;
@@ -144,10 +203,49 @@ interface TaskRuntimeStorage {
     afterSequence: number,
   ): Promise<StoredTaskJournalRecord[]>;
   appendEvent(taskId: string, record: StoredTaskJournalRecord): Promise<void>;
+  readTaskFileRegistry(taskId: string): Promise<TaskFileRegistrySnapshot>;
+  readFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileDescriptor | undefined>;
+  writeFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    descriptor: StoredTaskFileDescriptor,
+  ): Promise<void>;
+  readArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+  ): Promise<StoredTaskArtifactFileIndex | undefined>;
+  writeArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+    index: StoredTaskArtifactFileIndex,
+  ): Promise<void>;
+  readFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileMeta | undefined>;
+  writeFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+    meta: StoredTaskFileMeta,
+  ): Promise<void>;
+  blobPath(taskId: string, artifactId: string, fileId: string): string;
+  blobExists(taskId: string, artifactId: string, fileId: string): Promise<boolean>;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readTrimmedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 }
 
 function cloneTask(task: Task): Task {
@@ -170,6 +268,22 @@ function cloneJournalRecord(record: StoredTaskJournalRecord): StoredTaskJournalR
   return structuredClone(record);
 }
 
+function cloneTaskFileDescriptor(
+  descriptor: StoredTaskFileDescriptor,
+): StoredTaskFileDescriptor {
+  return structuredClone(descriptor);
+}
+
+function cloneTaskArtifactFileIndex(
+  index: StoredTaskArtifactFileIndex,
+): StoredTaskArtifactFileIndex {
+  return structuredClone(index);
+}
+
+function cloneTaskFileMeta(meta: StoredTaskFileMeta): StoredTaskFileMeta {
+  return structuredClone(meta);
+}
+
 function toIsoString(value: Date | number | string): string {
   if (value instanceof Date) {
     return value.toISOString();
@@ -180,18 +294,6 @@ function toIsoString(value: Date | number | string): string {
   }
 
   return new Date(value).toISOString();
-}
-
-function encodeTaskId(taskId: string): string {
-  return Buffer.from(taskId, "utf8").toString("base64url");
-}
-
-function decodeTaskId(encodedTaskId: string): string | undefined {
-  try {
-    return Buffer.from(encodedTaskId, "base64url").toString("utf8");
-  } catch {
-    return undefined;
-  }
 }
 
 function normalizeCurrentSequence(value: unknown): number {
@@ -435,6 +537,105 @@ function normalizeBindingRecord(value: unknown): StoredTaskBinding | undefined {
     },
     createdAt,
     updatedAt,
+  };
+}
+
+function normalizeTaskFileDescriptor(
+  value: unknown,
+): StoredTaskFileDescriptor | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const fileId = readTrimmedString(value.fileId);
+  const artifactId = readTrimmedString(value.artifactId);
+  const sourceUri = readTrimmedString(value.sourceUri);
+  const firstEmittedAt = readTrimmedString(value.firstEmittedAt);
+  const lastReferencedAt = readTrimmedString(value.lastReferencedAt);
+
+  if (!fileId || !artifactId || !sourceUri || !firstEmittedAt || !lastReferencedAt) {
+    return undefined;
+  }
+
+  return {
+    fileId,
+    artifactId,
+    sourceUri,
+    ...(readTrimmedString(value.originalName)
+      ? { originalName: readTrimmedString(value.originalName) }
+      : {}),
+    ...(readTrimmedString(value.originalMimeType)
+      ? { originalMimeType: readTrimmedString(value.originalMimeType) }
+      : {}),
+    firstEmittedAt,
+    lastReferencedAt,
+  };
+}
+
+function normalizeTaskArtifactFileIndex(
+  value: unknown,
+): StoredTaskArtifactFileIndex | undefined {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    return undefined;
+  }
+
+  const artifactId = readTrimmedString(value.artifactId);
+  const updatedAt = readTrimmedString(value.updatedAt);
+  const rawMappings = isRecord(value.fileIdsByLogicalKey)
+    ? value.fileIdsByLogicalKey
+    : undefined;
+
+  if (!artifactId || !updatedAt || !rawMappings) {
+    return undefined;
+  }
+
+  const fileIdsByLogicalKey: Record<string, string> = {};
+
+  for (const [logicalKey, fileId] of Object.entries(rawMappings)) {
+    const normalizedFileId = readTrimmedString(fileId);
+
+    if (logicalKey.length === 0 || !normalizedFileId) {
+      continue;
+    }
+
+    fileIdsByLogicalKey[logicalKey] = normalizedFileId;
+  }
+
+  return {
+    schemaVersion: 1,
+    artifactId,
+    fileIdsByLogicalKey,
+    updatedAt,
+  };
+}
+
+function normalizeTaskFileMeta(value: unknown): StoredTaskFileMeta | undefined {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    return undefined;
+  }
+
+  const size =
+    typeof value.size === "number" && Number.isFinite(value.size) && value.size >= 0
+      ? value.size
+      : undefined;
+  const materializedAt = readTrimmedString(value.materializedAt);
+  const finalUrl = readTrimmedString(value.finalUrl);
+
+  if (typeof size !== "number" || !materializedAt || !finalUrl) {
+    return undefined;
+  }
+
+  return {
+    schemaVersion: 1,
+    size,
+    materializedAt,
+    finalUrl,
+    ...(readTrimmedString(value.contentType)
+      ? { contentType: readTrimmedString(value.contentType) }
+      : {}),
+    ...(readTrimmedString(value.fileName)
+      ? { fileName: readTrimmedString(value.fileName) }
+      : {}),
   };
 }
 
@@ -835,8 +1036,22 @@ class MemoryTaskRuntimeStorage implements TaskRuntimeStorage {
   private readonly snapshots = new Map<string, Task>();
   private readonly runtimes = new Map<string, StoredTaskRuntime>();
   private readonly journals = new Map<string, StoredTaskJournalRecord[]>();
+  private readonly fileDescriptors = new Map<
+    string,
+    Map<string, Map<string, StoredTaskFileDescriptor>>
+  >();
+  private readonly fileIndexes = new Map<
+    string,
+    Map<string, StoredTaskArtifactFileIndex>
+  >();
+  private readonly fileMetas = new Map<string, Map<string, Map<string, StoredTaskFileMeta>>>();
+  private readonly tempRootPath = mkdtempSync(
+    join(tmpdir(), "openclaw-a2a-inbound-files-"),
+  );
 
-  close(): void {}
+  close(): void {
+    rmSync(this.tempRootPath, { recursive: true, force: true });
+  }
 
   async listTaskIds(): Promise<string[]> {
     return [...this.snapshots.keys()];
@@ -886,6 +1101,119 @@ class MemoryTaskRuntimeStorage implements TaskRuntimeStorage {
     const existing = this.journals.get(taskId) ?? [];
     existing.push(cloneJournalRecord(record));
     this.journals.set(taskId, existing);
+  }
+
+  async readTaskFileRegistry(taskId: string): Promise<TaskFileRegistrySnapshot> {
+    const descriptors = this.fileDescriptors.get(taskId);
+    const indexes = this.fileIndexes.get(taskId);
+
+    return {
+      descriptors: descriptors
+        ? [...descriptors.values()].flatMap((artifactDescriptors) =>
+            [...artifactDescriptors.values()].map((descriptor) =>
+              cloneTaskFileDescriptor(descriptor),
+            ),
+          )
+        : [],
+      indexes: indexes
+        ? [...indexes.values()].map((index) => cloneTaskArtifactFileIndex(index))
+        : [],
+    };
+  }
+
+  async readFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileDescriptor | undefined> {
+    const descriptor = this.fileDescriptors
+      .get(taskId)
+      ?.get(artifactId)
+      ?.get(fileId);
+    return descriptor ? cloneTaskFileDescriptor(descriptor) : undefined;
+  }
+
+  async writeFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    descriptor: StoredTaskFileDescriptor,
+  ): Promise<void> {
+    const artifacts = this.fileDescriptors.get(taskId) ?? new Map();
+    const descriptors = artifacts.get(artifactId) ?? new Map();
+    descriptors.set(descriptor.fileId, cloneTaskFileDescriptor(descriptor));
+    artifacts.set(artifactId, descriptors);
+    this.fileDescriptors.set(taskId, artifacts);
+  }
+
+  async readArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+  ): Promise<StoredTaskArtifactFileIndex | undefined> {
+    const index = this.fileIndexes.get(taskId)?.get(artifactId);
+    return index ? cloneTaskArtifactFileIndex(index) : undefined;
+  }
+
+  async writeArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+    index: StoredTaskArtifactFileIndex,
+  ): Promise<void> {
+    const indexes = this.fileIndexes.get(taskId) ?? new Map();
+    indexes.set(artifactId, cloneTaskArtifactFileIndex(index));
+    this.fileIndexes.set(taskId, indexes);
+  }
+
+  async readFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileMeta | undefined> {
+    const meta = this.fileMetas.get(taskId)?.get(artifactId)?.get(fileId);
+    return meta ? cloneTaskFileMeta(meta) : undefined;
+  }
+
+  async writeFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+    meta: StoredTaskFileMeta,
+  ): Promise<void> {
+    const artifacts = this.fileMetas.get(taskId) ?? new Map();
+    const metas = artifacts.get(artifactId) ?? new Map();
+    metas.set(fileId, cloneTaskFileMeta(meta));
+    artifacts.set(artifactId, metas);
+    this.fileMetas.set(taskId, artifacts);
+  }
+
+  blobPath(taskId: string, artifactId: string, fileId: string): string {
+    return join(
+      this.tempRootPath,
+      encodeTaskStorageId(taskId),
+      encodeTaskStorageId(artifactId),
+      fileId,
+      "blob",
+    );
+  }
+
+  async blobExists(taskId: string, artifactId: string, fileId: string): Promise<boolean> {
+    try {
+      await stat(this.blobPath(taskId, artifactId, fileId));
+      return true;
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+
+      if (code === "ENOENT") {
+        return false;
+      }
+
+      throw error;
+    }
   }
 }
 
@@ -941,7 +1269,7 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           return [];
         }
 
-        const taskId = decodeTaskId(entry.name);
+        const taskId = decodeTaskStorageId(entry.name);
         return taskId ? [taskId] : [];
       });
     } catch (error) {
@@ -1008,6 +1336,134 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
   ): Promise<void> {
     await mkdir(this.taskDirectory(taskId), { recursive: true });
     await appendFile(this.eventsPath(taskId), `${JSON.stringify(record)}\n`);
+  }
+
+  async readTaskFileRegistry(taskId: string): Promise<TaskFileRegistrySnapshot> {
+    const artifactRoots = await this.listArtifactDirectoryNames(taskId);
+    const descriptors: StoredTaskFileDescriptor[] = [];
+    const indexes: StoredTaskArtifactFileIndex[] = [];
+
+    for (const encodedArtifactId of artifactRoots) {
+      const artifactId = decodeTaskStorageId(encodedArtifactId);
+
+      if (!artifactId) {
+        continue;
+      }
+
+      const index = normalizeTaskArtifactFileIndex(
+        await maybeReadJsonFile<StoredTaskArtifactFileIndex>(
+          this.artifactFileIndexPath(taskId, artifactId),
+        ),
+      );
+
+      if (index) {
+        indexes.push(index);
+      }
+
+      const fileEntries = await this.listArtifactFileDirectoryNames(taskId, artifactId);
+
+      for (const fileId of fileEntries) {
+        const descriptor = normalizeTaskFileDescriptor(
+          await maybeReadJsonFile<StoredTaskFileDescriptor>(
+            this.fileDescriptorPath(taskId, artifactId, fileId),
+          ),
+        );
+
+        if (descriptor) {
+          descriptors.push(descriptor);
+        }
+      }
+    }
+
+    return { descriptors, indexes };
+  }
+
+  async readFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileDescriptor | undefined> {
+    return normalizeTaskFileDescriptor(
+      await maybeReadJsonFile<StoredTaskFileDescriptor>(
+        this.fileDescriptorPath(taskId, artifactId, fileId),
+      ),
+    );
+  }
+
+  async writeFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    descriptor: StoredTaskFileDescriptor,
+  ): Promise<void> {
+    await writeJsonFileAtomically(
+      this.fileDescriptorPath(taskId, artifactId, descriptor.fileId),
+      descriptor,
+    );
+  }
+
+  async readArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+  ): Promise<StoredTaskArtifactFileIndex | undefined> {
+    return normalizeTaskArtifactFileIndex(
+      await maybeReadJsonFile<StoredTaskArtifactFileIndex>(
+        this.artifactFileIndexPath(taskId, artifactId),
+      ),
+    );
+  }
+
+  async writeArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+    index: StoredTaskArtifactFileIndex,
+  ): Promise<void> {
+    await writeJsonFileAtomically(this.artifactFileIndexPath(taskId, artifactId), index);
+  }
+
+  async readFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileMeta | undefined> {
+    return normalizeTaskFileMeta(
+      await maybeReadJsonFile<StoredTaskFileMeta>(
+        this.fileMetaPath(taskId, artifactId, fileId),
+      ),
+    );
+  }
+
+  async writeFileMeta(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+    meta: StoredTaskFileMeta,
+  ): Promise<void> {
+    await writeJsonFileAtomically(this.fileMetaPath(taskId, artifactId, fileId), meta);
+  }
+
+  blobPath(taskId: string, artifactId: string, fileId: string): string {
+    return this.fileBlobPath(taskId, artifactId, fileId);
+  }
+
+  async blobExists(taskId: string, artifactId: string, fileId: string): Promise<boolean> {
+    try {
+      await stat(this.fileBlobPath(taskId, artifactId, fileId));
+      return true;
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+
+      if (code === "ENOENT") {
+        return false;
+      }
+
+      throw error;
+    }
   }
 
   private ensureRootDirectory(): void {
@@ -1095,7 +1551,7 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
 
     for (const entry of this.listTaskDirectoryNamesSync()) {
       try {
-        const taskId = decodeTaskId(entry);
+        const taskId = decodeTaskStorageId(entry);
 
         if (!taskId) {
           continue;
@@ -1231,7 +1687,43 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
   }
 
   private taskDirectory(taskId: string): string {
-    return join(this.taskRootPath, encodeTaskId(taskId));
+    return join(this.taskRootPath, encodeTaskStorageId(taskId));
+  }
+
+  private filesDirectory(taskId: string): string {
+    return join(this.taskDirectory(taskId), "files");
+  }
+
+  private artifactFilesDirectory(taskId: string, artifactId: string): string {
+    return join(this.filesDirectory(taskId), encodeTaskStorageId(artifactId));
+  }
+
+  private artifactFileIndexPath(taskId: string, artifactId: string): string {
+    return join(this.artifactFilesDirectory(taskId, artifactId), "index.json");
+  }
+
+  private artifactFileDirectory(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): string {
+    return join(this.artifactFilesDirectory(taskId, artifactId), fileId);
+  }
+
+  private fileDescriptorPath(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): string {
+    return join(this.artifactFileDirectory(taskId, artifactId, fileId), "descriptor.json");
+  }
+
+  private fileMetaPath(taskId: string, artifactId: string, fileId: string): string {
+    return join(this.artifactFileDirectory(taskId, artifactId, fileId), "meta.json");
+  }
+
+  private fileBlobPath(taskId: string, artifactId: string, fileId: string): string {
+    return join(this.artifactFileDirectory(taskId, artifactId, fileId), "blob");
   }
 
   private bindingPath(taskId: string): string {
@@ -1248,6 +1740,55 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
 
   private runtimePath(taskId: string): string {
     return join(this.taskDirectory(taskId), "runtime.json");
+  }
+
+  private async listArtifactDirectoryNames(taskId: string): Promise<string[]> {
+    try {
+      const entries = await readdir(this.filesDirectory(taskId), { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+
+      if (code === "ENOENT") {
+        return [];
+      }
+
+      throw error;
+    }
+  }
+
+  private async listArtifactFileDirectoryNames(
+    taskId: string,
+    artifactId: string,
+  ): Promise<string[]> {
+    try {
+      const entries = await readdir(this.artifactFilesDirectory(taskId, artifactId), {
+        withFileTypes: true,
+      });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+
+      if (code === "ENOENT") {
+        return [];
+      }
+
+      throw error;
+    }
   }
 }
 
@@ -1315,13 +1856,31 @@ export class A2ATaskRuntimeStore implements TaskStore {
   readonly kind: A2AInboundTaskStoreConfig["kind"];
 
   private readonly storage: TaskRuntimeStorage;
+  private readonly fetchImpl: TaskFileFetchLike;
+  private readonly lookupFn: TaskFileLookupFn;
   private readonly taskQueues = new Map<string, Promise<void>>();
   private readonly subscribers = new Map<string, Set<TaskRuntimeSubscriber>>();
   private readonly heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly pendingBindings = new Map<string, StoredTaskBinding>();
   private readonly pendingRunIds = new Map<string, string>();
+  private readonly taskFileDescriptors = new Map<
+    string,
+    Map<string, Map<string, LiveTaskFileDescriptor>>
+  >();
+  private readonly taskFileIndexes = new Map<
+    string,
+    Map<string, LiveTaskArtifactFileIndex>
+  >();
+  private readonly loadedFileRegistries = new Set<string>();
+  private readonly fileMaterializations = new Map<string, Promise<TaskFileDownload>>();
 
-  constructor(config: A2AInboundTaskStoreConfig) {
+  constructor(
+    config: A2AInboundTaskStoreConfig,
+    options: TaskStoreOptions = {},
+  ) {
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.lookupFn = options.lookupFn ?? dnsLookup;
+
     if (config.kind === "json-file") {
       if (!config.path) {
         throw new Error(
@@ -1347,6 +1906,10 @@ export class A2ATaskRuntimeStore implements TaskStore {
     this.subscribers.clear();
     this.pendingBindings.clear();
     this.pendingRunIds.clear();
+    this.taskFileDescriptors.clear();
+    this.taskFileIndexes.clear();
+    this.loadedFileRegistries.clear();
+    this.fileMaterializations.clear();
     this.storage.close();
   }
 
@@ -1396,6 +1959,134 @@ export class A2ATaskRuntimeStore implements TaskStore {
   discardPending(taskId: string): void {
     this.pendingBindings.delete(taskId);
     this.pendingRunIds.delete(taskId);
+    this.taskFileDescriptors.delete(taskId);
+    this.taskFileIndexes.delete(taskId);
+    this.loadedFileRegistries.delete(taskId);
+  }
+
+  async primePersistedFileRegistry(taskId: string): Promise<void> {
+    await this.enqueueByTask(taskId, async () => {
+      if (this.loadedFileRegistries.has(taskId)) {
+        return;
+      }
+
+      const registry = await this.storage.readTaskFileRegistry(taskId);
+
+      for (const descriptor of registry.descriptors) {
+        this.upsertLiveFileDescriptor(taskId, descriptor.artifactId, descriptor, true);
+      }
+
+      for (const index of registry.indexes) {
+        this.replaceLiveArtifactFileIndex(taskId, index, true);
+      }
+
+      this.loadedFileRegistries.add(taskId);
+    });
+  }
+
+  registerReplyContentFiles(params: {
+    taskId: string;
+    artifactId: string;
+    publicBaseUrl: string;
+    filesBasePath: string;
+    content: BuiltReplyContent;
+    referencedAt?: string;
+  }): BuiltReplyContent {
+    const referencedAt = params.referencedAt ?? new Date().toISOString();
+    this.loadedFileRegistries.add(params.taskId);
+
+    return mapBuiltReplyContentFiles({
+      content: params.content,
+      mapFile: (filePart) => {
+        const logicalKey = buildTaskFileLogicalKey({
+          sourceUri: filePart.sourceUri,
+          originalName: filePart.originalName,
+          originalMimeType: filePart.originalMimeType,
+          occurrenceIndex: filePart.occurrenceIndex,
+        });
+        const artifactIndex = this.ensureLiveArtifactFileIndex(
+          params.taskId,
+          params.artifactId,
+        );
+        let fileId = artifactIndex.fileIdsByLogicalKey.get(logicalKey);
+
+        if (!fileId) {
+          fileId = randomUUID();
+          artifactIndex.fileIdsByLogicalKey.set(logicalKey, fileId);
+          artifactIndex.dirty = true;
+        }
+
+        const descriptor = this.upsertLiveFileDescriptor(
+          params.taskId,
+          params.artifactId,
+          {
+            fileId,
+            artifactId: params.artifactId,
+            sourceUri: filePart.sourceUri,
+            ...(filePart.originalName ? { originalName: filePart.originalName } : {}),
+            ...(filePart.originalMimeType
+              ? { originalMimeType: filePart.originalMimeType }
+              : {}),
+            firstEmittedAt: referencedAt,
+            lastReferencedAt: referencedAt,
+          },
+          false,
+        );
+
+        return {
+          uri: buildTaskFileUrl({
+            publicBaseUrl: params.publicBaseUrl,
+            filesBasePath: params.filesBasePath,
+            taskId: params.taskId,
+            artifactId: params.artifactId,
+            fileId: descriptor.fileId,
+          }),
+          ...(descriptor.originalName ? { name: descriptor.originalName } : {}),
+          ...(descriptor.originalMimeType
+            ? { mimeType: descriptor.originalMimeType }
+            : {}),
+        };
+      },
+    });
+  }
+
+  async materializeTaskFile(params: {
+    taskId: string;
+    artifactId: string;
+    fileId: string;
+    publicBaseUrl: string;
+    auth: A2AInboundAuthConfig;
+  }): Promise<TaskFileDownload | undefined> {
+    const descriptor = await this.readTaskFileDescriptor(params.taskId, params.artifactId, params.fileId);
+
+    if (!descriptor) {
+      return undefined;
+    }
+
+    const cached = await this.readCachedTaskFile(
+      params.taskId,
+      params.artifactId,
+      params.fileId,
+      descriptor,
+    );
+
+    if (cached) {
+      return cached;
+    }
+
+    const flightKey = `${params.taskId}\u001f${params.artifactId}\u001f${params.fileId}`;
+    const existingFlight = this.fileMaterializations.get(flightKey);
+
+    if (existingFlight) {
+      return await existingFlight;
+    }
+
+    const flight = this.fetchAndCacheTaskFile(params, descriptor).finally(() => {
+      this.fileMaterializations.delete(flightKey);
+    });
+    this.fileMaterializations.set(flightKey, flight);
+
+    return await flight;
   }
 
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
@@ -1427,6 +2118,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         this.pendingBindings.delete(task.id);
       }
 
+      await this.flushDirtyFileRegistry(task.id);
       await this.storage.writeSnapshot(task.id, nextTask);
       await this.storage.writeRuntime(task.id, nextRuntime);
       this.consumePendingRunId(task.id, runId);
@@ -1514,6 +2206,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         },
       );
 
+      await this.flushDirtyFileRegistry(taskId);
       await this.storage.appendEvent(taskId, failure.record);
       await this.storage.writeSnapshot(taskId, failure.snapshot);
       await this.storage.writeRuntime(taskId, nextRuntime);
@@ -1636,6 +2329,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         this.pendingBindings.delete(task.id);
       }
 
+      await this.flushDirtyFileRegistry(task.id);
       await this.storage.writeSnapshot(task.id, nextTask);
       const nextRuntime =
         classifyTaskState(nextTask.status.state) === "active"
@@ -1733,6 +2427,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         this.pendingBindings.delete(event.taskId);
       }
 
+      await this.flushDirtyFileRegistry(event.taskId);
       await this.storage.appendEvent(event.taskId, record);
       await this.storage.writeSnapshot(
         event.taskId,
@@ -1803,6 +2498,359 @@ export class A2ATaskRuntimeStore implements TaskStore {
       currentSequence,
       runtime,
     };
+  }
+
+  private ensureLiveArtifactDescriptorMap(
+    taskId: string,
+    artifactId: string,
+  ): Map<string, LiveTaskFileDescriptor> {
+    const taskDescriptors = this.taskFileDescriptors.get(taskId) ?? new Map();
+    const artifactDescriptors = taskDescriptors.get(artifactId) ?? new Map();
+
+    taskDescriptors.set(artifactId, artifactDescriptors);
+    this.taskFileDescriptors.set(taskId, taskDescriptors);
+
+    return artifactDescriptors;
+  }
+
+  private ensureLiveArtifactFileIndex(
+    taskId: string,
+    artifactId: string,
+  ): LiveTaskArtifactFileIndex {
+    const taskIndexes = this.taskFileIndexes.get(taskId) ?? new Map();
+    let artifactIndex = taskIndexes.get(artifactId);
+
+    if (!artifactIndex) {
+      artifactIndex = {
+        artifactId,
+        dirty: true,
+        fileIdsByLogicalKey: new Map(),
+      };
+      taskIndexes.set(artifactId, artifactIndex);
+      this.taskFileIndexes.set(taskId, taskIndexes);
+    }
+
+    return artifactIndex;
+  }
+
+  private replaceLiveArtifactFileIndex(
+    taskId: string,
+    index: StoredTaskArtifactFileIndex,
+    persisted: boolean,
+  ): void {
+    const taskIndexes = this.taskFileIndexes.get(taskId) ?? new Map();
+    taskIndexes.set(index.artifactId, {
+      artifactId: index.artifactId,
+      dirty: !persisted,
+      fileIdsByLogicalKey: new Map(Object.entries(index.fileIdsByLogicalKey)),
+    });
+    this.taskFileIndexes.set(taskId, taskIndexes);
+  }
+
+  private upsertLiveFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    descriptor: StoredTaskFileDescriptor,
+    persisted: boolean,
+  ): StoredTaskFileDescriptor {
+    const artifactDescriptors = this.ensureLiveArtifactDescriptorMap(taskId, artifactId);
+    const existing = artifactDescriptors.get(descriptor.fileId);
+    const nextDescriptor: LiveTaskFileDescriptor = existing
+      ? {
+          ...existing,
+          sourceUri: descriptor.sourceUri,
+          originalName: descriptor.originalName,
+          originalMimeType: descriptor.originalMimeType,
+          firstEmittedAt: existing.firstEmittedAt,
+          lastReferencedAt: descriptor.lastReferencedAt,
+          dirty: persisted ? existing.dirty : true,
+        }
+      : {
+          ...descriptor,
+          dirty: !persisted,
+        };
+
+    artifactDescriptors.set(nextDescriptor.fileId, nextDescriptor);
+    return cloneTaskFileDescriptor(nextDescriptor);
+  }
+
+  private async flushDirtyFileRegistry(taskId: string): Promise<void> {
+    const taskDescriptors = this.taskFileDescriptors.get(taskId);
+    const taskIndexes = this.taskFileIndexes.get(taskId);
+
+    if (taskDescriptors) {
+      for (const [artifactId, artifactDescriptors] of taskDescriptors.entries()) {
+        for (const descriptor of artifactDescriptors.values()) {
+          if (!descriptor.dirty) {
+            continue;
+          }
+
+          await this.storage.writeFileDescriptor(taskId, artifactId, descriptor);
+          descriptor.dirty = false;
+        }
+      }
+    }
+
+    if (taskIndexes) {
+      for (const artifactIndex of taskIndexes.values()) {
+        if (!artifactIndex.dirty) {
+          continue;
+        }
+
+        await this.storage.writeArtifactFileIndex(taskId, artifactIndex.artifactId, {
+          schemaVersion: 1,
+          artifactId: artifactIndex.artifactId,
+          fileIdsByLogicalKey: Object.fromEntries(artifactIndex.fileIdsByLogicalKey.entries()),
+          updatedAt: new Date().toISOString(),
+        });
+        artifactIndex.dirty = false;
+      }
+    }
+  }
+
+  private async readTaskFileDescriptor(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+  ): Promise<StoredTaskFileDescriptor | undefined> {
+    const liveDescriptor = this.taskFileDescriptors.get(taskId)?.get(artifactId)?.get(fileId);
+
+    if (liveDescriptor) {
+      return cloneTaskFileDescriptor(liveDescriptor);
+    }
+
+    const storedDescriptor = await this.storage.readFileDescriptor(taskId, artifactId, fileId);
+
+    if (!storedDescriptor) {
+      return undefined;
+    }
+
+    this.upsertLiveFileDescriptor(taskId, artifactId, storedDescriptor, true);
+    return storedDescriptor;
+  }
+
+  private async readCachedTaskFile(
+    taskId: string,
+    artifactId: string,
+    fileId: string,
+    descriptor: StoredTaskFileDescriptor,
+  ): Promise<TaskFileDownload | undefined> {
+    if (!(await this.storage.blobExists(taskId, artifactId, fileId))) {
+      return undefined;
+    }
+
+    const meta = await this.storage.readFileMeta(taskId, artifactId, fileId);
+    const blobPath = this.storage.blobPath(taskId, artifactId, fileId);
+    const blobStats = await stat(blobPath);
+    const fileName = meta?.fileName ?? descriptor.originalName;
+
+    return {
+      blobPath,
+      descriptor,
+      ...(meta ? { meta } : {}),
+      ...(buildContentDispositionHeader(fileName)
+        ? { contentDisposition: buildContentDispositionHeader(fileName) }
+        : {}),
+      contentLength: blobStats.size,
+      contentType: meta?.contentType ?? "application/octet-stream",
+    };
+  }
+
+  private async fetchAndCacheTaskFile(
+    params: {
+      taskId: string;
+      artifactId: string;
+      fileId: string;
+      publicBaseUrl: string;
+      auth: A2AInboundAuthConfig;
+    },
+    descriptor: StoredTaskFileDescriptor,
+  ): Promise<TaskFileDownload> {
+    const sourceUrl = this.validateMaterializableSourceUri(descriptor.sourceUri);
+    const blobPath = this.storage.blobPath(params.taskId, params.artifactId, params.fileId);
+    const tempDirectory = dirname(blobPath);
+    const tempPath = join(
+      tempDirectory,
+      `blob.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    let writer:
+      | Awaited<ReturnType<typeof open>>
+      | undefined;
+    let releaseResponse: (() => Promise<void>) | undefined;
+    let blobCommitted = false;
+
+    try {
+      await mkdir(tempDirectory, { recursive: true });
+      const { response, release } = await this.fetchSourceFile({
+        sourceUrl,
+        publicBaseUrl: params.publicBaseUrl,
+        auth: params.auth,
+      });
+      releaseResponse = release;
+      writer = await open(tempPath, "w");
+      const reader = response.body?.getReader();
+      let size = 0;
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            break;
+          }
+
+          size += value.byteLength;
+
+          if (size > MAX_MATERIALIZED_FILE_BYTES) {
+            throw new Error(
+              `Upstream payload exceeded ${MAX_MATERIALIZED_FILE_BYTES} bytes.`,
+            );
+          }
+
+          await writer.write(value);
+        }
+      }
+
+      await release();
+      releaseResponse = undefined;
+
+      await writer.close();
+      writer = undefined;
+      await rename(tempPath, blobPath);
+      blobCommitted = true;
+
+      const meta: StoredTaskFileMeta = {
+        schemaVersion: 1,
+        size,
+        materializedAt: new Date().toISOString(),
+        finalUrl: response.url,
+        ...(readTrimmedString(response.headers.get("content-type"))
+          ? { contentType: readTrimmedString(response.headers.get("content-type")) }
+          : {}),
+        ...(parseContentDispositionFilename(response.headers.get("content-disposition")) ||
+        descriptor.originalName
+          ? {
+              fileName:
+                parseContentDispositionFilename(response.headers.get("content-disposition")) ??
+                descriptor.originalName,
+            }
+          : {}),
+      };
+
+      await this.storage.writeFileMeta(
+        params.taskId,
+        params.artifactId,
+        params.fileId,
+        meta,
+      );
+
+      return {
+        blobPath,
+        descriptor,
+        meta,
+        ...(buildContentDispositionHeader(meta.fileName)
+          ? { contentDisposition: buildContentDispositionHeader(meta.fileName) }
+          : {}),
+        contentLength: meta.size,
+        contentType: meta.contentType ?? "application/octet-stream",
+      };
+    } catch (error) {
+      await releaseResponse?.().catch(() => undefined);
+      await writer?.close().catch(() => undefined);
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      if (blobCommitted) {
+        await rm(blobPath, { force: true }).catch(() => undefined);
+      }
+      throw new Error(`Failed to materialize task file: ${String(error)}`);
+    }
+  }
+
+  private validateMaterializableSourceUri(sourceUri: string): URL {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(sourceUri);
+    } catch {
+      throw new Error(`Unsupported source URI "${sourceUri}".`);
+    }
+
+    if (parsed.protocol !== "https:") {
+      throw new Error(`Unsupported source URI scheme "${parsed.protocol}".`);
+    }
+
+    return parsed;
+  }
+
+  private async fetchSourceFile(params: {
+    sourceUrl: URL;
+    publicBaseUrl: string;
+    auth: A2AInboundAuthConfig;
+  }): Promise<{
+    response: Response;
+    release: () => Promise<void>;
+  }> {
+    const upstreamOrigin = new URL(params.publicBaseUrl).origin;
+    let currentUrl = new URL(params.sourceUrl);
+
+    for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+      const sameOrigin = currentUrl.origin === upstreamOrigin;
+      const authToken =
+        sameOrigin && params.auth.mode === "header-token"
+          ? resolveConfiguredAuthToken(params.auth)
+          : undefined;
+      const headers = new Headers();
+
+      if (authToken) {
+        headers.set(params.auth.headerName, authToken);
+      }
+
+      const guarded = await fetchWithSsrFGuard({
+        url: currentUrl.toString(),
+        fetchImpl: this.fetchImpl,
+        lookupFn: this.lookupFn,
+        maxRedirects: 0,
+        pinDns: true,
+        init: {
+          method: "GET",
+          headers,
+          redirect: "manual",
+        },
+      });
+      const { response, release } = guarded;
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = readTrimmedString(response.headers.get("location"));
+        await release();
+
+        if (!location) {
+          throw new Error(`Redirect from ${currentUrl} did not include a location header.`);
+        }
+
+        if (redirectCount >= 3) {
+          throw new Error(`Redirect limit exceeded while fetching ${params.sourceUrl}.`);
+        }
+
+        currentUrl = new URL(location, currentUrl);
+
+        if (currentUrl.protocol !== "https:") {
+          throw new Error(`Redirect target "${currentUrl}" did not use https.`);
+        }
+
+        continue;
+      }
+
+      if (!response.ok) {
+        await release();
+        throw new Error(`Upstream responded with HTTP ${response.status}.`);
+      }
+
+      return {
+        response,
+        release,
+      };
+    }
+
+    throw new Error(`Redirect limit exceeded while fetching ${params.sourceUrl}.`);
   }
 
   private syncHeartbeat(taskId: string, state: Task["status"]["state"]): void {
@@ -1902,6 +2950,7 @@ function readTaskCurrentSequence(task: Task): number {
 
 export function createTaskStore(
   config: A2AInboundTaskStoreConfig,
+  options?: TaskStoreOptions,
 ): A2ATaskRuntimeStore {
-  return new A2ATaskRuntimeStore(config);
+  return new A2ATaskRuntimeStore(config, options);
 }

@@ -70,6 +70,35 @@ test("duplicate enabled route paths are rejected", () => {
   );
 });
 
+test("colliding derived files prefixes are rejected", () => {
+  assert.throws(
+    () =>
+      parseA2AInboundChannelConfig({
+        channels: {
+          a2a: {
+            accounts: {
+              primary: {
+                enabled: true,
+                publicBaseUrl: "https://agents.example.com",
+                agentCardPath: "/primary/agent-card.json",
+                restPath: "/primary/rest",
+                jsonRpcPath: "/shared/jsonrpc",
+              },
+              secondary: {
+                enabled: true,
+                publicBaseUrl: "https://agents.example.com",
+                agentCardPath: "/secondary/agent-card.json",
+                restPath: "/secondary/rest",
+                jsonRpcPath: "/shared/rpc",
+              },
+            },
+          },
+        },
+      }),
+    /files prefix/,
+  );
+});
+
 test("synthetic fallback accounts are disabled when not configured", () => {
   const account = resolveA2AInboundAccount({}, "missing");
 
