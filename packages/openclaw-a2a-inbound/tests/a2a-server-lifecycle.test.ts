@@ -83,6 +83,45 @@ function getPersistedArtifactText(
     .join("");
 }
 
+function getOpenClawMetadata(
+  value: { metadata?: Record<string, unknown> | undefined },
+): Record<string, unknown> | undefined {
+  const metadata = value.metadata;
+
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata) ||
+    typeof metadata.openclaw !== "object" ||
+    metadata.openclaw === null ||
+    Array.isArray(metadata.openclaw)
+  ) {
+    return undefined;
+  }
+
+  return metadata.openclaw as Record<string, unknown>;
+}
+
+function getCurrentSequence(task: Task): number | undefined {
+  const openclaw = getOpenClawMetadata(task);
+  return typeof openclaw?.currentSequence === "number"
+    ? openclaw.currentSequence
+    : undefined;
+}
+
+function getEventSequence(
+  event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+): number | undefined {
+  const openclaw = getOpenClawMetadata(event);
+  return typeof openclaw?.sequence === "number" ? openclaw.sequence : undefined;
+}
+
+function isReplayedEvent(
+  event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+): boolean {
+  return getOpenClawMetadata(event)?.replayed === true;
+}
+
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
@@ -833,19 +872,25 @@ test("cancelTask aborts a live promoted execution and persists the canceled task
   assert.equal(persisted.status.state, "canceled");
 });
 
-test("resubscribe works for a live in-process task and replays new progress artifacts", async () => {
+test("resubscribe replays backlog from afterSequence and then tails the committed live completion", async () => {
   let resumeLiveRun: (() => void) | undefined;
   const tempDir = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-"));
-  const taskFile = join(tempDir, "tasks.json");
+  const taskStoreRoot = join(tempDir, "task-store");
+  let liveServer: ReturnType<typeof createServerHarness> | undefined;
 
   try {
-    const liveServer = createServerHarness(
+    liveServer = createServerHarness(
       async ({ params, emit }) => {
         params.replyOptions?.onAgentRunStart?.("run-live");
         emit({
           runId: "run-live",
           stream: "lifecycle",
           data: { phase: "start" },
+        });
+        emit({
+          runId: "run-live",
+          stream: "assistant",
+          data: { delta: "Recovering answer" },
         });
         await new Promise<void>((resolve) => {
           resumeLiveRun = resolve;
@@ -893,7 +938,7 @@ test("resubscribe works for a live in-process task and replays new progress arti
       {
         taskStore: {
           kind: "json-file",
-          path: taskFile,
+          path: taskStoreRoot,
         },
       },
     );
@@ -910,39 +955,59 @@ test("resubscribe works for a live in-process task and replays new progress arti
       assert.fail("expected live task");
     }
 
-    const restartedServer = createServerHarness(
-      async () => {},
-      {
-        taskStore: {
-          kind: "json-file",
-          path: taskFile,
-        },
-      },
-    );
+    await waitFor(async () => {
+      const snapshot = await liveServer.requestHandler.getTask({
+        id: liveResult.id,
+        historyLength: 10,
+      });
 
-    await assert.rejects(
-      async () => {
-        const stream = restartedServer.requestHandler.resubscribe({
-          id: liveResult.id,
-        });
-        for await (const _event of stream) {
-          // noop
-        }
-      },
-      /live in-process tasks/,
-    );
+      return (getCurrentSequence(snapshot) ?? 0) >= 3;
+    });
 
     const resubscribed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
     const resubscribePromise = (async () => {
       for await (const event of liveServer.requestHandler.resubscribe({
         id: liveResult.id,
+        metadata: {
+          openclaw: {
+            afterSequence: 1,
+          },
+        },
       })) {
         resubscribed.push(event);
       }
     })();
 
-    await waitFor(() => resubscribed.length > 0);
-    assert.equal(resubscribed[0]?.kind, "task");
+    await waitFor(() => resubscribed.length >= 2);
+    assert.equal(resubscribed.every((event) => event.kind !== "task"), true);
+    assert.equal(isStatusUpdate(resubscribed[0]), true);
+    assert.equal(isArtifactUpdate(resubscribed[1]), true);
+    assert.equal(
+      isStatusUpdate(resubscribed[0]) ? resubscribed[0].status.state : undefined,
+      "working",
+    );
+    assert.equal(
+      isArtifactUpdate(resubscribed[1])
+        ? resubscribed[1].artifact.artifactId
+        : undefined,
+      "assistant-output",
+    );
+    assert.equal(
+      isStatusUpdate(resubscribed[0]) ? isReplayedEvent(resubscribed[0]) : false,
+      true,
+    );
+    assert.equal(
+      isArtifactUpdate(resubscribed[1]) ? isReplayedEvent(resubscribed[1]) : false,
+      true,
+    );
+    assert.equal(
+      isStatusUpdate(resubscribed[0]) ? getEventSequence(resubscribed[0]) : undefined,
+      2,
+    );
+    assert.equal(
+      isArtifactUpdate(resubscribed[1]) ? getEventSequence(resubscribed[1]) : undefined,
+      3,
+    );
 
     resumeLiveRun?.();
     await resubscribePromise;
@@ -975,10 +1040,12 @@ test("resubscribe works for a live in-process task and replays new progress arti
         (event) =>
           isStatusUpdate(event) &&
           event.status.state === "completed" &&
-          event.final === true,
+          event.final === true &&
+          isReplayedEvent(event) === false,
       ),
     );
   } finally {
+    liveServer?.close();
     await rm(tempDir, { recursive: true, force: true });
   }
 });

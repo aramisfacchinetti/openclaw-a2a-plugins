@@ -8,7 +8,7 @@ import type {
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 
-type JsonRecord = Record<string, unknown>;
+export type JsonRecord = Record<string, unknown>;
 type JsonValue =
   | string
   | number
@@ -196,12 +196,14 @@ export function createTaskStatusUpdate(params: {
   final?: boolean;
   messageText?: string;
   timestamp?: string;
+  metadata?: JsonRecord;
 }): TaskStatusUpdateEvent {
   return {
     kind: "status-update",
     taskId: params.taskId,
     contextId: params.contextId,
     final: params.final === true,
+    metadata: params.metadata,
     status: createTaskStatus(params),
   };
 }
@@ -215,6 +217,7 @@ export function createArtifactUpdate(params: {
   text?: string;
   data?: JsonRecord;
   metadata?: JsonRecord;
+  eventMetadata?: JsonRecord;
   append?: boolean;
   lastChunk?: boolean;
 }): TaskArtifactUpdateEvent {
@@ -234,6 +237,7 @@ export function createArtifactUpdate(params: {
     contextId: params.contextId,
     append: params.append,
     lastChunk: params.lastChunk,
+    metadata: params.eventMetadata,
     artifact: {
       artifactId: params.artifactId,
       name: params.name,
@@ -251,6 +255,7 @@ export function createReplyArtifactUpdate(params: {
   name: string;
   sequence: number;
   payload: NormalizedReplyPayload;
+  eventMetadata?: JsonRecord;
   append?: boolean;
   lastChunk?: boolean;
 }): TaskArtifactUpdateEvent {
@@ -265,6 +270,7 @@ export function createReplyArtifactUpdate(params: {
       sequence: params.sequence,
       source: params.name,
     },
+    eventMetadata: params.eventMetadata,
     append: params.append,
     lastChunk: params.lastChunk,
   });
@@ -282,6 +288,7 @@ export function createToolProgressArtifactUpdate(params: {
   phase: ToolProgressPhase;
   payload: unknown;
   sequence: number;
+  eventMetadata?: JsonRecord;
   isError?: boolean;
 }): TaskArtifactUpdateEvent {
   const text =
@@ -307,6 +314,7 @@ export function createToolProgressArtifactUpdate(params: {
       toolCallId: params.toolCallId,
       sequence: params.sequence,
     },
+    eventMetadata: params.eventMetadata,
     lastChunk: params.phase === "result",
   });
 }

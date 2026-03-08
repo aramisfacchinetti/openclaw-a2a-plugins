@@ -35,6 +35,7 @@ export interface A2AInboundServerOptions {
 export interface A2AInboundServer {
   requestHandler: A2AInboundRequestHandler;
   handle: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+  close: () => void;
 }
 
 function resolvePublicUrl(baseUrl: string, path: string): string {
@@ -81,6 +82,9 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     capabilities: {
       pushNotifications: account.capabilities.pushNotifications,
       streaming: account.capabilities.streaming,
+      ...(account.taskStore.kind === "json-file"
+        ? { stateTransitionHistory: true }
+        : {}),
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
@@ -154,7 +158,6 @@ export function createA2AInboundServer(
     taskStore,
     liveExecutions,
     options.account.capabilities.streaming,
-    liveExecutions.eventBusManager,
     agentExecutor,
   );
 
@@ -211,5 +214,8 @@ export function createA2AInboundServer(
   return {
     requestHandler,
     handle: createExpressDispatcher(app),
+    close: () => {
+      taskStore.close();
+    },
   };
 }

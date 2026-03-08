@@ -264,14 +264,14 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
   },
   "accounts.*.taskStore.kind": {
     label: "Task Store Kind",
-    help: "Choose whether A2A tasks are kept in memory or mirrored to a JSON file.",
+    help: "Choose whether A2A tasks are kept in memory or persisted under a single-writer runtime directory.",
     advanced: true,
   },
   "accounts.*.taskStore.path": {
     label: "Task Store Path",
-    help: "Required when taskStore.kind is json-file.",
+    help: "Required when taskStore.kind is json-file. The path is a runtime-store directory root, not a single file.",
     advanced: true,
-    placeholder: "/var/lib/openclaw/a2a/tasks.json",
+    placeholder: "/var/lib/openclaw/a2a-runtime",
   },
 } satisfies NonNullable<ChannelConfigSchema["uiHints"]>;
 

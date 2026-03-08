@@ -237,6 +237,8 @@ export class A2AInboundPluginHost {
     channelLog?: ChannelLogSink,
     ctx?: ChannelGatewayContext<A2AInboundAccountConfig>,
   ): void {
+    const state = this.activeAccounts.get(accountId);
+    state?.server.close();
     this.activeAccounts.delete(accountId);
 
     if (ctx) {
