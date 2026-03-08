@@ -1,8 +1,7 @@
 {
   "name": "@aramisfa/openclaw-a2a-inbound",
-  "private": true,
   "version": "0.1.0",
-  "description": "Inbound A2A channel plugin scaffold for OpenClaw agents",
+  "description": "Inbound A2A channel plugin for OpenClaw agents",
   "license": "MIT",
   "repository": {
     "type": "git",

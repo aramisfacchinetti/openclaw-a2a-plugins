@@ -1,27 +1,32 @@
 # A2A Plugins for OpenClaw
 
-[![outbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-outbound?label=outbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
-[![node](https://img.shields.io/node/v/%40aramisfa%2Fopenclaw-a2a-outbound)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
 [![license](https://img.shields.io/github/license/aramisfacchinetti/openclaw-a2a-plugins)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/blob/master/LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.2-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/tree/master/packages/openclaw-a2a-outbound)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.2-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins)
 
 `openclaw-a2a-plugins` is a monorepo for OpenClaw Agent-to-Agent (A2A) plugins.
 
-Today, the repository includes one production-oriented package, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound), and one inbound channel scaffold, [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound). The inbound package now has a concrete OpenClaw channel/plugin skeleton, but it is still exploratory, remains private in the workspace, and is not yet treated as a finished production integration.
+Today, the repository includes two public packages:
+
+- [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound): delegate requests from OpenClaw to external A2A agents through the `remote_agent` tool.
+- [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound): expose an OpenClaw agent as an inbound A2A endpoint through the `a2a` channel.
 
 ## Getting Started
 
-Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound). It is the supported package in this repository today. It lets OpenClaw discover configured targets, delegate work to external A2A agents, watch live task updates, poll delegated task status, and cancel delegated work through one unified tool: `remote_agent`.
+Choose the package that matches the traffic direction you need:
+
+- outbound: OpenClaw initiates calls to remote A2A peers.
+- inbound: remote A2A peers initiate calls into an OpenClaw agent.
 
 ### Prerequisites
 
 - Node.js `>=22.12.0`
 - OpenClaw `2026.3.2`
 
-### Install the Plugin
+### Install a Package
 
 ```bash
 openclaw plugins install @aramisfa/openclaw-a2a-outbound
+openclaw plugins install @aramisfa/openclaw-a2a-inbound
 ```
 
 Optional guided setup helper:
@@ -32,7 +37,7 @@ clawhub install a2a-delegation-setup
 
 The ClawHub skill is a slash-command setup helper for installing, enabling, configuring, verifying, updating, and troubleshooting `@aramisfa/openclaw-a2a-outbound`. It is optional and does not replace the primary plugin distribution path above.
 
-### Quickstart
+### Outbound Quickstart
 
 1. Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config and add at least one target:
 
@@ -65,41 +70,64 @@ The ClawHub skill is a slash-command setup helper for installing, enabling, conf
 }
 ```
 
+### Inbound Quickstart
+
+1. Enable channel id `a2a` and add at least one account under `channels.a2a.accounts`:
+
+```json5
+{
+  channels: {
+    a2a: {
+      accounts: {
+        default: {
+          enabled: true,
+          publicBaseUrl: "https://agents.example.com",
+          defaultAgentId: "main",
+          auth: {
+            mode: "header-token",
+            headerName: "authorization",
+            tokenEnv: "OPENCLAW_A2A_TOKEN"
+          },
+          taskStore: {
+            kind: "json-file",
+            path: "/var/lib/openclaw/a2a-runtime"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+2. Start OpenClaw and fetch the published agent card from `/.well-known/agent-card.json`.
+
+3. Send A2A traffic to `/a2a/jsonrpc` or `/a2a/rest`.
+
 ### Where to Go Next
 
-Use [`packages/openclaw-a2a-outbound/README.md`](./packages/openclaw-a2a-outbound/README.md) for full configuration details, validation behavior, and package-specific usage.
+Use the package READMEs for full configuration details and examples:
+
+- [`packages/openclaw-a2a-outbound/README.md`](./packages/openclaw-a2a-outbound/README.md)
+- [`packages/openclaw-a2a-inbound/README.md`](./packages/openclaw-a2a-inbound/README.md)
 
 ## Packages
 
 | Package | Status | Notes |
 | --- | --- | --- |
 | [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
-| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Exploratory scaffold | Concrete inbound channel/plugin skeleton using the official A2A SDK handlers, but task streaming and production-hardening remain unfinished, so it stays private and is excluded from release automation for now. |
+| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Available now | Inbound OpenClaw channel plugin exposing an `a2a` endpoint with direct, non-blocking, streaming, and durable task flows. Push notifications and OpenClaw-initiated outbound delivery are not implemented yet. |
 
 ## Current Capabilities
 
-Current production-ready functionality is provided by `@aramisfa/openclaw-a2a-outbound`. The inbound package now provides a concrete scaffold for follow-on implementation work.
-
-It registers one optional OpenClaw tool:
-
-- `remote_agent`
-
-`remote_agent` exposes these actions:
-
-- `list_targets`: discover configured targets and refreshed target-card metadata.
-- `send`: route work to a configured alias, an allowed explicit URL, or the configured default target.
-- `watch`: stream updates for a delegated task.
-- `status`: fetch the latest snapshot for a delegated task.
-- `cancel`: request cancellation for a delegated task.
-
-Follow-up actions prefer `task_handle` first, then `target_alias` + `task_id` when the handle has expired or is unavailable.
-
-Plugin id: `openclaw-a2a-outbound`
+- `@aramisfa/openclaw-a2a-outbound` registers the `remote_agent` tool with `list_targets`, `send`, `watch`, `status`, and `cancel`.
+- `@aramisfa/openclaw-a2a-inbound` registers the `a2a` channel plus per-account agent-card, JSON-RPC, and REST routes.
+- The outbound package config lives under plugin id `openclaw-a2a-outbound`.
+- The inbound package config lives under `channels.a2a`, not `plugins.entries`.
 
 ## Repository Layout
 
 - [`packages/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound): implemented outbound A2A plugin package, including docs, source, tests, and plugin manifest.
-- [`packages/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound): inbound A2A channel/plugin scaffold with config schema, route registration, and A2A/OpenClaw bridge structure.
+- [`packages/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound): inbound A2A channel plugin package, including docs, source, tests, and plugin manifest.
 - Workspace root: shared `pnpm` workspace tooling, TypeScript project configuration, and Changesets release management.
 
 ## Development
@@ -128,7 +156,7 @@ pnpm version-packages
 
 Do not run `pnpm release` or `npm publish` for real publishes from a local checkout. Publishing is CI-only through [`.github/workflows/release.yml`](./.github/workflows/release.yml) on `master`, which opens or updates the Changesets release PR, publishes to npm after merge, and creates package-specific GitHub Releases. Local verification should use `npm publish --dry-run`.
 
-The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`. The exploratory inbound scaffold is intentionally excluded from the current publish flow until it is ready for a first public npm release.
+The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`.
 
 ## License
 
