@@ -1,7 +1,7 @@
 {
   "id": "openclaw-a2a-outbound",
   "name": "External A2A Delegation",
-  "version": "0.2.2",
+  "version": "1.0.0",
   "entry": "./dist/index.js",
   "description": "Delegate requests to external A2A agents and manage delegated tasks.",
   "skills": ["./skills"],
