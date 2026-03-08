@@ -1,5 +1,6 @@
 import type { Message } from "@a2a-js/sdk";
 import type { RequestContext } from "@a2a-js/sdk/server";
+import type { StoredTaskBindingPeerSource } from "./task-store.js";
 
 export interface A2AInboundRouteContext {
   peerId: string;
@@ -8,6 +9,12 @@ export interface A2AInboundRouteContext {
   body: string;
   conversationLabel: string;
   timestamp: number;
+}
+
+export interface A2ABoundPeerIdentity {
+  kind: "direct";
+  id: string;
+  source: StoredTaskBindingPeerSource;
 }
 
 type MessagePart = Message["parts"][number];
@@ -26,25 +33,47 @@ export function extractUserText(message: Message): string {
     .trim();
 }
 
-export function resolveInboundPeerId(requestContext: RequestContext): string {
+export function resolveInboundPeerIdentity(
+  requestContext: RequestContext,
+): A2ABoundPeerIdentity {
   const userName = requestContext.context?.user?.userName;
 
   if (typeof userName === "string" && userName.trim().length > 0) {
-    return userName.trim();
+    return {
+      kind: "direct",
+      id: userName.trim(),
+      source: "server-user-name",
+    };
   }
 
-  if (requestContext.userMessage.messageId.trim().length > 0) {
-    return requestContext.userMessage.messageId;
+  if (requestContext.contextId.trim().length > 0) {
+    return {
+      kind: "direct",
+      id: requestContext.contextId,
+      source: "context-id",
+    };
   }
 
-  return requestContext.contextId;
+  if (requestContext.taskId.trim().length > 0) {
+    return {
+      kind: "direct",
+      id: requestContext.taskId,
+      source: "task-id",
+    };
+  }
+
+  return {
+    kind: "direct",
+    id: requestContext.userMessage.messageId,
+    source: "message-id",
+  };
 }
 
 export function buildInboundRouteContext(
   requestContext: RequestContext,
   accountId: string,
+  peerId = resolveInboundPeerIdentity(requestContext).id,
 ): A2AInboundRouteContext {
-  const peerId = resolveInboundPeerId(requestContext);
   const body = extractUserText(requestContext.userMessage);
 
   return {

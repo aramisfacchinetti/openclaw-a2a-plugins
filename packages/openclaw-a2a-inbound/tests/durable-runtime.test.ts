@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -16,7 +16,10 @@ import {
   createTaskSnapshot,
   createTaskStatusUpdate,
 } from "../dist/response-mapping.js";
-import { INTERRUPTED_TASK_FAILURE_TEXT } from "../dist/task-store.js";
+import {
+  INTERRUPTED_TASK_FAILURE_TEXT,
+  type StoredTaskBinding,
+} from "../dist/task-store.js";
 import {
   createPluginRuntimeHarness,
   createTestAccount,
@@ -30,6 +33,13 @@ type JournalRecord = {
   committedAt: string;
   event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
   provenance: Record<string, unknown>;
+};
+
+type RecordInboundSessionCall = {
+  storePath: string;
+  sessionKey: string;
+  senderId?: string;
+  messageSid?: string;
 };
 
 function isTask(event: StreamEvent): event is Task {
@@ -86,8 +96,9 @@ function isReplayed(
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
+  runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
-  const { pluginRuntime } = createPluginRuntimeHarness(script);
+  const { pluginRuntime } = createPluginRuntimeHarness(script, runtimeOverrides);
   return createA2AInboundServer({
     accountId: "default",
     account: createTestAccount(accountOverrides),
@@ -105,14 +116,39 @@ function taskDirectory(rootPath: string, taskId: string): string {
   );
 }
 
+function createStoredBinding(params?: Partial<StoredTaskBinding>): StoredTaskBinding {
+  return {
+    schemaVersion: 1,
+    agentId: "main",
+    channel: "a2a",
+    accountId: "default",
+    matchedBy: "default",
+    sessionKey: "session:test",
+    mainSessionKey: "session:test",
+    storePath: "/tmp/openclaw-a2a-inbound-sessions.json",
+    peer: {
+      kind: "direct",
+      id: "peer:test",
+      source: "message-id",
+    },
+    createdAt: "2026-03-08T10:00:00.000Z",
+    updatedAt: "2026-03-08T10:00:00.000Z",
+    ...params,
+  };
+}
+
 async function writeSeededTask(params: {
   rootPath: string;
   task: Task;
   runtime: Record<string, unknown>;
   events: JournalRecord[];
+  binding?: StoredTaskBinding;
 }): Promise<void> {
   const dir = taskDirectory(params.rootPath, params.task.id);
   await mkdir(dir, { recursive: true });
+  if (params.binding) {
+    await writeFile(join(dir, "binding.json"), JSON.stringify(params.binding, null, 2));
+  }
   await writeFile(join(dir, "snapshot.json"), JSON.stringify(params.task, null, 2));
   await writeFile(join(dir, "runtime.json"), JSON.stringify(params.runtime, null, 2));
   await writeFile(
@@ -125,6 +161,14 @@ async function writeSeededTask(params: {
 async function readSnapshot(rootPath: string, taskId: string): Promise<Task> {
   const raw = await readFile(join(taskDirectory(rootPath, taskId), "snapshot.json"), "utf8");
   return JSON.parse(raw) as Task;
+}
+
+async function readBinding(
+  rootPath: string,
+  taskId: string,
+): Promise<StoredTaskBinding> {
+  const raw = await readFile(join(taskDirectory(rootPath, taskId), "binding.json"), "utf8");
+  return JSON.parse(raw) as StoredTaskBinding;
 }
 
 async function readJournal(rootPath: string, taskId: string): Promise<JournalRecord[]> {
@@ -154,11 +198,13 @@ function createWorkingSeed(params?: {
   taskId?: string;
   contextId?: string;
   lease?: Record<string, unknown> | undefined;
+  binding?: StoredTaskBinding;
 }): {
   taskId: string;
   snapshot: Task;
   runtime: Record<string, unknown>;
   events: JournalRecord[];
+  binding?: StoredTaskBinding;
 } {
   const taskId = params?.taskId ?? randomUUID();
   const contextId = params?.contextId ?? randomUUID();
@@ -203,6 +249,7 @@ function createWorkingSeed(params?: {
       currentSequence: 2,
       ...(typeof params?.lease === "undefined" ? {} : { lease: params.lease }),
     },
+    binding: params?.binding,
     events: [
       {
         sequence: 1,
@@ -265,6 +312,52 @@ test("startup sweep finalizes orphaned durable tasks before any API call", async
         : undefined,
       INTERRUPTED_TASK_FAILURE_TEXT,
     );
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("startup sweep preserves interrupted run provenance from binding and lease", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-startup-provenance-"));
+  const seed = createWorkingSeed({
+    lease: {
+      ownerId: "lost-process",
+      runId: "run-orphaned",
+      state: "active",
+      heartbeatAt: "2026-03-08T09:59:30.000Z",
+      leaseExpiresAt: "2026-03-08T09:59:40.000Z",
+    },
+    binding: createStoredBinding({
+      sessionKey: "session:orphaned",
+      mainSessionKey: "session:orphaned",
+    }),
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: seed.snapshot,
+      runtime: seed.runtime,
+      events: seed.events,
+      binding: seed.binding,
+    });
+
+    server = createServerHarness(async () => {}, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    const sweptSnapshot = await readSnapshot(rootPath, seed.taskId);
+    const journal = await readJournal(rootPath, seed.taskId);
+    const lastRecord = journal.at(-1);
+
+    assert.equal(getOpenClawMetadata(sweptSnapshot)?.runId, "run-orphaned");
+    assert.equal(lastRecord?.provenance.runId, "run-orphaned");
+    assert.equal(lastRecord?.provenance.sessionKey, "session:orphaned");
   } finally {
     server?.close();
     await rm(rootPath, { recursive: true, force: true });
@@ -537,10 +630,20 @@ test("startup sweep preserves a journal-ahead input-required pause instead of sy
   }
 });
 
-test("paused follow-up runs keep the snapshot sequence authoritative when runtime lags", async () => {
+test("paused follow-up runs keep the snapshot sequence authoritative and pinned binding after restart", async () => {
   const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-sequence-authority-"));
   const taskId = randomUUID();
   const contextId = randomUUID();
+  const binding = createStoredBinding({
+    sessionKey: "session:pinned",
+    mainSessionKey: "session:pinned",
+    storePath: "/tmp/pinned-openclaw-a2a-sessions.json",
+    peer: {
+      kind: "direct",
+      id: contextId,
+      source: "context-id",
+    },
+  });
   const initialMessage = createUserMessage({ taskId, contextId });
   const pausedSnapshot = createTaskSnapshot({
     taskId,
@@ -556,6 +659,7 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
     messageText: "Awaiting approval",
   });
   let server: ReturnType<typeof createServerHarness> | undefined;
+  const recordedSessions: RecordInboundSessionCall[] = [];
 
   try {
     await writeSeededTask({
@@ -572,6 +676,7 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
           releasedAt: "2026-03-08T10:00:02.000Z",
         },
       },
+      binding,
       events: [
         {
           sequence: 1,
@@ -618,6 +723,7 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
       params.replyOptions?.onAgentRunStart?.("run-resumed");
       emit({
         runId: "run-resumed",
+        sessionKey: "session:pinned",
         stream: "lifecycle",
         data: { phase: "start" },
       });
@@ -627,6 +733,7 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
       );
       emit({
         runId: "run-resumed",
+        sessionKey: "session:pinned",
         stream: "lifecycle",
         data: { phase: "end" },
       });
@@ -635,12 +742,36 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
         kind: "json-file",
         path: rootPath,
       },
+    }, {
+      defaultEventSessionKey: "session:rerouted",
+      resolveAgentRoute: () => ({
+        agentId: "rerouted",
+        channel: "a2a",
+        accountId: "default",
+        sessionKey: "session:rerouted",
+        mainSessionKey: "session:rerouted",
+        matchedBy: "binding.channel",
+      }),
+      resolveStorePath: () => "/tmp/rerouted-openclaw-a2a-sessions.json",
+      recordInboundSession: async (params) => {
+        recordedSessions.push({
+          storePath: params.storePath,
+          sessionKey: params.sessionKey,
+          senderId:
+            typeof params.ctx.SenderId === "string" ? params.ctx.SenderId : undefined,
+          messageSid:
+            typeof params.ctx.MessageSid === "string" ? params.ctx.MessageSid : undefined,
+        });
+      },
     });
+
+    const continuedMessageId = randomUUID();
 
     const result = await server.requestHandler.sendMessage({
       message: createUserMessage({
         taskId,
         contextId,
+        messageId: continuedMessageId,
         parts: [{ kind: "text", text: "Continue" }],
       }),
     });
@@ -661,7 +792,379 @@ test("paused follow-up runs keep the snapshot sequence authoritative when runtim
     assert.equal(getCurrentSequence(persisted), 8);
 
     const runtime = await readRuntime(rootPath, taskId);
+    const persistedBinding = await readBinding(rootPath, taskId);
     assert.equal(runtime.currentSequence, 8);
+    assert.equal(recordedSessions.length, 1);
+    assert.deepEqual(recordedSessions[0], {
+      storePath: binding.storePath,
+      sessionKey: binding.sessionKey,
+      senderId: binding.peer.id,
+      messageSid: continuedMessageId,
+    });
+    assert.equal(persistedBinding.sessionKey, binding.sessionKey);
+    assert.equal(persistedBinding.storePath, binding.storePath);
+    assert.equal(persistedBinding.peer.id, binding.peer.id);
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("promoted durable tasks write binding.json with resolved route and bound peer data", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-binding-write-"));
+  let server: ReturnType<typeof createServerHarness> | undefined;
+  let result: Message | Task | undefined;
+
+  try {
+    server = createServerHarness(
+      async ({ params, emit }) => {
+        params.replyOptions?.onAgentRunStart?.("run-binding");
+        emit({
+          runId: "run-binding",
+          sessionKey: "session:bound-context",
+          stream: "lifecycle",
+          data: { phase: "start" },
+        });
+        await params.dispatcherOptions.deliver(
+          { text: "Bound response" },
+          { kind: "tool" },
+        );
+        await params.dispatcherOptions.deliver(
+          { text: "Bound response" },
+          { kind: "final" },
+        );
+        emit({
+          runId: "run-binding",
+          sessionKey: "session:bound-context",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+      },
+      {
+        taskStore: {
+          kind: "json-file",
+          path: rootPath,
+        },
+      },
+      {
+        resolveAgentRoute: () => ({
+          agentId: "bound-agent",
+          channel: "a2a",
+          accountId: "default",
+          sessionKey: "session:bound-context",
+          mainSessionKey: "session:bound-main",
+          matchedBy: "binding.channel",
+        }),
+        resolveStorePath: () => "/tmp/openclaw-a2a-bound-store.json",
+      },
+    );
+
+    result = await server.requestHandler.sendMessage({
+      message: createUserMessage({
+        contextId: "context-peer-preferred",
+        messageId: "message-peer-fallback",
+      }),
+      configuration: {
+        blocking: false,
+      },
+    });
+
+    assert.equal(isTask(result), true);
+    if (!isTask(result)) {
+      assert.fail("expected promoted durable task");
+    }
+
+    await waitFor(async () => {
+      const snapshot = await server!.requestHandler.getTask({
+        id: result.id,
+        historyLength: 10,
+      });
+
+      return snapshot.status.state === "completed";
+    });
+
+    const binding = await readBinding(rootPath, result.id);
+    assert.deepEqual(binding, {
+      schemaVersion: 1,
+      agentId: "bound-agent",
+      channel: "a2a",
+      accountId: "default",
+      matchedBy: "binding.channel",
+      sessionKey: "session:bound-context",
+      mainSessionKey: "session:bound-main",
+      storePath: "/tmp/openclaw-a2a-bound-store.json",
+      peer: {
+        kind: "direct",
+        id: "context-peer-preferred",
+        source: "context-id",
+      },
+      createdAt: binding.createdAt,
+      updatedAt: binding.updatedAt,
+    });
+  } finally {
+    if (server && typeof result !== "undefined" && isTask(result)) {
+      const activeServer = server;
+      const taskResult = result;
+
+      await waitFor(async () => {
+        const snapshot = await activeServer.requestHandler.getTask({
+          id: taskResult.id,
+          historyLength: 10,
+        });
+
+        return snapshot.status.state === "completed";
+      });
+    }
+
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("direct blocking replies do not flush binding.json without a durable task write", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-direct-no-binding-"));
+  let server: ReturnType<typeof createServerHarness> | undefined;
+  const message = createUserMessage({
+    contextId: "context-direct-fast-path",
+    messageId: "message-direct-fast-path",
+  });
+
+  try {
+    server = createServerHarness(
+      async ({ params, emit }) => {
+        params.replyOptions?.onAgentRunStart?.("run-direct-fast-path");
+        emit({
+          runId: "run-direct-fast-path",
+          sessionKey: "session:direct-fast-path",
+          stream: "lifecycle",
+          data: { phase: "start" },
+        });
+        await params.dispatcherOptions.deliver(
+          { text: "Direct reply" },
+          { kind: "final" },
+        );
+        emit({
+          runId: "run-direct-fast-path",
+          sessionKey: "session:direct-fast-path",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+      },
+      {
+        taskStore: {
+          kind: "json-file",
+          path: rootPath,
+        },
+      },
+      {
+        resolveAgentRoute: () => ({
+          agentId: "main",
+          channel: "a2a",
+          accountId: "default",
+          sessionKey: "session:direct-fast-path",
+          mainSessionKey: "session:direct-fast-path",
+          matchedBy: "default",
+        }),
+      },
+    );
+
+    const result = await server.requestHandler.sendMessage({
+      message,
+    });
+
+    assert.equal(result.kind, "message");
+    const entries = await readdir(join(rootPath, "tasks")).catch(() => []);
+    assert.deepEqual(entries, []);
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("continuation rejects conflicting contextId for an existing bound task", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-conflicting-context-"));
+  const taskId = randomUUID();
+  const seedContextId = randomUUID();
+  const initialMessage = createUserMessage({ taskId, contextId: seedContextId });
+  const pausedSnapshot = createTaskSnapshot({
+    taskId,
+    contextId: seedContextId,
+    state: "input-required",
+    history: [initialMessage],
+    metadata: {
+      openclaw: {
+        currentSequence: 1,
+        runId: "run-paused",
+      },
+    },
+    messageText: "Awaiting approval",
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: pausedSnapshot,
+      runtime: {
+        currentSequence: 1,
+        lease: {
+          ownerId: "lost-process",
+          runId: "run-paused",
+          state: "released",
+          heartbeatAt: "2026-03-08T10:00:00.000Z",
+          leaseExpiresAt: "2026-03-08T10:00:00.000Z",
+          releasedAt: "2026-03-08T10:00:00.000Z",
+        },
+      },
+      binding: createStoredBinding({
+        sessionKey: "session:conflict",
+        peer: {
+          kind: "direct",
+          id: seedContextId,
+          source: "context-id",
+        },
+      }),
+      events: [
+        {
+          sequence: 1,
+          committedAt: "2026-03-08T10:00:00.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId: seedContextId,
+            state: "input-required",
+            final: false,
+            messageText: "Awaiting approval",
+          }),
+          provenance: {
+            runId: "run-paused",
+          },
+        },
+      ],
+    });
+
+    server = createServerHarness(async () => {}, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    await assert.rejects(
+      async () =>
+        server!.requestHandler.sendMessage({
+          message: createUserMessage({
+            taskId,
+            contextId: randomUUID(),
+            parts: [{ kind: "text", text: "Continue" }],
+          }),
+        }),
+      /contextId/i,
+    );
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("legacy bindingless quiescent tasks stay readable and cancelable but cannot resume", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-legacy-bindingless-"));
+  const taskId = randomUUID();
+  const contextId = randomUUID();
+  const initialMessage = createUserMessage({ taskId, contextId });
+  const pausedSnapshot = createTaskSnapshot({
+    taskId,
+    contextId,
+    state: "input-required",
+    history: [initialMessage],
+    metadata: {
+      openclaw: {
+        currentSequence: 2,
+        runId: "run-legacy",
+      },
+    },
+    messageText: "Need approval",
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: pausedSnapshot,
+      runtime: {
+        currentSequence: 2,
+        lease: {
+          ownerId: "lost-process",
+          runId: "run-legacy",
+          state: "released",
+          heartbeatAt: "2026-03-08T10:00:01.000Z",
+          leaseExpiresAt: "2026-03-08T10:00:01.000Z",
+          releasedAt: "2026-03-08T10:00:01.000Z",
+        },
+      },
+      events: [
+        {
+          sequence: 1,
+          committedAt: "2026-03-08T10:00:00.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId,
+            state: "submitted",
+          }),
+          provenance: {
+            runId: "run-legacy",
+          },
+        },
+        {
+          sequence: 2,
+          committedAt: "2026-03-08T10:00:01.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId,
+            state: "input-required",
+            final: false,
+            messageText: "Need approval",
+          }),
+          provenance: {
+            runId: "run-legacy",
+          },
+        },
+      ],
+    });
+
+    server = createServerHarness(async () => {}, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    const readable = await server.requestHandler.getTask({
+      id: taskId,
+      historyLength: 10,
+    });
+    assert.equal(readable.status.state, "input-required");
+
+    const replayed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+    for await (const event of server.requestHandler.resubscribe({ id: taskId })) {
+      replayed.push(event);
+    }
+    assert.equal(replayed.length, 1);
+    assert.equal(isTask(replayed[0]), true);
+
+    await assert.rejects(
+      async () =>
+        server!.requestHandler.sendMessage({
+          message: createUserMessage({
+            taskId,
+            contextId,
+            parts: [{ kind: "text", text: "Resume" }],
+          }),
+        }),
+      /cannot be resumed/i,
+    );
+
+    const canceled = await server.requestHandler.cancelTask({ id: taskId });
+    assert.equal(canceled.status.state, "canceled");
   } finally {
     server?.close();
     await rm(rootPath, { recursive: true, force: true });

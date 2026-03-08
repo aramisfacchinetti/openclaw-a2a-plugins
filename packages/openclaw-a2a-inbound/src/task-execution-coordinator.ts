@@ -197,6 +197,7 @@ export class A2ATaskExecutionCoordinator {
     private readonly eventBus: ExecutionEventBus,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
     expectedSessionKey?: string,
+    private readonly onRunIdCaptured?: (runId: string) => void,
   ) {
     this.expectedSessionKey = expectedSessionKey;
     this.responseMode =
@@ -514,6 +515,7 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.runId = normalizedRunId;
+    this.onRunIdCaptured?.(normalizedRunId);
 
     if (this.promoted) {
       this.liveExecutions.update(this.requestContext.taskId, {

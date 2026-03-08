@@ -8,6 +8,7 @@ import type {
 } from "@a2a-js/sdk";
 import { createOpenClawA2AExecutor } from "../dist/openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "../dist/live-execution-registry.js";
+import { createTaskStore } from "../dist/task-store.js";
 import {
   createEventBusRecorder,
   createPluginRuntimeHarness,
@@ -91,15 +92,18 @@ function getArtifactUpdates(
 function createExecutorHarness(script: Parameters<typeof createPluginRuntimeHarness>[0]) {
   const { pluginRuntime } = createPluginRuntimeHarness(script);
   const liveExecutions = new A2ALiveExecutionRegistry();
+  const taskRuntime = createTaskStore({ kind: "memory" });
 
   return {
     liveExecutions,
+    taskRuntime,
     executor: createOpenClawA2AExecutor({
       accountId: "default",
       account: createTestAccount(),
       cfg: {},
       channelRuntime: pluginRuntime.channel,
       pluginRuntime,
+      taskRuntime,
       liveExecutions,
     }),
   };

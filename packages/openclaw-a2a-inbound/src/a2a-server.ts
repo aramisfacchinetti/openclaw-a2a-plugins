@@ -144,6 +144,7 @@ export function createA2AInboundServer(
     cfg: options.cfg,
     channelRuntime: options.channelRuntime,
     pluginRuntime: options.pluginRuntime,
+    taskRuntime: taskStore,
     log: options.log,
     liveExecutions,
   });

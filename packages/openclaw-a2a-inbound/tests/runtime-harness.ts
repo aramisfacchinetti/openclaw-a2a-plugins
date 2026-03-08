@@ -6,7 +6,10 @@ import {
   type AgentExecutionEvent,
 } from "@a2a-js/sdk/server";
 import type { Message } from "@a2a-js/sdk";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type {
+  PluginRuntime,
+  ResolvedAgentRoute,
+} from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "../src/config.js";
 
 type DispatchParams = Parameters<
@@ -19,26 +22,64 @@ type RuntimeScript = (ctx: {
     runId: string;
     stream: string;
     data: Record<string, unknown>;
+    sessionKey?: string;
   }) => void;
   waitForAbort: () => Promise<void>;
 }) => Promise<void>;
 
+type RuntimeHarnessOptions = {
+  defaultEventSessionKey?: string;
+  resolveAgentRoute?: () => ResolvedAgentRoute;
+  resolveStorePath?: () => string;
+  recordInboundSession?: (
+    params: Parameters<PluginRuntime["channel"]["session"]["recordInboundSession"]>[0],
+  ) => Promise<void>;
+  readSessionUpdatedAt?: (
+    params: Parameters<PluginRuntime["channel"]["session"]["readSessionUpdatedAt"]>[0],
+  ) => number | undefined;
+};
+
 export function createPluginRuntimeHarness(script: RuntimeScript): {
+  pluginRuntime: PluginRuntime;
+};
+export function createPluginRuntimeHarness(
+  script: RuntimeScript,
+  options: RuntimeHarnessOptions,
+): {
+  pluginRuntime: PluginRuntime;
+};
+export function createPluginRuntimeHarness(
+  script: RuntimeScript,
+  options: RuntimeHarnessOptions = {},
+): {
   pluginRuntime: PluginRuntime;
 } {
   const listeners = new Set<(event: Record<string, unknown>) => void>();
   let seq = 0;
+  const defaultRoute =
+    options.resolveAgentRoute?.() ?? {
+      agentId: "main",
+      channel: "a2a",
+      accountId: "default",
+      sessionKey: "session:test",
+      mainSessionKey: "session:test",
+      matchedBy: "default",
+    };
 
   const emit = (event: {
     runId: string;
     stream: string;
     data: Record<string, unknown>;
+    sessionKey?: string;
   }) => {
     const payload = {
       ...event,
       seq: ++seq,
       ts: Date.now(),
-      sessionKey: "session:test",
+      sessionKey:
+        event.sessionKey ??
+        options.defaultEventSessionKey ??
+        defaultRoute.sessionKey,
     };
 
     for (const listener of listeners) {
@@ -127,19 +168,18 @@ export function createPluginRuntimeHarness(script: RuntimeScript): {
         resolveEnvelopeFormatOptions: () => ({}),
       },
       routing: {
-        resolveAgentRoute: () => ({
-          agentId: "main",
-          sessionKey: "session:test",
-        }),
+        resolveAgentRoute: () => defaultRoute,
       },
       pairing: {} as PluginRuntime["channel"]["pairing"],
       media: {} as PluginRuntime["channel"]["media"],
       activity: {} as PluginRuntime["channel"]["activity"],
       session: {
-        resolveStorePath: () => "/tmp/openclaw-a2a-inbound-sessions.json",
-        readSessionUpdatedAt: () => undefined,
+        resolveStorePath:
+          options.resolveStorePath ??
+          (() => "/tmp/openclaw-a2a-inbound-sessions.json"),
+        readSessionUpdatedAt: options.readSessionUpdatedAt ?? (() => undefined),
         recordSessionMetaFromInbound: async () => {},
-        recordInboundSession: async () => {},
+        recordInboundSession: options.recordInboundSession ?? (async () => {}),
         updateLastRoute: async () => {},
       },
       mentions: {} as PluginRuntime["channel"]["mentions"],
