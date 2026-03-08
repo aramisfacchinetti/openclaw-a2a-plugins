@@ -67,6 +67,22 @@ function getStatusSequence(
     .map((event) => [event.status.state, event.final]);
 }
 
+function getPersistedArtifactText(
+  task: Task,
+  artifactId: string,
+): string | undefined {
+  const artifact = task.artifacts?.find((entry) => entry.artifactId === artifactId);
+
+  if (!artifact) {
+    return undefined;
+  }
+
+  return artifact.parts
+    .filter((part): part is Extract<typeof part, { kind: "text" }> => part.kind === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
@@ -158,21 +174,20 @@ test("sendMessage keeps a blocking delayed terminal run as one direct Message", 
   );
 });
 
-test("sendMessage returns a Task for a nonblocking delayed terminal run", async () => {
+test("sendMessage returns an initial Task for a nonblocking terminal run", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
-    params.replyOptions?.onAgentRunStart?.("run-nonblocking-delay");
+    params.replyOptions?.onAgentRunStart?.("run-nonblocking-terminal");
     emit({
-      runId: "run-nonblocking-delay",
+      runId: "run-nonblocking-terminal",
       stream: "lifecycle",
       data: { phase: "start" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
     await params.dispatcherOptions.deliver(
-      { text: "Nonblocking delayed reply" },
+      { text: "Nonblocking terminal reply" },
       { kind: "final" },
     );
     emit({
-      runId: "run-nonblocking-delay",
+      runId: "run-nonblocking-terminal",
       stream: "lifecycle",
       data: { phase: "end" },
     });
@@ -190,6 +205,8 @@ test("sendMessage returns a Task for a nonblocking delayed terminal run", async 
     assert.fail("expected task result");
   }
 
+  assert.equal(result.status.state, "submitted");
+
   await waitFor(async () => {
     const persisted = await server.requestHandler.getTask({
       id: result.id,
@@ -205,6 +222,10 @@ test("sendMessage returns a Task for a nonblocking delayed terminal run", async 
   });
 
   assert.equal(persisted.status.state, "completed");
+  assert.equal(
+    getPersistedArtifactText(persisted, "assistant-output"),
+    "Nonblocking terminal reply",
+  );
   assert.ok(
     persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output"),
   );
@@ -289,7 +310,7 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   );
 });
 
-test("sendMessageStream stays task-first for text progress runs", async () => {
+test("sendMessageStream emits task-first assistant progress and a closing artifact event", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-fast");
     emit({
@@ -315,6 +336,7 @@ test("sendMessageStream stays task-first for text progress runs", async () => {
 
   const streamed = await collectStream(server);
   const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const closingUpdate = assistantUpdates.at(-1);
   const taskIndex = streamed.findIndex((event) => event.kind === "task");
   const firstAssistantIndex = streamed.findIndex(
     (event) =>
@@ -334,7 +356,13 @@ test("sendMessageStream stays task-first for text progress runs", async () => {
     ["working", false],
     ["completed", true],
   ]);
-  assert.ok(assistantUpdates.length >= 1);
+  assert.equal(assistantUpdates.length, 2);
+  assert.equal(getArtifactText(assistantUpdates[0]), "Working...");
+  assert.equal(assistantUpdates[0].lastChunk, false);
+  assert.ok(closingUpdate);
+  assert.equal(closingUpdate.lastChunk, true);
+  assert.equal(getArtifactText(closingUpdate), undefined);
+  assert.equal(closingUpdate.append, true);
   assert.ok(firstAssistantIndex > taskIndex);
   assert.ok(completedIndex > firstAssistantIndex);
 });
@@ -360,6 +388,7 @@ test("sendMessageStream stays task-based when only the final reply arrives", asy
 
   const streamed = await collectStream(server);
   const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const closingUpdate = assistantUpdates.at(-1);
   const completedIndex = streamed.findIndex(
     (event) =>
       isStatusUpdate(event) &&
@@ -374,8 +403,13 @@ test("sendMessageStream stays task-based when only the final reply arrives", asy
     ["working", false],
     ["completed", true],
   ]);
-  assert.equal(assistantUpdates.length, 1);
+  assert.equal(assistantUpdates.length, 2);
   assert.equal(getArtifactText(assistantUpdates[0]), "Final only answer");
+  assert.equal(assistantUpdates[0].lastChunk, false);
+  assert.ok(closingUpdate);
+  assert.equal(closingUpdate.lastChunk, true);
+  assert.equal(getArtifactText(closingUpdate), undefined);
+  assert.equal(closingUpdate.append, true);
   assert.ok(streamed.indexOf(assistantUpdates[0]) < completedIndex);
 });
 
@@ -405,7 +439,10 @@ test("sendMessageStream reconciles assistant deltas against the authoritative fi
 
   const streamed = await collectStream(server);
   const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
-  const lastAssistantUpdate = assistantUpdates.at(-1);
+  const authoritativeUpdate = assistantUpdates.findLast(
+    (event) => typeof getArtifactText(event) === "string",
+  );
+  const closingUpdate = assistantUpdates.at(-1);
   const completedIndex = streamed.findIndex(
     (event) =>
       isStatusUpdate(event) &&
@@ -413,32 +450,34 @@ test("sendMessageStream reconciles assistant deltas against the authoritative fi
       event.final === true,
   );
 
-  assert.ok(lastAssistantUpdate);
-  assert.equal(getArtifactText(lastAssistantUpdate), "Authoritative final reply");
-  assert.equal(lastAssistantUpdate.append, undefined);
-  assert.ok(streamed.indexOf(lastAssistantUpdate) < completedIndex);
+  assert.ok(authoritativeUpdate);
+  assert.equal(getArtifactText(authoritativeUpdate), "Authoritative final reply");
+  assert.equal(authoritativeUpdate.append, undefined);
+  assert.ok(closingUpdate);
+  assert.equal(closingUpdate.lastChunk, true);
+  assert.ok(streamed.indexOf(authoritativeUpdate) < completedIndex);
 });
 
-test("sendMessageStream appends assistant-output for cumulative text snapshots", async () => {
+test("sendMessage persists the same final assistant-output for cumulative preview snapshots", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
-    params.replyOptions?.onAgentRunStart?.("run-stream-cumulative");
+    params.replyOptions?.onAgentRunStart?.("run-cumulative-persisted");
     emit({
-      runId: "run-stream-cumulative",
+      runId: "run-cumulative-persisted",
       stream: "lifecycle",
       data: { phase: "start" },
     });
     emit({
-      runId: "run-stream-cumulative",
+      runId: "run-cumulative-persisted",
       stream: "assistant",
       data: { text: "Alpha" },
     });
     emit({
-      runId: "run-stream-cumulative",
+      runId: "run-cumulative-persisted",
       stream: "assistant",
       data: { text: "Alpha Beta" },
     });
     emit({
-      runId: "run-stream-cumulative",
+      runId: "run-cumulative-persisted",
       stream: "assistant",
       data: { text: "Alpha Beta Gamma" },
     });
@@ -447,22 +486,108 @@ test("sendMessageStream appends assistant-output for cumulative text snapshots",
       { kind: "final" },
     );
     emit({
-      runId: "run-stream-cumulative",
+      runId: "run-cumulative-persisted",
       stream: "lifecycle",
       data: { phase: "end" },
     });
   });
 
-  const streamed = await collectStream(server);
-  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      blocking: false,
+    },
+  });
 
-  assert.equal(assistantUpdates.length, 3);
-  assert.equal(getArtifactText(assistantUpdates[0]), "Alpha");
-  assert.equal(assistantUpdates[0].append, undefined);
-  assert.equal(getArtifactText(assistantUpdates[1]), " Beta");
-  assert.equal(assistantUpdates[1].append, true);
-  assert.equal(getArtifactText(assistantUpdates[2]), " Gamma");
-  assert.equal(assistantUpdates[2].append, true);
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected task result");
+  }
+
+  await waitFor(async () => {
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+
+    return persisted.status.state === "completed";
+  });
+
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
+
+  assert.equal(
+    getPersistedArtifactText(persisted, "assistant-output"),
+    "Alpha Beta Gamma",
+  );
+});
+
+test("sendMessage persists the same final assistant-output for delta preview snapshots", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-delta-persisted");
+    emit({
+      runId: "run-delta-persisted",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-delta-persisted",
+      stream: "assistant",
+      data: { delta: "Alpha" },
+    });
+    emit({
+      runId: "run-delta-persisted",
+      stream: "assistant",
+      data: { delta: " Beta" },
+    });
+    emit({
+      runId: "run-delta-persisted",
+      stream: "assistant",
+      data: { delta: " Gamma" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Alpha Beta Gamma" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-delta-persisted",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      blocking: false,
+    },
+  });
+
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected task result");
+  }
+
+  await waitFor(async () => {
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+
+    return persisted.status.state === "completed";
+  });
+
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
+
+  assert.equal(
+    getPersistedArtifactText(persisted, "assistant-output"),
+    "Alpha Beta Gamma",
+  );
 });
 
 test("sendMessageStream emits stable live tool progress artifacts", async () => {

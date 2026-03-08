@@ -16,10 +16,21 @@ This package is a concrete implementation skeleton for accepting inbound A2A tra
 - Bridges direct text requests into the OpenClaw reply pipeline
 - Exposes a diagnostic gateway RPC method: `openclaw-a2a-inbound.describe`
 
+## Response Behavior
+
+The inbound executor uses request mode to decide whether the initial A2A response stays on the direct `Message` fast path or starts as a `Task`.
+
+| A2A call | Initial response | Incremental progress | Terminal completion |
+| --- | --- | --- | --- |
+| `sendMessage(...)` with default blocking behavior | Direct `Message` for simple text-only runs; promoted `Task` when task-only features are needed | None on the direct-message path | Direct `Message` or terminal `Task` |
+| `sendMessage({ blocking: false })` | Always `Task` with initial `submitted` state | `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` updates during execution | Persisted terminal `Task` |
+| `sendMessageStream(...)` | Always `Task` as the first streamed event | `submitted` / `working` status updates plus incremental `assistant-output`, tool-progress, and tool-result artifact updates | Final status update with a completed, failed, or canceled task |
+
+Assistant preview text is emitted through a single `assistant-output` artifact for the whole run. Streaming and non-blocking executions publish incremental artifact updates as OpenClaw emits assistant and tool events, then close the artifact with a final `lastChunk` update when execution finishes.
+
 ## Not Yet Implemented
 
 - durable task lifecycle beyond the included task-store scaffold
-- streaming task updates mapped back into A2A task/status events
 - push notifications
 - outbound delivery back to remote A2A peers initiated by OpenClaw
 
