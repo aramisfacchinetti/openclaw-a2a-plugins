@@ -210,6 +210,12 @@ export class A2ATaskExecutionCoordinator {
 
   setExpectedSessionKey(sessionKey: string | undefined): void {
     this.expectedSessionKey = readTrimmedString(sessionKey);
+
+    if (this.promoted) {
+      this.liveExecutions.update(this.requestContext.taskId, {
+        sessionKey: this.expectedSessionKey,
+      });
+    }
   }
 
   prepareForExecution(): void {
@@ -342,7 +348,7 @@ export class A2ATaskExecutionCoordinator {
 
     this.flushQueuedAssistantArtifact();
 
-    if (this.cancelRequested) {
+    if (this.cancelRequested || this.signal.aborted) {
       this.promoteToTask("cancellation requires task state");
       this.publishFinalStatus("canceled", {
         final: true,
@@ -440,15 +446,20 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.cancelRequested = true;
-    this.abortController.abort(
-      new DOMException("A2A task canceled.", "AbortError"),
-    );
-    this.promoteToTask("task cancellation requested");
+
+    if (this.promoted) {
+      this.liveExecutions.update(this.requestContext.taskId, {
+        cancelRequested: true,
+      });
+    }
+
+    if (!this.signal.aborted) {
+      this.abortController.abort(
+        new DOMException("A2A task canceled.", "AbortError"),
+      );
+    }
+
     this.flushQueuedAssistantArtifact();
-    this.publishFinalStatus("canceled", {
-      final: true,
-      messageText: "Task cancellation requested by the client.",
-    });
   }
 
   private canReturnDirectMessage(): boolean {
@@ -662,6 +673,7 @@ export class A2ATaskExecutionCoordinator {
       taskId: this.requestContext.taskId,
       contextId: this.requestContext.contextId,
       abortController: this.abortController,
+      sessionKey: this.expectedSessionKey,
       runId: this.runId,
       cancel: async () => this.cancel(),
     });

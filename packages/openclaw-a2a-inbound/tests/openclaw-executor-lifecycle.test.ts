@@ -258,6 +258,55 @@ test("non_blocking mode learns runId from agent events instead of session or con
   assert.notEqual(workingRunId, "session:test");
 });
 
+test("promoted live executions record both sessionKey and runId", async () => {
+  let releaseRun: (() => void) | undefined;
+
+  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-live-bridge");
+    emit({
+      runId: "run-live-bridge",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Tool summary" },
+      { kind: "tool" },
+    );
+    await new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Finished reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-live-bridge",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  const executePromise = executor.execute(requestContext, recorder.bus);
+
+  await waitFor(() => {
+    const record = liveExecutions.get(requestContext.taskId);
+    return (
+      record?.sessionKey === "session:test" &&
+      record.runId === "run-live-bridge"
+    );
+  });
+
+  const liveRecord = liveExecutions.get(requestContext.taskId);
+  assert.equal(liveRecord?.sessionKey, "session:test");
+  assert.equal(liveRecord?.runId, "run-live-bridge");
+
+  releaseRun?.();
+  await executePromise;
+  await recorder.finished;
+});
+
 test("streaming mode publishes task-first assistant progress and closes the artifact", async () => {
   const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-streaming");
@@ -550,7 +599,9 @@ test("needs_approval tool results use requiresApproval.prompt for input-required
   );
 });
 
-test("cancelTask publishes one final canceled state and clears live execution", async () => {
+test("cancelTask aborts immediately but only publishes canceled after reply settlement", async () => {
+  let releaseAfterAbort: (() => void) | undefined;
+  let signalAborted = false;
   const { executor, liveExecutions } = createExecutorHarness(
     async ({ params, emit, waitForAbort }) => {
       params.replyOptions?.onAgentRunStart?.("run-cancel");
@@ -564,6 +615,15 @@ test("cancelTask publishes one final canceled state and clears live execution", 
         { kind: "tool" },
       );
       await waitForAbort();
+      signalAborted = true;
+      await new Promise<void>((resolve) => {
+        releaseAfterAbort = resolve;
+      });
+      emit({
+        runId: "run-cancel",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
     },
   );
   const requestContext = createRequestContext();
@@ -577,7 +637,29 @@ test("cancelTask publishes one final canceled state and clears live execution", 
     ),
   );
 
+  const pendingRecord = liveExecutions.get(requestContext.taskId);
+  assert.ok(pendingRecord);
+  assert.equal(pendingRecord?.cancelRequested, false);
+
   await executor.cancelTask(requestContext.taskId, recorder.bus);
+
+  assert.equal(signalAborted, true);
+  assert.equal(
+    recorder.events.some(
+      (event) =>
+        isStatusUpdate(event) &&
+        event.status.state === "canceled" &&
+        event.final === true,
+    ),
+    false,
+  );
+  assert.equal(liveExecutions.has(requestContext.taskId), true);
+  assert.equal(
+    liveExecutions.get(requestContext.taskId)?.cancelRequested,
+    true,
+  );
+
+  releaseAfterAbort?.();
   await executePromise;
   await recorder.finished;
 

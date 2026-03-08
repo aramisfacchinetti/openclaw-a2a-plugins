@@ -17,6 +17,7 @@ export interface A2ALiveExecutionRecord {
   contextId: string;
   abortController: AbortController;
   state: A2ALiveExecutionState;
+  sessionKey?: string;
   runId?: string;
   taskPublished: boolean;
   cancelRequested: boolean;
@@ -47,6 +48,7 @@ export class A2ALiveExecutionRegistry {
     taskId: string;
     contextId: string;
     abortController: AbortController;
+    sessionKey?: string;
     runId?: string;
     cancel?: () => Promise<void>;
   }): A2ALiveExecutionRecord {
@@ -55,6 +57,7 @@ export class A2ALiveExecutionRegistry {
     if (existing) {
       existing.contextId = params.contextId;
       existing.abortController = params.abortController;
+      existing.sessionKey = params.sessionKey ?? existing.sessionKey;
       existing.runId = params.runId ?? existing.runId;
       existing.state = "active_task";
       existing.taskPublished = true;
@@ -66,6 +69,7 @@ export class A2ALiveExecutionRegistry {
       taskId: params.taskId,
       contextId: params.contextId,
       abortController: params.abortController,
+      sessionKey: params.sessionKey,
       runId: params.runId,
       state: "active_task",
       taskPublished: true,

@@ -220,58 +220,54 @@ export class A2AInboundRequestHandler {
     }
 
     if (isQuiescentTaskState(task.status.state)) {
-      await this.taskRuntime.commitEvent(
-        createTaskStatusUpdate({
-          taskId: task.id,
-          contextId: task.contextId,
-          state: "canceled",
-          final: true,
-          messageText: "Task cancellation requested by the client.",
-        }),
-      );
-      this.liveExecutions.cleanup(task.id);
-
-      const canceled = await this.taskRuntime.load(task.id, context);
-
-      if (!canceled) {
-        throw A2AError.internalError(
-          `Task ${task.id} not found after cancellation.`,
-        );
-      }
-
-      return canceled;
+      return this.cancelQuiescentTask(task, context);
     }
 
     if (!this.liveExecutions.has(params.id)) {
+      const latestTask = await this.loadTaskForRead(params.id, context);
+
+      if (!latestTask) {
+        throw A2AError.taskNotFound(params.id);
+      }
+
+      if (isTerminalTaskState(latestTask.status.state)) {
+        return latestTask;
+      }
+
+      if (isQuiescentTaskState(latestTask.status.state)) {
+        return this.cancelQuiescentTask(latestTask, context);
+      }
+
       throw A2AError.unsupportedOperation(
         "Task cancellation is only available while the task is live in this process.",
       );
     }
 
+    const prepared = await this.taskRuntime.prepareLiveTail(params.id);
+
+    if (!prepared) {
+      throw A2AError.taskNotFound(params.id);
+    }
+
+    if (isTerminalTaskState(prepared.task.status.state)) {
+      return prepared.task;
+    }
+
+    if (isQuiescentTaskState(prepared.task.status.state)) {
+      return this.cancelQuiescentTask(prepared.task, context);
+    }
+
+    if (!prepared.subscription) {
+      throw A2AError.taskNotCancelable(params.id);
+    }
+
     await this.agentExecutor.cancelTask(params.id, new DefaultExecutionEventBus());
 
-    let latestTask = await this.taskRuntime.load(params.id, context);
-
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (latestTask && isTerminalTaskState(latestTask.status.state)) {
-        return latestTask;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      latestTask = await this.taskRuntime.load(params.id, context);
-    }
-
-    if (!latestTask) {
-      throw A2AError.internalError(
-        `Task ${params.id} not found after cancellation.`,
-      );
-    }
-
-    if (isTerminalTaskState(latestTask.status.state)) {
-      return latestTask;
-    }
-
-    throw A2AError.taskNotCancelable(params.id);
+    return this.waitForCommittedTerminalTask(
+      params.id,
+      prepared.subscription,
+      context,
+    );
   }
 
   setTaskPushNotificationConfig(
@@ -611,6 +607,56 @@ export class A2AInboundRequestHandler {
     } finally {
       subscription.close();
     }
+  }
+
+  private async cancelQuiescentTask(
+    task: Task,
+    context?: ServerCallContext,
+  ): Promise<Task> {
+    await this.taskRuntime.commitEvent(
+      createTaskStatusUpdate({
+        taskId: task.id,
+        contextId: task.contextId,
+        state: "canceled",
+        final: true,
+        messageText: "Task cancellation requested by the client.",
+      }),
+    );
+    this.liveExecutions.cleanup(task.id);
+
+    const canceled = await this.taskRuntime.load(task.id, context);
+
+    if (!canceled) {
+      throw A2AError.internalError(
+        `Task ${task.id} not found after cancellation.`,
+      );
+    }
+
+    return canceled;
+  }
+
+  private async waitForCommittedTerminalTask(
+    taskId: string,
+    subscription: TaskJournalSubscriptionHandle,
+    context?: ServerCallContext,
+  ): Promise<Task> {
+    for await (const _event of this.consumeCommittedTail(subscription)) {
+      // Wait until the committed tail reaches a final status update.
+    }
+
+    const terminalTask = await this.taskRuntime.load(taskId, context);
+
+    if (!terminalTask) {
+      throw A2AError.internalError(
+        `Task ${taskId} not found after cancellation.`,
+      );
+    }
+
+    if (isTerminalTaskState(terminalTask.status.state)) {
+      return terminalTask;
+    }
+
+    throw A2AError.taskNotCancelable(taskId);
   }
 
   private async loadTaskForRead(

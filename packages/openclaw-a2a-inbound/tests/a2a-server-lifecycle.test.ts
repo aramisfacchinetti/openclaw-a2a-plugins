@@ -1023,7 +1023,10 @@ test("sendMessageStream emits both live tool progress and summarized tool result
   assert.ok(getArtifactUpdates(streamed, "assistant-output").length >= 1);
 });
 
-test("cancelTask aborts a live promoted execution and persists the canceled task", async () => {
+test("cancelTask waits for the real terminal task after aborting a live promoted execution", async () => {
+  let releaseAfterAbort: (() => void) | undefined;
+  let abortObserved = false;
+
   const server = createServerHarness(async ({ params, emit, waitForAbort }) => {
     params.replyOptions?.onAgentRunStart?.("run-cancel");
     emit({
@@ -1036,6 +1039,15 @@ test("cancelTask aborts a live promoted execution and persists the canceled task
       { kind: "tool" },
     );
     await waitForAbort();
+    abortObserved = true;
+    await new Promise<void>((resolve) => {
+      releaseAfterAbort = resolve;
+    });
+    emit({
+      runId: "run-cancel",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
   });
 
   const result = await server.requestHandler.sendMessage({
@@ -1050,18 +1062,30 @@ test("cancelTask aborts a live promoted execution and persists the canceled task
     assert.fail("expected live task");
   }
 
-  const canceled = await server.requestHandler.cancelTask({ id: result.id });
-
-  assert.equal(canceled.status.state, "canceled");
-
-  await waitFor(async () => {
-    const snapshot = await server.requestHandler.getTask({
-      id: result.id,
-      historyLength: 10,
+  let cancelResolved = false;
+  const cancelPromise = server.requestHandler
+    .cancelTask({ id: result.id })
+    .then((task) => {
+      cancelResolved = true;
+      return task;
     });
 
-    return snapshot.status.state === "canceled";
+  await waitFor(() => abortObserved);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(cancelResolved, false);
+
+  const pending = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
   });
+  assert.equal(pending.status.state, "working");
+
+  releaseAfterAbort?.();
+
+  const canceled = await cancelPromise;
+
+  assert.equal(canceled.status.state, "canceled");
 
   const persisted = await server.requestHandler.getTask({
     id: result.id,
