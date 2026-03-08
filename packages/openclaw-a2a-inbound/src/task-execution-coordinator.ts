@@ -20,7 +20,6 @@ import {
 type JsonRecord = Record<string, unknown>;
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
-type AssistantArtifactMode = "auto" | "append" | "replace";
 
 export interface OpenClawExecutionEvent {
   runId: string;
@@ -70,7 +69,7 @@ function stringifyPayloadExtras(payload: NormalizedReplyPayload): string {
 function pickAssistantText(...candidates: Array<string | undefined>): string | undefined {
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return candidate.trim();
+      return candidate;
     }
   }
 
@@ -110,6 +109,22 @@ function readToolCallId(data: Record<string, unknown>): string | undefined {
     : undefined;
 }
 
+function normalizeAssistantPreviewText(
+  currentPreview: string | undefined,
+  incomingText: string,
+): string {
+  const previousPreview = currentPreview ?? "";
+
+  if (
+    previousPreview.length > 0 &&
+    incomingText.startsWith(previousPreview)
+  ) {
+    return incomingText;
+  }
+
+  return `${previousPreview}${incomingText}`;
+}
+
 export class A2ATaskExecutionCoordinator {
   private runId?: string;
   private readonly abortController = new AbortController();
@@ -127,8 +142,8 @@ export class A2ATaskExecutionCoordinator {
   private cancelRequested = false;
   private lifecyclePhase?: LifecyclePhase;
   private lifecycleError?: string;
-  private initialResponsePromotionTimer?: ReturnType<typeof setTimeout>;
-  private executionSettled = false;
+  private assistantFlushQueued = false;
+  private assistantFlushScheduled = false;
 
   constructor(
     private readonly requestContext: RequestContext,
@@ -150,14 +165,18 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    if (this.responseMode === "streaming") {
-      this.promoteToTask("streaming mode always starts as a task");
+    if (
+      this.responseMode === "streaming" ||
+      this.responseMode === "non_blocking"
+    ) {
+      this.promoteToTask(
+        `${this.responseMode} mode always starts as a task`,
+      );
     }
   }
 
   handleAgentRunStart(runId: string): void {
     this.runId = runId;
-    this.scheduleInitialResponsePromotion();
 
     if (this.promoted) {
       this.liveExecutions.update(this.requestContext.taskId, { runId });
@@ -197,6 +216,8 @@ export class A2ATaskExecutionCoordinator {
     const normalized = normalizeReplyPayload(payload);
 
     if (kind === "tool") {
+      this.flushQueuedAssistantArtifact();
+
       if (!this.promoted) {
         this.stagedOutputs.push({
           kind: "tool",
@@ -210,6 +231,7 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
+    this.flushQueuedAssistantArtifact();
     const assistantStage = this.ensureAssistantStage();
 
     if (kind === "final") {
@@ -254,8 +276,7 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    this.executionSettled = true;
-    this.clearInitialResponsePromotion();
+    this.flushQueuedAssistantArtifact();
 
     if (this.cancelRequested) {
       this.promoteToTask("cancellation requires task state");
@@ -313,8 +334,7 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    this.executionSettled = true;
-    this.clearInitialResponsePromotion();
+    this.flushQueuedAssistantArtifact();
 
     if (this.cancelRequested || this.signal.aborted) {
       this.promoteToTask("cancellation requires task state");
@@ -351,12 +371,11 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.cancelRequested = true;
-    this.executionSettled = true;
-    this.clearInitialResponsePromotion();
     this.abortController.abort(
       new DOMException("A2A task canceled.", "AbortError"),
     );
     this.promoteToTask("task cancellation requested");
+    this.flushQueuedAssistantArtifact();
     this.publishFinalStatus("canceled", {
       final: true,
       messageText: "Task cancellation requested by the client.",
@@ -400,7 +419,6 @@ export class A2ATaskExecutionCoordinator {
     this.lifecyclePhase = phase;
 
     if (phase === "start") {
-      this.scheduleInitialResponsePromotion();
       this.publishWorkingStatus();
       return;
     }
@@ -411,43 +429,25 @@ export class A2ATaskExecutionCoordinator {
           ? data.error.trim()
           : "OpenClaw ended the run with a lifecycle error.";
       this.promoteToTask("lifecycle error requires task state");
+      this.flushQueuedAssistantArtifact();
     }
   }
 
   private handleAssistantEvent(data: Record<string, unknown>): void {
-    const text = readOptionalText(data.text);
-    const delta = readOptionalText(data.delta);
+    const text = readOptionalText(data.text) ?? readOptionalText(data.delta);
     const mediaUrls = readStringArray(data.mediaUrls);
 
-    if (!text && !delta && mediaUrls.length === 0) {
+    if (!text && mediaUrls.length === 0) {
       return;
     }
 
     const assistantStage = this.ensureAssistantStage();
-    const previousStreamedText = assistantStage.streamedText ?? "";
 
-    let nextStreamedText = assistantStage.streamedText;
-    let mode: AssistantArtifactMode = "replace";
-    let appendText: string | undefined;
-
-    if (typeof delta === "string") {
-      nextStreamedText = `${previousStreamedText}${delta}`;
-      mode = "append";
-      appendText = delta;
-    } else if (typeof text === "string") {
-      nextStreamedText = text;
-
-      if (
-        previousStreamedText.length > 0 &&
-        text.startsWith(previousStreamedText)
-      ) {
-        mode = "append";
-        appendText = text.slice(previousStreamedText.length);
-      }
-    }
-
-    if (typeof nextStreamedText === "string") {
-      assistantStage.streamedText = nextStreamedText;
+    if (typeof text === "string") {
+      assistantStage.streamedText = normalizeAssistantPreviewText(
+        assistantStage.streamedText,
+        text,
+      );
     }
 
     assistantStage.mediaUrls = mergeMediaUrls(assistantStage.mediaUrls, mediaUrls);
@@ -458,12 +458,7 @@ export class A2ATaskExecutionCoordinator {
     }
 
     if (this.promoted) {
-      this.publishAssistantArtifact({
-        lastChunk: false,
-        preferTerminalText: false,
-        mode,
-        appendText,
-      });
+      this.queueAssistantArtifactFlush();
     }
   }
 
@@ -484,6 +479,7 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
+    this.flushQueuedAssistantArtifact();
     this.eventBus.publish(
       createToolProgressArtifactUpdate({
         taskId: this.requestContext.taskId,
@@ -545,7 +541,6 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    this.clearInitialResponsePromotion();
     this.promoted = true;
     this.taskPublished = true;
     this.liveExecutions.activate({
@@ -689,38 +684,31 @@ export class A2ATaskExecutionCoordinator {
   private publishAssistantArtifact(params: {
     lastChunk: boolean;
     preferTerminalText: boolean;
-    mode?: AssistantArtifactMode;
-    appendText?: string;
   }): boolean {
     if (!this.promoted) {
       return false;
     }
 
+    const assistantStage = this.ensureAssistantStage();
     const payload = this.resolveAssistantPayload(params.preferTerminalText);
+    const nextText = payload.text ?? "";
+    const publishedText = assistantStage.publishedText;
+    const hasPublishedArtifact = typeof publishedText === "string";
+    const hasPayloadContent =
+      nextText.length > 0 || hasReplyPayloadExtras(payload);
 
-    if (!payload.text && !hasReplyPayloadExtras(payload)) {
+    if (!hasPayloadContent && !(params.lastChunk && hasPublishedArtifact)) {
       return false;
     }
 
-    const assistantStage = this.ensureAssistantStage();
-    const nextText = payload.text ?? "";
     const nextExtrasKey = stringifyPayloadExtras(payload);
-    const publishedText = assistantStage.publishedText;
     const publishedExtrasKey = assistantStage.publishedExtrasKey;
-    const mode = params.mode ?? "auto";
+    const extrasChanged = nextExtrasKey !== publishedExtrasKey;
 
-    const canAppend =
-      mode !== "replace" &&
-      typeof publishedText === "string" &&
-      nextText.startsWith(publishedText) &&
-      nextExtrasKey === publishedExtrasKey &&
-      (mode !== "append" ||
-        nextText === `${publishedText}${params.appendText ?? nextText.slice(publishedText.length)}`);
+    if (hasPublishedArtifact && nextText.startsWith(publishedText)) {
+      const delta = nextText.slice(publishedText.length);
 
-    if (canAppend) {
-      const delta = params.appendText ?? nextText.slice(publishedText.length);
-
-      if (delta.length > 0) {
+      if (delta.length > 0 || extrasChanged || params.lastChunk) {
         this.eventBus.publish(
           createReplyArtifactUpdate({
             taskId: this.requestContext.taskId,
@@ -729,8 +717,10 @@ export class A2ATaskExecutionCoordinator {
             name: "assistant",
             sequence: this.nextArtifactSequence(),
             payload: {
-              ...payload,
-              text: delta,
+              text: delta.length > 0 ? delta : undefined,
+              mediaUrls: extrasChanged ? payload.mediaUrls : [],
+              channelData: extrasChanged ? payload.channelData : undefined,
+              isError: extrasChanged ? payload.isError : false,
             },
             append: true,
             lastChunk: params.lastChunk,
@@ -738,10 +728,9 @@ export class A2ATaskExecutionCoordinator {
         );
       }
     } else if (
-      mode === "replace" ||
-      typeof publishedText !== "string" ||
+      !hasPublishedArtifact ||
       nextText !== publishedText ||
-      nextExtrasKey !== publishedExtrasKey
+      extrasChanged
     ) {
       this.eventBus.publish(
         createReplyArtifactUpdate({
@@ -752,6 +741,22 @@ export class A2ATaskExecutionCoordinator {
           sequence: this.nextArtifactSequence(),
           payload,
           lastChunk: params.lastChunk,
+        }),
+      );
+    } else if (params.lastChunk) {
+      this.eventBus.publish(
+        createReplyArtifactUpdate({
+          taskId: this.requestContext.taskId,
+          contextId: this.requestContext.contextId,
+          artifactId: "assistant-output",
+          name: "assistant",
+          sequence: this.nextArtifactSequence(),
+          payload: {
+            mediaUrls: [],
+            isError: false,
+          },
+          append: true,
+          lastChunk: true,
         }),
       );
     }
@@ -781,39 +786,42 @@ export class A2ATaskExecutionCoordinator {
     return this.artifactSequence;
   }
 
-  private scheduleInitialResponsePromotion(): void {
-    if (
-      this.responseMode !== "non_blocking" ||
-      this.promoted ||
-      this.finalPublished ||
-      this.executionSettled ||
-      this.initialResponsePromotionTimer
-    ) {
+  private queueAssistantArtifactFlush(): void {
+    if (!this.promoted) {
       return;
     }
 
-    this.initialResponsePromotionTimer = setTimeout(() => {
-      this.initialResponsePromotionTimer = undefined;
+    this.assistantFlushQueued = true;
 
-      if (
-        this.promoted ||
-        this.finalPublished ||
-        this.executionSettled ||
-        this.lifecyclePhase === "end"
-      ) {
+    if (this.assistantFlushScheduled) {
+      return;
+    }
+
+    this.assistantFlushScheduled = true;
+    queueMicrotask(() => {
+      this.assistantFlushScheduled = false;
+
+      if (!this.assistantFlushQueued || this.finalPublished) {
         return;
       }
 
-      this.promoteToTask("run remained active beyond the initial response boundary");
-    }, 0);
+      this.assistantFlushQueued = false;
+      this.publishAssistantArtifact({
+        lastChunk: false,
+        preferTerminalText: false,
+      });
+    });
   }
 
-  private clearInitialResponsePromotion(): void {
-    if (!this.initialResponsePromotionTimer) {
+  private flushQueuedAssistantArtifact(): void {
+    if (!this.assistantFlushQueued || this.finalPublished) {
       return;
     }
 
-    clearTimeout(this.initialResponsePromotionTimer);
-    this.initialResponsePromotionTimer = undefined;
+    this.assistantFlushQueued = false;
+    this.publishAssistantArtifact({
+      lastChunk: false,
+      preferTerminalText: false,
+    });
   }
 }

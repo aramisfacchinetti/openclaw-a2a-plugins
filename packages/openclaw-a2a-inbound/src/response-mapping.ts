@@ -120,9 +120,9 @@ export function normalizeReplyPayload(payload: unknown): NormalizedReplyPayload 
 
   const text =
     typeof payload.text === "string"
-      ? payload.text.trim()
+      ? payload.text
       : typeof payload.body === "string"
-        ? payload.body.trim()
+        ? payload.body
         : undefined;
   const mediaUrls =
     Array.isArray(payload.mediaUrls) && payload.mediaUrls.every((item) => typeof item === "string")
@@ -132,7 +132,7 @@ export function normalizeReplyPayload(payload: unknown): NormalizedReplyPayload 
         : [];
 
   return {
-    text: text && text.length > 0 ? text : undefined,
+    text: text && text.trim().length > 0 ? text : undefined,
     mediaUrls,
     channelData: isRecord(payload.channelData) ? payload.channelData : undefined,
     isError: payload.isError === true,
@@ -140,7 +140,11 @@ export function normalizeReplyPayload(payload: unknown): NormalizedReplyPayload 
 }
 
 export function hasReplyPayloadExtras(payload: NormalizedReplyPayload): boolean {
-  return payload.mediaUrls.length > 0 || typeof payload.channelData !== "undefined";
+  return (
+    payload.mediaUrls.length > 0 ||
+    typeof payload.channelData !== "undefined" ||
+    payload.isError
+  );
 }
 
 export function createAgentTextMessage(params: {
