@@ -31,12 +31,15 @@ Assistant preview text is emitted through a single `assistant-output` artifact f
 
 `resubscribe()` now serves the latest task snapshot plus durable replay from the committed journal instead of depending on a live in-process event bus. If a nonterminal task is found without a live owner and with an expired or missing lease, it is reconciled to terminal `failed` with the message `Task execution was interrupted by process loss before completion.`
 
+Durable task continuation is now pinned to the original OpenClaw binding for the task lifetime. If current routing config drifts after a task is created, later `sendMessage(...)` continuations still reuse the persisted session and store binding instead of silently rerouting.
+
 ## Durable Task Runtime
 
 `taskStore.kind = "json-file"` enables a directory-backed runtime store rooted at `taskStore.path`.
 
 Per task, the runtime stores:
 
+- `tasks/<base64url(taskId)>/binding.json`
 - `tasks/<base64url(taskId)>/snapshot.json`
 - `tasks/<base64url(taskId)>/events.ndjson`
 - `tasks/<base64url(taskId)>/runtime.json`
@@ -45,8 +48,11 @@ Notes:
 
 - `taskStore.path` is a directory root in v1, not a single JSON file.
 - The file-backed runtime is single-writer. Startup fails fast if another live process already owns the same root.
+- `binding.json` is the durable source of truth for OpenClaw agent/session/store identity once a task is promoted.
+- Blocking requests that finish as a direct `Message` never flush `binding.json`; bindings are only written on the first durable task write path.
 - Durable replay and `AgentCard.capabilities.stateTransitionHistory = true` are only enabled for `json-file` mode.
 - `memory` mode keeps the same replay API inside the current process lifetime, but all task state disappears on restart.
+- Durable tasks created before `binding.json` was introduced remain readable, replayable, cancelable when already quiescent or terminal, and orphan-recoverable, but they cannot be resumed.
 
 ## Vendor Extensions
 
@@ -66,6 +72,8 @@ The inbound runtime keeps A2A and OpenClaw identifiers separate:
 - `runId` is the OpenClaw execution identifier captured from `onAgentRunStart` or agent events and persisted under `metadata.openclaw.runId` when available.
 
 Do not assume `runId` equals `SessionKey`, `contextId`, or `taskId`. Some current OpenClaw builds may fall back to a session-derived value when no explicit run id is provided, but the inbound plugin treats that as an implementation detail rather than a contract.
+
+For new durable tasks, the bound peer id now falls back in this order: authenticated `ServerCallContext.user.userName`, then A2A `contextId`, then `taskId`, then `messageId`. Continued tasks keep using the original bound peer id from `binding.json`, even if later inbound messages carry a different `messageId`.
 
 ## Not Yet Implemented
 

@@ -4,7 +4,7 @@ import type {
   RequestContext,
 } from "@a2a-js/sdk/server";
 import {
-  resolveInboundRouteEnvelopeBuilderWithRuntime,
+  createInboundEnvelopeBuilder,
   type ChannelGatewayContext,
   type ChannelLogSink,
   type PluginRuntime,
@@ -14,7 +14,11 @@ import { CHANNEL_ID } from "./constants.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { log } from "./logging.js";
 import { createAgentTextMessage } from "./response-mapping.js";
-import { buildInboundRouteContext } from "./session-routing.js";
+import {
+  buildInboundRouteContext,
+  resolveInboundPeerIdentity,
+} from "./session-routing.js";
+import type { A2ATaskRuntimeStore, StoredTaskBinding } from "./task-store.js";
 import {
   A2ATaskExecutionCoordinator,
   type OpenClawExecutionEvent,
@@ -32,8 +36,29 @@ export interface OpenClawA2AExecutorOptions {
   cfg: OpenClawConfig;
   channelRuntime: ChannelRuntime;
   pluginRuntime: PluginRuntime;
+  taskRuntime: A2ATaskRuntimeStore;
   liveExecutions: A2ALiveExecutionRegistry;
   log?: ChannelLogSink;
+}
+
+function createPinnedEnvelopeBuilder(params: {
+  cfg: OpenClawConfig;
+  binding: StoredTaskBinding;
+  channelRuntime: ChannelRuntime;
+  sessionStore: string | undefined;
+}) {
+  return createInboundEnvelopeBuilder({
+    cfg: params.cfg,
+    route: {
+      agentId: params.binding.agentId,
+      sessionKey: params.binding.sessionKey,
+    },
+    sessionStore: params.sessionStore,
+    resolveStorePath: () => params.binding.storePath,
+    readSessionUpdatedAt: params.channelRuntime.session.readSessionUpdatedAt,
+    resolveEnvelopeFormatOptions: params.channelRuntime.reply.resolveEnvelopeFormatOptions,
+    formatAgentEnvelope: params.channelRuntime.reply.formatAgentEnvelope,
+  });
 }
 
 export class OpenClawA2AExecutor implements AgentExecutor {
@@ -43,52 +68,87 @@ export class OpenClawA2AExecutor implements AgentExecutor {
     requestContext: RequestContext,
     eventBus: ExecutionEventBus,
   ): Promise<void> {
-    const inbound = buildInboundRouteContext(
-      requestContext,
-      this.options.accountId,
-    );
-
-    if (inbound.body.length === 0) {
-      eventBus.publish(
-        createAgentTextMessage({
-          contextId: requestContext.contextId,
-          text: "The inbound A2A request did not contain any text parts.",
-        }),
-      );
-      eventBus.finished();
-      return;
-    }
-
+    const boundPeer = requestContext.task
+      ? undefined
+      : resolveInboundPeerIdentity(requestContext);
+    let binding: StoredTaskBinding | undefined;
     const coordinator = new A2ATaskExecutionCoordinator(
       requestContext,
       eventBus,
       this.options.liveExecutions,
+      undefined,
+      (runId) => this.options.taskRuntime.captureRunId(requestContext.taskId, runId),
     );
     let unsubscribeAgentEvents: (() => boolean) | undefined;
 
     try {
-      const peer = {
-        kind: "direct" as const,
-        id: inbound.peerId,
-      };
-
-      // The external plugin runtime exposes the same inbound-envelope helpers as
-      // built-in channels, but the generic type surface is stricter than the
-      // public ChannelGatewayContext contract.
-      const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime(
-        {
+      if (requestContext.task) {
+        binding = await this.options.taskRuntime.loadBinding(requestContext.taskId);
+      } else if (boundPeer) {
+        const route = this.options.channelRuntime.routing.resolveAgentRoute({
           cfg: this.options.cfg,
           channel: CHANNEL_ID,
           accountId: this.options.accountId,
-          peer,
-          runtime: this.options.channelRuntime as never,
-          sessionStore: this.options.account.sessionStore,
-        },
+          peer: {
+            kind: boundPeer.kind,
+            id: boundPeer.id,
+          },
+        });
+        const createdAt = new Date().toISOString();
+
+        binding = {
+          schemaVersion: 1,
+          agentId: route.agentId,
+          channel: route.channel,
+          accountId: route.accountId,
+          matchedBy: route.matchedBy,
+          sessionKey: route.sessionKey,
+          mainSessionKey: route.mainSessionKey,
+          storePath: this.options.channelRuntime.session.resolveStorePath(
+            this.options.account.sessionStore,
+            {
+              agentId: route.agentId,
+            },
+          ),
+          peer: boundPeer,
+          createdAt,
+          updatedAt: createdAt,
+        };
+        this.options.taskRuntime.primeBinding(requestContext.taskId, binding);
+      }
+
+      if (!binding) {
+        throw new Error(
+          `Task ${requestContext.taskId} cannot continue without a persisted OpenClaw binding.`,
+        );
+      }
+
+      const inbound = buildInboundRouteContext(
+        requestContext,
+        this.options.accountId,
+        binding.peer.id,
       );
 
-      coordinator.setExpectedSessionKey(route.sessionKey);
+      if (inbound.body.length === 0) {
+        eventBus.publish(
+          createAgentTextMessage({
+            contextId: requestContext.contextId,
+            text: "The inbound A2A request did not contain any text parts.",
+          }),
+        );
+        eventBus.finished();
+        return;
+      }
 
-      const { storePath, body } = buildEnvelope({
+      coordinator.setExpectedSessionKey(binding.sessionKey);
+      const buildEnvelope = createPinnedEnvelopeBuilder({
+        cfg: this.options.cfg,
+        binding,
+        channelRuntime: this.options.channelRuntime,
+        sessionStore: this.options.account.sessionStore,
+      });
+
+      const { body } = buildEnvelope({
         channel: "A2A",
         from: inbound.conversationLabel,
         body: inbound.body,
@@ -102,7 +162,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         CommandBody: inbound.body,
         From: inbound.from,
         To: inbound.to,
-        SessionKey: route.sessionKey,
+        SessionKey: binding.sessionKey,
         AccountId: this.options.accountId,
         ChatType: "direct",
         ConversationLabel: inbound.conversationLabel,
@@ -117,11 +177,11 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         OriginatingTo: inbound.to,
         Timestamp: inbound.timestamp,
       });
-      coordinator.setExpectedSessionKey(ctxPayload.SessionKey ?? route.sessionKey);
+      ctxPayload.SessionKey = binding.sessionKey;
 
       await this.options.channelRuntime.session.recordInboundSession({
-        storePath,
-        sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
+        storePath: binding.storePath,
+        sessionKey: binding.sessionKey,
         ctx: ctxPayload,
         onRecordError: (error) => {
           log(this.options.log, "warn", "a2a.inbound.session.record_error", {

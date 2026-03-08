@@ -184,8 +184,22 @@ export class A2AInboundRequestHandler {
 
       this.executeWithFallback(requestContext, eventBus);
 
-      for await (const event of eventQueue.events()) {
-        yield await this.commitExecutionEvent(event, prepared.message);
+      let sawDurableEvent = false;
+
+      try {
+        for await (const event of eventQueue.events()) {
+          const committed = await this.commitExecutionEvent(event, prepared.message);
+
+          if (committed.kind !== "message") {
+            sawDurableEvent = true;
+          }
+
+          yield committed;
+        }
+      } finally {
+        if (!sawDurableEvent) {
+          this.taskRuntime.discardPending(requestContext.taskId);
+        }
       }
     } finally {
       this.liveExecutions.clearRequestMode(requestId);
@@ -372,31 +386,40 @@ export class A2AInboundRequestHandler {
     context?: ServerCallContext;
   }): Promise<Message | Task> {
     let finalMessage: Message | undefined;
+    let sawDurableEvent = false;
 
-    for await (const event of params.eventQueue.events()) {
-      const committed = await this.commitExecutionEvent(
-        event,
-        params.latestUserMessage,
-      );
+    try {
+      for await (const event of params.eventQueue.events()) {
+        const committed = await this.commitExecutionEvent(
+          event,
+          params.latestUserMessage,
+        );
 
-      if (committed.kind === "message") {
-        finalMessage = committed;
+        if (committed.kind === "message") {
+          finalMessage = committed;
+        } else {
+          sawDurableEvent = true;
+        }
+      }
+
+      if (finalMessage) {
+        return finalMessage;
+      }
+
+      const latestTask = await this.taskRuntime.load(params.taskId, params.context);
+
+      if (!latestTask) {
+        throw A2AError.internalError(
+          `Task ${params.taskId} not found after execution.`,
+        );
+      }
+
+      return latestTask;
+    } finally {
+      if (!sawDurableEvent) {
+        this.taskRuntime.discardPending(params.taskId);
       }
     }
-
-    if (finalMessage) {
-      return finalMessage;
-    }
-
-    const latestTask = await this.taskRuntime.load(params.taskId, params.context);
-
-    if (!latestTask) {
-      throw A2AError.internalError(
-        `Task ${params.taskId} not found after execution.`,
-      );
-    }
-
-    return latestTask;
   }
 
   private async processNonBlockingExecution(params: {
@@ -407,6 +430,7 @@ export class A2AInboundRequestHandler {
   }): Promise<Message | Task> {
     return new Promise<Message | Task>((resolve, reject) => {
       let settled = false;
+      let sawDurableEvent = false;
 
       const settle = (result: Message | Task): void => {
         if (settled) {
@@ -418,33 +442,43 @@ export class A2AInboundRequestHandler {
       };
 
       void (async () => {
-        for await (const event of params.eventQueue.events()) {
-          const committed = await this.commitExecutionEvent(
-            event,
-            params.latestUserMessage,
-          );
+        try {
+          for await (const event of params.eventQueue.events()) {
+            const committed = await this.commitExecutionEvent(
+              event,
+              params.latestUserMessage,
+            );
 
-          if (shouldResolveFirstResult(committed)) {
-            settle(committed);
+            if (committed.kind !== "message") {
+              sawDurableEvent = true;
+            }
+
+            if (shouldResolveFirstResult(committed)) {
+              settle(committed);
+            }
+          }
+
+          if (settled) {
+            return;
+          }
+
+          const latestTask = await this.taskRuntime.load(params.taskId, params.context);
+
+          if (latestTask) {
+            settle(latestTask);
+            return;
+          }
+
+          reject(
+            A2AError.internalError(
+              "Execution finished before a message or task result was produced.",
+            ),
+          );
+        } finally {
+          if (!sawDurableEvent) {
+            this.taskRuntime.discardPending(params.taskId);
           }
         }
-
-        if (settled) {
-          return;
-        }
-
-        const latestTask = await this.taskRuntime.load(params.taskId, params.context);
-
-        if (latestTask) {
-          settle(latestTask);
-          return;
-        }
-
-        reject(
-          A2AError.internalError(
-            "Execution finished before a message or task result was produced.",
-          ),
-        );
       })().catch((error) => {
         if (!settled) {
           reject(error);
@@ -520,6 +554,23 @@ export class A2AInboundRequestHandler {
       }
 
       task = loadedTask;
+
+      if (
+        typeof incomingMessage.contextId === "string" &&
+        incomingMessage.contextId !== task.contextId
+      ) {
+        throw A2AError.invalidRequest(
+          `Task ${task.id} is bound to contextId ${task.contextId}, not ${incomingMessage.contextId}.`,
+        );
+      }
+
+      const binding = await this.taskRuntime.loadBinding(incomingMessage.taskId);
+
+      if (!binding) {
+        throw A2AError.unsupportedOperation(
+          `Task ${task.id} was created before durable OpenClaw bindings were recorded and cannot be resumed.`,
+        );
+      }
 
       if (isTerminalTaskState(task.status.state)) {
         throw A2AError.invalidRequest(

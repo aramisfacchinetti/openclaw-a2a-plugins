@@ -38,6 +38,15 @@ import {
 type JsonRecord = Record<string, unknown>;
 type JournalEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
 type TaskRuntimeLeaseState = "active" | "released";
+type StoredTaskBindingMatchedBy =
+  | "binding.peer"
+  | "binding.peer.parent"
+  | "binding.guild+roles"
+  | "binding.guild"
+  | "binding.team"
+  | "binding.account"
+  | "binding.channel"
+  | "default";
 
 export const TASK_HEARTBEAT_INTERVAL_MS = 5_000;
 export const TASK_LEASE_TTL_MS = 20_000;
@@ -58,8 +67,33 @@ export interface StoredTaskRuntime {
   lease?: TaskExecutionLease;
 }
 
+export type StoredTaskBindingPeerSource =
+  | "server-user-name"
+  | "context-id"
+  | "task-id"
+  | "message-id";
+
+export interface StoredTaskBinding {
+  schemaVersion: 1;
+  agentId: string;
+  channel: string;
+  accountId: string;
+  matchedBy: StoredTaskBindingMatchedBy;
+  sessionKey: string;
+  mainSessionKey: string;
+  storePath: string;
+  peer: {
+    kind: string;
+    id: string;
+    source: StoredTaskBindingPeerSource;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TaskEventProvenance {
   runId?: string;
+  sessionKey?: string;
   agentEventSeq?: number;
   agentEventTs?: number;
 }
@@ -99,6 +133,8 @@ interface TaskRuntimeStorage {
   readonly kind: A2AInboundTaskStoreConfig["kind"];
   close(): void;
   listTaskIds(): Promise<string[]>;
+  readBinding(taskId: string): Promise<StoredTaskBinding | undefined>;
+  writeBinding(taskId: string, binding: StoredTaskBinding): Promise<void>;
   readSnapshot(taskId: string): Promise<Task | undefined>;
   writeSnapshot(taskId: string, task: Task): Promise<void>;
   readRuntime(taskId: string): Promise<StoredTaskRuntime | undefined>;
@@ -120,6 +156,10 @@ function cloneTask(task: Task): Task {
 
 function cloneMessage(message: Message): Message {
   return structuredClone(message);
+}
+
+function cloneTaskBinding(binding: StoredTaskBinding): StoredTaskBinding {
+  return structuredClone(binding);
 }
 
 function cloneJournalEvent(event: JournalEvent): JournalEvent {
@@ -198,13 +238,20 @@ function normalizeRuntimeRecord(value: unknown): StoredTaskRuntime {
   };
 }
 
-function readEventProvenance(
+function readEventRunId(
   event: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-): TaskEventProvenance {
+): string | undefined {
+  const openclaw = extractOpenClawMetadata(event.metadata);
+
+  return typeof openclaw.runId === "string" ? openclaw.runId : undefined;
+}
+
+function readEventProvenanceMetadata(
+  event: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+): Pick<TaskEventProvenance, "agentEventSeq" | "agentEventTs"> {
   const openclaw = extractOpenClawMetadata(event.metadata);
 
   return {
-    ...(typeof openclaw.runId === "string" ? { runId: openclaw.runId } : {}),
     ...(typeof openclaw.agentEventSeq === "number" &&
     Number.isInteger(openclaw.agentEventSeq)
       ? { agentEventSeq: openclaw.agentEventSeq }
@@ -258,6 +305,137 @@ function withTaskRunId(task: Task, runId: string | undefined): Task {
     runId,
   });
   return nextTask;
+}
+
+function withRuntimeRunId(
+  runtime: StoredTaskRuntime,
+  runId: string | undefined,
+): StoredTaskRuntime {
+  if (!runId || !runtime.lease) {
+    return runtime;
+  }
+
+  return {
+    currentSequence: runtime.currentSequence,
+    lease: {
+      ...runtime.lease,
+      runId,
+    },
+  };
+}
+
+function normalizeBindingPeerSource(
+  value: unknown,
+): StoredTaskBindingPeerSource | undefined {
+  return value === "server-user-name" ||
+    value === "context-id" ||
+    value === "task-id" ||
+    value === "message-id"
+    ? value
+    : undefined;
+}
+
+function normalizeMatchedBy(
+  value: unknown,
+): StoredTaskBindingMatchedBy | undefined {
+  switch (value) {
+    case "binding.peer":
+    case "binding.peer.parent":
+    case "binding.guild+roles":
+    case "binding.guild":
+    case "binding.team":
+    case "binding.account":
+    case "binding.channel":
+    case "default":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeBindingRecord(value: unknown): StoredTaskBinding | undefined {
+  if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.peer)) {
+    return undefined;
+  }
+
+  const matchedBy = normalizeMatchedBy(value.matchedBy);
+  const peerSource = normalizeBindingPeerSource(value.peer.source);
+  const peerKind =
+    typeof value.peer.kind === "string" && value.peer.kind.trim().length > 0
+      ? value.peer.kind.trim()
+      : undefined;
+  const peerId =
+    typeof value.peer.id === "string" && value.peer.id.trim().length > 0
+      ? value.peer.id.trim()
+      : undefined;
+  const createdAt =
+    typeof value.createdAt === "string" && value.createdAt.trim().length > 0
+      ? value.createdAt
+      : undefined;
+  const updatedAt =
+    typeof value.updatedAt === "string" && value.updatedAt.trim().length > 0
+      ? value.updatedAt
+      : undefined;
+  const agentId =
+    typeof value.agentId === "string" && value.agentId.trim().length > 0
+      ? value.agentId.trim()
+      : undefined;
+  const channel =
+    typeof value.channel === "string" && value.channel.trim().length > 0
+      ? value.channel.trim()
+      : undefined;
+  const accountId =
+    typeof value.accountId === "string" && value.accountId.trim().length > 0
+      ? value.accountId.trim()
+      : undefined;
+  const sessionKey =
+    typeof value.sessionKey === "string" && value.sessionKey.trim().length > 0
+      ? value.sessionKey.trim()
+      : undefined;
+  const mainSessionKey =
+    typeof value.mainSessionKey === "string" &&
+    value.mainSessionKey.trim().length > 0
+      ? value.mainSessionKey.trim()
+      : undefined;
+  const storePath =
+    typeof value.storePath === "string" && value.storePath.trim().length > 0
+      ? value.storePath
+      : undefined;
+
+  if (
+    !matchedBy ||
+    !peerSource ||
+    !peerKind ||
+    !peerId ||
+    !createdAt ||
+    !updatedAt ||
+    !agentId ||
+    !channel ||
+    !accountId ||
+    !sessionKey ||
+    !mainSessionKey ||
+    !storePath
+  ) {
+    return undefined;
+  }
+
+  return {
+    schemaVersion: 1,
+    agentId,
+    channel,
+    accountId,
+    matchedBy,
+    sessionKey,
+    mainSessionKey,
+    storePath,
+    peer: {
+      kind: peerKind,
+      id: peerId,
+      source: peerSource,
+    },
+    createdAt,
+    updatedAt,
+  };
 }
 
 function decorateJournalEvent<T extends JournalEvent>(
@@ -445,6 +623,62 @@ function releaseLease(
   };
 }
 
+function buildJournalProvenance(params: {
+  event: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
+  binding?: StoredTaskBinding;
+  runId?: string;
+}): TaskEventProvenance {
+  const metadata = readEventProvenanceMetadata(params.event);
+
+  return {
+    ...(params.runId ? { runId: params.runId } : {}),
+    ...(params.binding?.sessionKey ? { sessionKey: params.binding.sessionKey } : {}),
+    ...metadata,
+  };
+}
+
+function createInterruptedFailureRecord(params: {
+  task: Task;
+  sequence: number;
+  committedAt: string;
+  runId?: string;
+  sessionKey?: string;
+}): {
+  event: TaskStatusUpdateEvent;
+  snapshot: Task;
+  record: StoredTaskJournalRecord;
+} {
+  const event = decorateJournalEvent(
+    createTaskStatusUpdate({
+      taskId: params.task.id,
+      contextId: params.task.contextId,
+      state: "failed",
+      final: true,
+      messageText: INTERRUPTED_TASK_FAILURE_TEXT,
+      timestamp: params.committedAt,
+    }),
+    params.sequence,
+  );
+  const snapshot = withTaskRunId(
+    withCurrentSequence(mergeStatus(params.task, event), params.sequence),
+    params.runId,
+  );
+
+  return {
+    event,
+    snapshot,
+    record: {
+      sequence: params.sequence,
+      committedAt: params.committedAt,
+      event,
+      provenance: {
+        ...(params.runId ? { runId: params.runId } : {}),
+        ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+      },
+    },
+  };
+}
+
 function ensureHistoryContainsMessage(task: Task, message: Message): Task {
   const nextTask = cloneTask(task);
   const history = nextTask.history ? [...nextTask.history] : [];
@@ -597,6 +831,7 @@ async function writeJsonFileAtomically(
 class MemoryTaskRuntimeStorage implements TaskRuntimeStorage {
   readonly kind = "memory" as const;
 
+  private readonly bindings = new Map<string, StoredTaskBinding>();
   private readonly snapshots = new Map<string, Task>();
   private readonly runtimes = new Map<string, StoredTaskRuntime>();
   private readonly journals = new Map<string, StoredTaskJournalRecord[]>();
@@ -605,6 +840,15 @@ class MemoryTaskRuntimeStorage implements TaskRuntimeStorage {
 
   async listTaskIds(): Promise<string[]> {
     return [...this.snapshots.keys()];
+  }
+
+  async readBinding(taskId: string): Promise<StoredTaskBinding | undefined> {
+    const binding = this.bindings.get(taskId);
+    return binding ? cloneTaskBinding(binding) : undefined;
+  }
+
+  async writeBinding(taskId: string, binding: StoredTaskBinding): Promise<void> {
+    this.bindings.set(taskId, cloneTaskBinding(binding));
   }
 
   async readSnapshot(taskId: string): Promise<Task | undefined> {
@@ -715,6 +959,15 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
 
       throw error;
     }
+  }
+
+  async readBinding(taskId: string): Promise<StoredTaskBinding | undefined> {
+    const binding = await maybeReadJsonFile<StoredTaskBinding>(this.bindingPath(taskId));
+    return binding ? normalizeBindingRecord(binding) : undefined;
+  }
+
+  async writeBinding(taskId: string, binding: StoredTaskBinding): Promise<void> {
+    await writeJsonFileAtomically(this.bindingPath(taskId), binding);
   }
 
   async readSnapshot(taskId: string): Promise<Task | undefined> {
@@ -860,27 +1113,24 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
         const runtime = normalizeRuntimeRecord(
           maybeReadJsonFileSync<StoredTaskRuntime>(this.runtimePath(taskId)),
         );
+        const binding = normalizeBindingRecord(
+          maybeReadJsonFileSync<StoredTaskBinding>(this.bindingPath(taskId)),
+        );
 
         if (!hasExpiredOrMissingLease(runtime, nowMs)) {
           continue;
         }
 
         const nextSequence = materialized.currentSequence + 1;
-        const failureEvent = decorateJournalEvent(
-          createTaskStatusUpdate({
-            taskId: materialized.task.id,
-            contextId: materialized.task.contextId,
-            state: "failed",
-            final: true,
-            messageText: INTERRUPTED_TASK_FAILURE_TEXT,
-            timestamp: nowIso,
-          }),
-          nextSequence,
-        );
-        const nextSnapshot = withCurrentSequence(
-          mergeStatus(materialized.task, failureEvent),
-          nextSequence,
-        );
+        const runId =
+          runtime.lease?.runId ?? readEventRunId(materialized.task);
+        const failure = createInterruptedFailureRecord({
+          task: materialized.task,
+          sequence: nextSequence,
+          committedAt: nowIso,
+          runId,
+          sessionKey: binding?.sessionKey,
+        });
         const nextRuntime = releaseLease(
           {
             currentSequence: nextSequence,
@@ -889,18 +1139,12 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           {
             nowIso,
             ownerId: runtime.lease?.ownerId,
-            runId: runtime.lease?.runId,
+            runId,
           },
         );
-        const journalRecord: StoredTaskJournalRecord = {
-          sequence: nextSequence,
-          committedAt: nowIso,
-          event: failureEvent,
-          provenance: {},
-        };
 
-        this.writeJournalRecordSync(taskId, journalRecord);
-        writeJsonFileAtomicallySync(this.snapshotPath(taskId), nextSnapshot);
+        this.writeJournalRecordSync(taskId, failure.record);
+        writeJsonFileAtomicallySync(this.snapshotPath(taskId), failure.snapshot);
         writeJsonFileAtomicallySync(this.runtimePath(taskId), nextRuntime);
       } catch (error) {
         console.warn("Failed to reconcile orphaned task during startup sweep.", error);
@@ -944,6 +1188,9 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
         ...(typeof record.provenance?.runId === "string"
           ? { runId: record.provenance.runId }
           : {}),
+        ...(typeof record.provenance?.sessionKey === "string"
+          ? { sessionKey: record.provenance.sessionKey }
+          : {}),
         ...(typeof record.provenance?.agentEventSeq === "number" &&
         Number.isInteger(record.provenance.agentEventSeq)
           ? { agentEventSeq: record.provenance.agentEventSeq }
@@ -985,6 +1232,10 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
 
   private taskDirectory(taskId: string): string {
     return join(this.taskRootPath, encodeTaskId(taskId));
+  }
+
+  private bindingPath(taskId: string): string {
+    return join(this.taskDirectory(taskId), "binding.json");
   }
 
   private snapshotPath(taskId: string): string {
@@ -1067,6 +1318,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
   private readonly taskQueues = new Map<string, Promise<void>>();
   private readonly subscribers = new Map<string, Set<TaskRuntimeSubscriber>>();
   private readonly heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly pendingBindings = new Map<string, StoredTaskBinding>();
+  private readonly pendingRunIds = new Map<string, string>();
 
   constructor(config: A2AInboundTaskStoreConfig) {
     if (config.kind === "json-file") {
@@ -1092,6 +1345,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
     this.heartbeatTimers.clear();
     this.subscribers.clear();
+    this.pendingBindings.clear();
+    this.pendingRunIds.clear();
     this.storage.close();
   }
 
@@ -1101,22 +1356,80 @@ export class A2ATaskRuntimeStore implements TaskStore {
     });
   }
 
+  async readBinding(taskId: string): Promise<StoredTaskBinding | undefined> {
+    return this.enqueueByTask(taskId, async () => {
+      return await this.storage.readBinding(taskId);
+    });
+  }
+
+  async writeBinding(taskId: string, binding: StoredTaskBinding): Promise<void> {
+    await this.enqueueByTask(taskId, async () => {
+      await this.storage.writeBinding(taskId, binding);
+      this.pendingBindings.delete(taskId);
+    });
+  }
+
+  async loadBinding(taskId: string): Promise<StoredTaskBinding | undefined> {
+    return this.enqueueByTask(taskId, async () => {
+      const pending = this.pendingBindings.get(taskId);
+
+      if (pending) {
+        return cloneTaskBinding(pending);
+      }
+
+      return await this.storage.readBinding(taskId);
+    });
+  }
+
+  primeBinding(taskId: string, binding: StoredTaskBinding): void {
+    this.pendingBindings.set(taskId, cloneTaskBinding(binding));
+  }
+
+  captureRunId(taskId: string, runId: string | undefined): void {
+    if (!runId || runId.trim().length === 0) {
+      return;
+    }
+
+    this.pendingRunIds.set(taskId, runId.trim());
+  }
+
+  discardPending(taskId: string): void {
+    this.pendingBindings.delete(taskId);
+    this.pendingRunIds.delete(taskId);
+  }
+
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
     await this.enqueueByTask(task.id, async () => {
       const materialized = await this.readMaterializedTask(task.id);
       const runtime =
         materialized?.runtime ??
         normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
+      const pendingBinding = await this.flushPendingBinding(task.id);
       const currentSequence = Math.max(
         materialized?.currentSequence ?? 0,
         readTaskCurrentSequence(task),
       );
-      const nextTask = withCurrentSequence(task, currentSequence);
+      const runId = this.resolveCurrentRunId(task.id, task, runtime);
+      const nextTask = withTaskRunId(
+        withCurrentSequence(task, currentSequence),
+        runId,
+      );
+      const nextRuntime = withRuntimeRunId(
+        {
+          ...runtime,
+          currentSequence,
+        },
+        runId,
+      );
+
+      if (pendingBinding) {
+        await this.storage.writeBinding(task.id, pendingBinding);
+        this.pendingBindings.delete(task.id);
+      }
+
       await this.storage.writeSnapshot(task.id, nextTask);
-      await this.storage.writeRuntime(task.id, {
-        ...runtime,
-        currentSequence,
-      });
+      await this.storage.writeRuntime(task.id, nextRuntime);
+      this.consumePendingRunId(task.id, runId);
     });
   }
 
@@ -1179,21 +1492,16 @@ export class A2ATaskRuntimeStore implements TaskStore {
       }
 
       const nextSequence = materialized.currentSequence + 1;
-      const journalEvent = decorateJournalEvent(
-        createTaskStatusUpdate({
-          taskId: materialized.task.id,
-          contextId: materialized.task.contextId,
-          state: "failed",
-          final: true,
-          messageText: INTERRUPTED_TASK_FAILURE_TEXT,
-          timestamp: nowIso,
-        }),
-        nextSequence,
-      );
-      const nextSnapshot = withCurrentSequence(
-        mergeStatus(materialized.task, journalEvent),
-        nextSequence,
-      );
+      const binding = await this.storage.readBinding(taskId);
+      const runId =
+        materialized.runtime.lease?.runId ?? readEventRunId(materialized.task);
+      const failure = createInterruptedFailureRecord({
+        task: materialized.task,
+        sequence: nextSequence,
+        committedAt: nowIso,
+        runId,
+        sessionKey: binding?.sessionKey,
+      });
       const nextRuntime = releaseLease(
         {
           currentSequence: nextSequence,
@@ -1202,22 +1510,16 @@ export class A2ATaskRuntimeStore implements TaskStore {
         {
           nowIso,
           ownerId: materialized.runtime.lease?.ownerId,
-          runId: materialized.runtime.lease?.runId,
+          runId,
         },
       );
-      const record: StoredTaskJournalRecord = {
-        sequence: nextSequence,
-        committedAt: nowIso,
-        event: journalEvent,
-        provenance: {},
-      };
 
-      await this.storage.appendEvent(taskId, record);
-      await this.storage.writeSnapshot(taskId, nextSnapshot);
+      await this.storage.appendEvent(taskId, failure.record);
+      await this.storage.writeSnapshot(taskId, failure.snapshot);
       await this.storage.writeRuntime(taskId, nextRuntime);
       this.stopHeartbeat(taskId);
-      this.notifySubscribers(taskId, record);
-      return nextSnapshot;
+      this.notifySubscribers(taskId, failure.record);
+      return failure.snapshot;
     });
   }
 
@@ -1307,11 +1609,18 @@ export class A2ATaskRuntimeStore implements TaskStore {
       const currentRuntime =
         materialized?.runtime ??
         normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
+      const pendingBinding = await this.flushPendingBinding(task.id);
+      const binding = pendingBinding ?? (await this.storage.readBinding(task.id));
       const currentSequence = Math.max(
         materialized?.currentSequence ?? 0,
         readTaskCurrentSequence(task),
       );
-      const runId = readEventProvenance(task).runId ?? currentRuntime.lease?.runId;
+      const runId = this.resolveCurrentRunId(
+        task.id,
+        materialized?.task ?? task,
+        currentRuntime,
+        task,
+      );
       const nowIso = new Date().toISOString();
       let nextTask = cloneTask(task);
 
@@ -1321,6 +1630,11 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
       nextTask = withCurrentSequence(nextTask, currentSequence);
       nextTask = withTaskRunId(nextTask, runId);
+
+      if (pendingBinding) {
+        await this.storage.writeBinding(task.id, pendingBinding);
+        this.pendingBindings.delete(task.id);
+      }
 
       await this.storage.writeSnapshot(task.id, nextTask);
       const nextRuntime =
@@ -1345,6 +1659,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         task.id,
         nextRuntime,
       );
+      this.consumePendingRunId(task.id, runId);
       this.syncHeartbeat(task.id, nextTask.status.state);
       return nextTask;
     });
@@ -1359,6 +1674,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
       }
 
       const currentRuntime = materialized.runtime;
+      const pendingBinding = await this.flushPendingBinding(event.taskId);
+      const binding = pendingBinding ?? (await this.storage.readBinding(event.taskId));
       const nextSequence = materialized.currentSequence + 1;
       const committedAt = new Date().toISOString();
       const decoratedEvent = decorateJournalEvent(event, nextSequence);
@@ -1372,15 +1689,25 @@ export class A2ATaskRuntimeStore implements TaskStore {
               mergeArtifact(materialized.task, decoratedEvent),
               nextSequence,
             );
-      const provenance = readEventProvenance(event);
-      const snapshotRunId = provenance.runId ?? currentRuntime.lease?.runId;
+      const currentRunId = this.resolveCurrentRunId(
+        event.taskId,
+        materialized.task,
+        currentRuntime,
+        event,
+      );
+      const provenance = buildJournalProvenance({
+        event,
+        binding,
+        runId: currentRunId,
+      });
+      const snapshotRunId = currentRunId;
       const nextRuntime =
         classifyTaskState(nextSnapshot.status.state) === "active"
           ? createLease(nextSequence, {
               ownerId: this.instanceId,
               nowIso: committedAt,
-              ...(provenance.runId ?? currentRuntime.lease?.runId
-                ? { runId: provenance.runId ?? currentRuntime.lease?.runId }
+              ...(currentRunId
+                ? { runId: currentRunId }
                 : {}),
             })
           : releaseLease(
@@ -1391,7 +1718,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
               {
                 nowIso: committedAt,
                 ownerId: this.instanceId,
-                runId: provenance.runId ?? currentRuntime.lease?.runId,
+                runId: currentRunId,
               },
             );
       const record: StoredTaskJournalRecord = {
@@ -1401,6 +1728,11 @@ export class A2ATaskRuntimeStore implements TaskStore {
         provenance,
       };
 
+      if (pendingBinding) {
+        await this.storage.writeBinding(event.taskId, pendingBinding);
+        this.pendingBindings.delete(event.taskId);
+      }
+
       await this.storage.appendEvent(event.taskId, record);
       await this.storage.writeSnapshot(
         event.taskId,
@@ -1408,10 +1740,47 @@ export class A2ATaskRuntimeStore implements TaskStore {
       );
       await this.storage.writeRuntime(event.taskId, nextRuntime);
 
+      this.consumePendingRunId(event.taskId, currentRunId);
       this.syncHeartbeat(event.taskId, nextSnapshot.status.state);
       this.notifySubscribers(event.taskId, record);
       return decoratedEvent;
     });
+  }
+
+  private async flushPendingBinding(
+    taskId: string,
+  ): Promise<StoredTaskBinding | undefined> {
+    const binding = this.pendingBindings.get(taskId);
+
+    if (!binding) {
+      return undefined;
+    }
+
+    return cloneTaskBinding(binding);
+  }
+
+  private consumePendingRunId(taskId: string, appliedRunId: string | undefined): void {
+    const pendingRunId = this.pendingRunIds.get(taskId);
+
+    if (!pendingRunId) {
+      return;
+    }
+
+    if (!appliedRunId || appliedRunId === pendingRunId) {
+      this.pendingRunIds.delete(taskId);
+    }
+  }
+
+  private resolveCurrentRunId(
+    taskId: string,
+    task: Task | undefined,
+    runtime: StoredTaskRuntime | undefined,
+    event?: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+  ): string | undefined {
+    return this.pendingRunIds.get(taskId) ??
+      runtime?.lease?.runId ??
+      (task ? readEventRunId(task) : undefined) ??
+      (event ? readEventRunId(event) : undefined);
   }
 
   private async readMaterializedTask(
