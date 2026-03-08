@@ -2,10 +2,12 @@
 
 [![license](https://img.shields.io/github/license/aramisfacchinetti/openclaw-a2a-plugins)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/blob/master/LICENSE)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.2-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins)
+[![outbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-outbound?label=outbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
+[![inbound npm](https://img.shields.io/badge/inbound%20npm-not%20published%20yet-lightgrey)](./packages/openclaw-a2a-inbound)
 
 `openclaw-a2a-plugins` is a monorepo for OpenClaw Agent-to-Agent (A2A) plugins.
 
-Today, the repository includes two public packages:
+Today, the repository includes one published package and one package that is not published yet:
 
 - [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound): delegate requests from OpenClaw to external A2A agents through the `remote_agent` tool.
 - [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound): expose an OpenClaw agent as an inbound A2A endpoint through the `a2a` channel.
@@ -26,8 +28,9 @@ Choose the package that matches the traffic direction you need:
 
 ```bash
 openclaw plugins install @aramisfa/openclaw-a2a-outbound
-openclaw plugins install @aramisfa/openclaw-a2a-inbound
 ```
+
+`@aramisfa/openclaw-a2a-inbound` is implemented in this repository and will be published to npm in the future.
 
 Optional guided setup helper:
 
@@ -115,7 +118,7 @@ Use the package READMEs for full configuration details and examples:
 | Package | Status | Notes |
 | --- | --- | --- |
 | [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
-| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Available now | Inbound OpenClaw channel plugin exposing an `a2a` endpoint with direct, non-blocking, streaming, and durable task flows. Push notifications and OpenClaw-initiated outbound delivery are not implemented yet. |
+| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Not published yet | Inbound OpenClaw channel plugin exposing an `a2a` endpoint with direct, non-blocking, streaming, and durable task flows. Push notifications and OpenClaw-initiated outbound delivery are not implemented yet. |
 
 ## Current Capabilities
 
