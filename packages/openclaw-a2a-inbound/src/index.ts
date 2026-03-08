@@ -19,7 +19,7 @@ function registerPlugin(api: OpenClawPluginApi): void {
   A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA.parse?.(api.pluginConfig ?? {});
 
   const channelConfig = parseA2AInboundChannelConfig(api.config);
-  const host = new A2AInboundPluginHost();
+  const host = new A2AInboundPluginHost(api.runtime);
   const channel = buildA2AInboundChannel(host);
 
   api.registerChannel({ plugin: channel });

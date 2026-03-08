@@ -8,10 +8,16 @@ import {
   restHandler,
 } from "@a2a-js/sdk/server/express";
 import express, { type RequestHandler } from "express";
-import type { ChannelGatewayContext, ChannelLogSink } from "openclaw/plugin-sdk";
+import type {
+  ChannelGatewayContext,
+  ChannelLogSink,
+  PluginRuntime,
+} from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID, PLUGIN_VERSION } from "./constants.js";
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
+import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
+import { A2AInboundRequestHandler } from "./request-handler.js";
 import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
@@ -22,11 +28,12 @@ export interface A2AInboundServerOptions {
   account: A2AInboundAccountConfig;
   cfg: OpenClawConfig;
   channelRuntime: ChannelRuntime;
+  pluginRuntime: PluginRuntime;
   log?: ChannelLogSink;
 }
 
 export interface A2AInboundServer {
-  requestHandler: DefaultRequestHandler;
+  requestHandler: A2AInboundRequestHandler;
   handle: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 }
 
@@ -73,6 +80,7 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     })),
     capabilities: {
       pushNotifications: account.capabilities.pushNotifications,
+      streaming: account.capabilities.streaming,
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
@@ -124,16 +132,30 @@ function createExpressDispatcher(
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
-  const requestHandler = new DefaultRequestHandler(
+  const taskStore = createTaskStore(options.account.taskStore);
+  const liveExecutions = new A2ALiveExecutionRegistry();
+  const agentExecutor = createOpenClawA2AExecutor({
+    accountId: options.accountId,
+    account: options.account,
+    cfg: options.cfg,
+    channelRuntime: options.channelRuntime,
+    pluginRuntime: options.pluginRuntime,
+    log: options.log,
+    liveExecutions,
+  });
+  const defaultRequestHandler = new DefaultRequestHandler(
     buildAgentCard(options.account),
-    createTaskStore(options.account.taskStore),
-    createOpenClawA2AExecutor({
-      accountId: options.accountId,
-      account: options.account,
-      cfg: options.cfg,
-      runtime: options.channelRuntime,
-      log: options.log,
-    }),
+    taskStore,
+    agentExecutor,
+    liveExecutions.eventBusManager,
+  );
+  const requestHandler = new A2AInboundRequestHandler(
+    defaultRequestHandler,
+    taskStore,
+    liveExecutions,
+    options.account.capabilities.streaming,
+    liveExecutions.eventBusManager,
+    agentExecutor,
   );
 
   const app = express();

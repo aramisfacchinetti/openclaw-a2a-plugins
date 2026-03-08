@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
   ChannelGatewayContext,
   ChannelLogSink,
+  PluginRuntime,
 } from "openclaw/plugin-sdk";
 import {
   explainA2AInboundAccountUnconfigured,
@@ -107,6 +108,8 @@ function authorizeRequest(
 export class A2AInboundPluginHost {
   private readonly activeAccounts = new Map<string, ActiveAccountState>();
 
+  constructor(private readonly pluginRuntime: PluginRuntime) {}
+
   async startAccount(
     ctx: ChannelGatewayContext<A2AInboundAccountConfig>,
   ): Promise<void> {
@@ -136,6 +139,7 @@ export class A2AInboundPluginHost {
       account,
       cfg,
       channelRuntime: ctx.channelRuntime,
+      pluginRuntime: this.pluginRuntime,
       log: ctx.log,
     });
 
