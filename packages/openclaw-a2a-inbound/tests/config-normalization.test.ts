@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_INPUT_MODES,
   explainA2AInboundAccountUnconfigured,
   isA2AInboundAccountConfigured,
   parseA2AInboundChannelConfig,
@@ -40,6 +41,7 @@ test("parser normalizes paths, defaults, and account labels", () => {
   assert.equal(account.restPath, "/rest");
   assert.equal(account.auth.mode, "header-token");
   assert.equal(account.auth.headerName, "authorization");
+  assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.equal(isA2AInboundAccountConfigured(account), true);
 });
 

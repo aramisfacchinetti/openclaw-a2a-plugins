@@ -123,17 +123,20 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         );
       }
 
-      const inbound = buildInboundRouteContext(
+      const inbound = await buildInboundRouteContext({
         requestContext,
-        this.options.accountId,
-        binding.peer.id,
-      );
+        accountId: this.options.accountId,
+        peerId: binding.peer.id,
+        loadWebMedia: this.options.pluginRuntime.media.loadWebMedia,
+        saveMediaBuffer: this.options.channelRuntime.media.saveMediaBuffer,
+        maxMediaBytes: this.options.account.maxBodyBytes,
+      });
 
-      if (inbound.body.length === 0) {
+      if (!inbound.hasUsableParts) {
         eventBus.publish(
           createAgentTextMessage({
             contextId: requestContext.contextId,
-            text: "The inbound A2A request did not contain any text parts.",
+            text: "The inbound A2A request did not contain any supported text, data, or file parts.",
           }),
         );
         eventBus.finished();
@@ -151,15 +154,23 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       const { body } = buildEnvelope({
         channel: "A2A",
         from: inbound.conversationLabel,
-        body: inbound.body,
+        body: inbound.bodyForAgent,
         timestamp: inbound.timestamp,
       });
 
       const ctxPayload = this.options.channelRuntime.reply.finalizeInboundContext({
         Body: body,
-        BodyForAgent: inbound.body,
-        RawBody: inbound.body,
-        CommandBody: inbound.body,
+        BodyForAgent: inbound.bodyForAgent,
+        RawBody: inbound.rawBody,
+        CommandBody: inbound.commandBody,
+        BodyForCommands: inbound.bodyForCommands,
+        UntrustedContext: inbound.untrustedContext,
+        MediaPath: inbound.mediaPath,
+        MediaPaths: inbound.mediaPaths,
+        MediaUrl: inbound.mediaUrl,
+        MediaUrls: inbound.mediaUrls,
+        MediaType: inbound.mediaType,
+        MediaTypes: inbound.mediaTypes,
         From: inbound.from,
         To: inbound.to,
         SessionKey: binding.sessionKey,

@@ -1,8 +1,20 @@
 # @aramisfa/openclaw-a2a-inbound
 
-Inbound A2A channel plugin scaffold for OpenClaw agents.
+Native OpenClaw inbound A2A channel plugin.
 
-This package is a concrete implementation skeleton for accepting inbound A2A traffic on the official `@a2a-js/sdk` transport surface while routing requests into OpenClaw through the channel runtime. It is intentionally scoped as an exploratory foundation, not a finished production channel.
+This package accepts inbound A2A traffic on the official `@a2a-js/sdk` transport surface and routes requests into OpenClaw through the channel runtime.
+
+## Installation
+
+```bash
+openclaw plugins install @aramisfa/openclaw-a2a-inbound
+```
+
+Pin the exact published version if you want reproducible installs:
+
+```bash
+openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
+```
 
 ## Current Scope
 
@@ -13,9 +25,10 @@ This package is a concrete implementation skeleton for accepting inbound A2A tra
   - JSON-RPC
   - REST
 - Builds A2A transport handlers on the official SDK types
-- Bridges direct text requests into the OpenClaw reply pipeline
+- Bridges inbound A2A requests with text, structured data, and files into the OpenClaw reply pipeline
 - Exposes a diagnostic gateway RPC method: `openclaw-a2a-inbound.describe`
 - Includes a repo-local durable task runtime for snapshot persistence, ordered event replay, and orphan recovery
+- Advertises `defaultInputModes = ["text/plain", "application/json", "application/octet-stream"]` by default
 
 ## Response Behavior
 
@@ -23,7 +36,7 @@ The inbound executor uses request mode to decide whether the initial A2A respons
 
 | A2A call | Initial response | Incremental progress | Terminal completion |
 | --- | --- | --- | --- |
-| `sendMessage(...)` with default blocking behavior | Direct `Message` for simple text-only runs; promoted `Task` when task-only features are needed | None on the direct-message path | Direct `Message` or terminal `Task` |
+| `sendMessage(...)` with default blocking behavior | Direct `Message` for simple terminal runs; promoted `Task` when task-only features are needed | None on the direct-message path | Direct `Message` or terminal `Task` |
 | `sendMessage({ blocking: false })` | Always `Task` with initial `submitted` state | `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` updates during execution | Persisted terminal `Task` |
 | `sendMessageStream(...)` | Always `Task` as the first streamed event | `submitted` / `working` status updates plus incremental `assistant-output`, tool-progress, and tool-result artifact updates | Final status update with a completed, failed, or canceled task |
 
@@ -75,7 +88,7 @@ Do not assume `runId` equals `SessionKey`, `contextId`, or `taskId`. Some curren
 
 For new durable tasks, the bound peer id now falls back in this order: authenticated `ServerCallContext.user.userName`, then A2A `contextId`, then `taskId`, then `messageId`. Continued tasks keep using the original bound peer id from `binding.json`, even if later inbound messages carry a different `messageId`.
 
-## Not Yet Implemented
+## Current Limitations
 
 - push notifications
 - outbound delivery back to remote A2A peers initiated by OpenClaw

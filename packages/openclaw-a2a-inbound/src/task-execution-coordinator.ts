@@ -4,6 +4,7 @@ import type {
   A2AInitialResponseMode,
   A2ALiveExecutionRegistry,
 } from "./live-execution-registry.js";
+import { readOriginalUserMessage } from "./request-context.js";
 import {
   createAgentTextMessage,
   createReplyArtifactUpdate,
@@ -704,7 +705,7 @@ export class A2ATaskExecutionCoordinator {
       return existingHistory;
     }
 
-    return [structuredClone(this.requestContext.userMessage)];
+    return [readOriginalUserMessage(this.requestContext)];
   }
 
   private buildTaskMetadata(): JsonRecord | undefined {

@@ -13,6 +13,12 @@ import {
 
 type JsonRecord = Record<string, unknown>;
 
+export const DEFAULT_INPUT_MODES = [
+  "text/plain",
+  "application/json",
+  "application/octet-stream",
+] as const;
+
 export interface A2AInboundSkillConfig {
   id: string;
   name: string;
@@ -67,7 +73,7 @@ const DEFAULT_SKILLS: readonly A2AInboundSkillConfig[] = [
     id: "chat",
     name: "Chat",
     description:
-      "Routes inbound A2A text requests into the configured OpenClaw agent.",
+      "Routes inbound A2A requests with text, structured data, and files into the configured OpenClaw agent.",
     tags: ["chat", "openclaw"],
     examples: [
       "Summarize the latest incident and propose the next two steps.",
@@ -132,7 +138,7 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
           defaultInputModes: {
             type: "array",
             items: { type: "string" },
-            default: ["text"],
+            default: [...DEFAULT_INPUT_MODES],
           },
           defaultOutputModes: {
             type: "array",
@@ -455,7 +461,7 @@ function parseAccount(
     jsonRpcPath: normalizePath(record.jsonRpcPath, DEFAULT_JSON_RPC_PATH),
     restPath: normalizePath(record.restPath, DEFAULT_REST_PATH),
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
-    defaultInputModes: readStringArray(record.defaultInputModes, ["text"]),
+    defaultInputModes: readStringArray(record.defaultInputModes, DEFAULT_INPUT_MODES),
     defaultOutputModes: readStringArray(record.defaultOutputModes, ["text"]),
     skills: parseSkills(record.skills),
     capabilities: {

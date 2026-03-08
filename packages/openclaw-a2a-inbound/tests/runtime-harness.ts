@@ -31,6 +31,8 @@ type RuntimeHarnessOptions = {
   defaultEventSessionKey?: string;
   resolveAgentRoute?: () => ResolvedAgentRoute;
   resolveStorePath?: () => string;
+  loadWebMedia?: PluginRuntime["media"]["loadWebMedia"];
+  saveMediaBuffer?: PluginRuntime["channel"]["media"]["saveMediaBuffer"];
   recordInboundSession?: (
     params: Parameters<PluginRuntime["channel"]["session"]["recordInboundSession"]>[0],
   ) => Promise<void>;
@@ -56,6 +58,7 @@ export function createPluginRuntimeHarness(
 } {
   const listeners = new Set<(event: Record<string, unknown>) => void>();
   let seq = 0;
+  let savedMediaSeq = 0;
   const defaultRoute =
     options.resolveAgentRoute?.() ?? {
       agentId: "main",
@@ -104,7 +107,11 @@ export function createPluginRuntimeHarness(
       formatNativeDependencyHint: () => "",
     },
     media: {
-      loadWebMedia: async () => undefined,
+      loadWebMedia:
+        options.loadWebMedia ??
+        (async () => {
+          throw new Error("unused");
+        }),
       detectMime: () => undefined,
       mediaKindFromMime: () => undefined,
       isVoiceCompatibleAudio: () => false,
@@ -171,7 +178,19 @@ export function createPluginRuntimeHarness(
         resolveAgentRoute: () => defaultRoute,
       },
       pairing: {} as PluginRuntime["channel"]["pairing"],
-      media: {} as PluginRuntime["channel"]["media"],
+      media: {
+        fetchRemoteMedia: async () => {
+          throw new Error("unused");
+        },
+        saveMediaBuffer:
+          options.saveMediaBuffer ??
+          (async (buffer, contentType, _subdir, _maxBytes, originalFilename) => ({
+            id: `saved-${++savedMediaSeq}`,
+            path: `/tmp/${originalFilename ?? `media-${savedMediaSeq}.bin`}`,
+            size: buffer.byteLength,
+            contentType,
+          })),
+      },
       activity: {} as PluginRuntime["channel"]["activity"],
       session: {
         resolveStorePath:
@@ -238,7 +257,11 @@ export function createTestAccount(
     jsonRpcPath: "/a2a/jsonrpc",
     restPath: "/a2a/rest",
     maxBodyBytes: 1024 * 1024,
-    defaultInputModes: ["text"],
+    defaultInputModes: [
+      "text/plain",
+      "application/json",
+      "application/octet-stream",
+    ],
     defaultOutputModes: ["text"],
     skills: [
       {
