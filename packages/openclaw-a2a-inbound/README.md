@@ -57,6 +57,16 @@ The inbound runtime uses `openclaw` metadata extensions for durable replay curso
 - Stream event metadata: `metadata.openclaw.sequence`
 - Replay marker on replayed events: `metadata.openclaw.replayed = true`
 
+## Identifier Mapping
+
+The inbound runtime keeps A2A and OpenClaw identifiers separate:
+
+- `taskId` and `contextId` come from the A2A request/task surface.
+- `SessionKey` is the OpenClaw routing/session key used for inbound conversation state.
+- `runId` is the OpenClaw execution identifier captured from `onAgentRunStart` or agent events and persisted under `metadata.openclaw.runId` when available.
+
+Do not assume `runId` equals `SessionKey`, `contextId`, or `taskId`. Some current OpenClaw builds may fall back to a session-derived value when no explicit run id is provided, but the inbound plugin treats that as an implementation detail rather than a contract.
+
 ## Not Yet Implemented
 
 - push notifications
