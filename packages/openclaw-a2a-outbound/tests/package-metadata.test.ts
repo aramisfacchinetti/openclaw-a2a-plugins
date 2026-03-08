@@ -38,4 +38,5 @@ test('package name leaf stays aligned with the plugin id', () => {
 
   assert.equal(packageIdHint, manifest.id)
   assert.equal(packageIdHint, PLUGIN_ID)
+  assert.equal(packageJson.version, manifest.version)
 })

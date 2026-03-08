@@ -7,7 +7,13 @@ This package registers exactly one optional OpenClaw tool, `remote_agent`. The t
 ## Installation
 
 ```bash
-npm install @aramisfa/openclaw-a2a-outbound
+openclaw plugins install @aramisfa/openclaw-a2a-outbound
+```
+
+Pin the exact published version if you want reproducible installs:
+
+```bash
+openclaw plugins install @aramisfa/openclaw-a2a-outbound --pin
 ```
 
 ## Requirements
@@ -17,7 +23,7 @@ npm install @aramisfa/openclaw-a2a-outbound
 
 ## OpenClaw Plugin Config
 
-`@aramisfa/openclaw-a2a-outbound` is disabled by default. Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config:
+The plugin installs through the OpenClaw CLI, but the tool stays disabled until you set `"enabled": true` for plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config:
 
 ```json
 {
