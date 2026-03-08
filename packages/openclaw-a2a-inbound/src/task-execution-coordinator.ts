@@ -13,11 +13,11 @@ import {
   hasReplyPayloadExtras,
   normalizeReplyPayload,
   summarizeBufferedReplies,
+  type JsonRecord,
   type NormalizedReplyPayload,
   type ToolProgressPhase,
 } from "./response-mapping.js";
 
-type JsonRecord = Record<string, unknown>;
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
 
@@ -25,6 +25,8 @@ export interface OpenClawExecutionEvent {
   runId: string;
   stream: string;
   data: Record<string, unknown>;
+  seq?: number;
+  ts?: number;
 }
 
 type AssistantStage = {
@@ -38,6 +40,7 @@ type AssistantStage = {
   finalCount: number;
   publishedText?: string;
   publishedExtrasKey?: string;
+  eventMetadata?: JsonRecord;
 };
 
 type ToolStage = {
@@ -144,6 +147,7 @@ export class A2ATaskExecutionCoordinator {
   private lifecycleError?: string;
   private assistantFlushQueued = false;
   private assistantFlushScheduled = false;
+  private currentAgentEventMetadata?: JsonRecord;
 
   constructor(
     private readonly requestContext: RequestContext,
@@ -197,18 +201,24 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    if (event.stream === "lifecycle") {
-      this.handleLifecycleEvent(event.data);
-      return;
-    }
+    this.currentAgentEventMetadata = this.buildAgentEventMetadata(event);
 
-    if (event.stream === "assistant") {
-      this.handleAssistantEvent(event.data);
-      return;
-    }
+    try {
+      if (event.stream === "lifecycle") {
+        this.handleLifecycleEvent(event.data);
+        return;
+      }
 
-    if (event.stream === "tool") {
-      this.handleToolEvent(event.data);
+      if (event.stream === "assistant") {
+        this.handleAssistantEvent(event.data);
+        return;
+      }
+
+      if (event.stream === "tool") {
+        this.handleToolEvent(event.data);
+      }
+    } finally {
+      this.currentAgentEventMetadata = undefined;
     }
   }
 
@@ -250,6 +260,7 @@ export class A2ATaskExecutionCoordinator {
     );
     assistantStage.channelData = normalized.channelData ?? assistantStage.channelData;
     assistantStage.isError = assistantStage.isError || normalized.isError;
+    assistantStage.eventMetadata = this.buildBaseEventMetadata();
 
     if (!this.promoted) {
       if (assistantStage.finalCount > 1) {
@@ -451,6 +462,8 @@ export class A2ATaskExecutionCoordinator {
     }
 
     assistantStage.mediaUrls = mergeMediaUrls(assistantStage.mediaUrls, mediaUrls);
+    assistantStage.eventMetadata =
+      this.currentAgentEventMetadata ?? assistantStage.eventMetadata;
 
     if (!this.promoted && mediaUrls.length > 0) {
       this.promoteToTask("assistant media output requires task artifacts");
@@ -489,6 +502,7 @@ export class A2ATaskExecutionCoordinator {
         phase,
         payload: data,
         sequence: this.nextArtifactSequence(),
+        eventMetadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
         isError: phase === "result" && data.isError === true,
       }),
     );
@@ -505,6 +519,7 @@ export class A2ATaskExecutionCoordinator {
       mediaUrls: [],
       isError: false,
       finalCount: 0,
+      eventMetadata: this.buildBaseEventMetadata(),
     };
 
     if (!this.promoted) {
@@ -610,6 +625,7 @@ export class A2ATaskExecutionCoordinator {
         taskId: this.requestContext.taskId,
         contextId: this.requestContext.contextId,
         state: "submitted",
+        metadata: this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -629,6 +645,7 @@ export class A2ATaskExecutionCoordinator {
         taskId: this.requestContext.taskId,
         contextId: this.requestContext.contextId,
         state: "working",
+        metadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -659,6 +676,7 @@ export class A2ATaskExecutionCoordinator {
         state,
         final: params.final,
         messageText: params.messageText,
+        metadata: this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -716,6 +734,8 @@ export class A2ATaskExecutionCoordinator {
             artifactId: "assistant-output",
             name: "assistant",
             sequence: this.nextArtifactSequence(),
+            eventMetadata:
+              assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
             payload: {
               text: delta.length > 0 ? delta : undefined,
               mediaUrls: extrasChanged ? payload.mediaUrls : [],
@@ -739,6 +759,8 @@ export class A2ATaskExecutionCoordinator {
           artifactId: "assistant-output",
           name: "assistant",
           sequence: this.nextArtifactSequence(),
+          eventMetadata:
+            assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
           payload,
           lastChunk: params.lastChunk,
         }),
@@ -751,6 +773,8 @@ export class A2ATaskExecutionCoordinator {
           artifactId: "assistant-output",
           name: "assistant",
           sequence: this.nextArtifactSequence(),
+          eventMetadata:
+            assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
           payload: {
             mediaUrls: [],
             isError: false,
@@ -776,6 +800,7 @@ export class A2ATaskExecutionCoordinator {
         artifactId: `tool-result-${String(this.toolArtifactCount).padStart(4, "0")}`,
         name: `tool-result-${this.toolArtifactCount}`,
         sequence: this.nextArtifactSequence(),
+        eventMetadata: this.buildBaseEventMetadata(),
         payload,
       }),
     );
@@ -823,5 +848,35 @@ export class A2ATaskExecutionCoordinator {
       lastChunk: false,
       preferTerminalText: false,
     });
+  }
+
+  private buildAgentEventMetadata(event: OpenClawExecutionEvent): JsonRecord | undefined {
+    const openclaw: JsonRecord = {};
+
+    if (this.runId ?? event.runId) {
+      openclaw.runId = this.runId ?? event.runId;
+    }
+
+    if (typeof event.seq === "number" && Number.isInteger(event.seq)) {
+      openclaw.agentEventSeq = event.seq;
+    }
+
+    if (typeof event.ts === "number" && Number.isFinite(event.ts)) {
+      openclaw.agentEventTs = event.ts;
+    }
+
+    return Object.keys(openclaw).length > 0 ? { openclaw } : undefined;
+  }
+
+  private buildBaseEventMetadata(): JsonRecord | undefined {
+    if (!this.runId) {
+      return undefined;
+    }
+
+    return {
+      openclaw: {
+        runId: this.runId,
+      },
+    };
   }
 }
