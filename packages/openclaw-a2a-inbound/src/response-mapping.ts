@@ -17,6 +17,7 @@ type JsonValue =
   | JsonRecord
   | JsonValue[];
 type TaskState = Task["status"]["state"];
+export type TaskLifecycleClass = "active" | "quiescent" | "terminal";
 export type ToolProgressPhase = "start" | "update" | "result";
 
 export interface NormalizedReplyPayload {
@@ -326,6 +327,26 @@ export function isTerminalTaskState(state: TaskState): boolean {
     state === "canceled" ||
     state === "rejected"
   );
+}
+
+export function isQuiescentTaskState(state: TaskState): boolean {
+  return state === "input-required" || state === "auth-required";
+}
+
+export function isActiveExecutionTaskState(state: TaskState): boolean {
+  return state === "submitted" || state === "working";
+}
+
+export function classifyTaskState(state: TaskState): TaskLifecycleClass {
+  if (isActiveExecutionTaskState(state)) {
+    return "active";
+  }
+
+  if (isTerminalTaskState(state)) {
+    return "terminal";
+  }
+
+  return "quiescent";
 }
 
 function createTaskStatus(params: {

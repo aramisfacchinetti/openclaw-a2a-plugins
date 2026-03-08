@@ -23,7 +23,13 @@ import {
   type AgentExecutionEvent,
   type AgentExecutor,
 } from "@a2a-js/sdk/server";
-import { isTerminalTaskState, createTaskSnapshot, createTaskStatusUpdate } from "./response-mapping.js";
+import {
+  createTaskSnapshot,
+  createTaskStatusUpdate,
+  isActiveExecutionTaskState,
+  isQuiescentTaskState,
+  isTerminalTaskState,
+} from "./response-mapping.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import {
   A2ATaskRuntimeStore,
@@ -190,39 +196,50 @@ export class A2AInboundRequestHandler {
     params: TaskQueryParams,
     context?: ServerCallContext,
   ): Promise<Task> {
-    const task = await this.taskRuntime.load(params.id, context);
+    const task = await this.loadTaskForRead(params.id, context);
 
     if (!task) {
       throw A2AError.taskNotFound(params.id);
     }
 
-    const reconciled =
-      (await this.taskRuntime.reconcileOrphanedTask(
-        params.id,
-        this.liveExecutions.has(params.id),
-      )) ?? task;
-
-    return trimTaskHistory(reconciled, params.historyLength);
+    return trimTaskHistory(task, params.historyLength);
   }
 
   async cancelTask(
     params: TaskIdParams,
     context?: ServerCallContext,
   ): Promise<Task> {
-    const task = await this.taskRuntime.load(params.id, context);
+    const task = await this.loadTaskForRead(params.id, context);
 
     if (!task) {
       throw A2AError.taskNotFound(params.id);
     }
 
-    const reconciled =
-      (await this.taskRuntime.reconcileOrphanedTask(
-        params.id,
-        this.liveExecutions.has(params.id),
-      )) ?? task;
+    if (isTerminalTaskState(task.status.state)) {
+      return task;
+    }
 
-    if (isTerminalTaskState(reconciled.status.state)) {
-      return reconciled;
+    if (isQuiescentTaskState(task.status.state)) {
+      await this.taskRuntime.commitEvent(
+        createTaskStatusUpdate({
+          taskId: task.id,
+          contextId: task.contextId,
+          state: "canceled",
+          final: true,
+          messageText: "Task cancellation requested by the client.",
+        }),
+      );
+      this.liveExecutions.cleanup(task.id);
+
+      const canceled = await this.taskRuntime.load(task.id, context);
+
+      if (!canceled) {
+        throw A2AError.internalError(
+          `Task ${task.id} not found after cancellation.`,
+        );
+      }
+
+      return canceled;
     }
 
     if (!this.liveExecutions.has(params.id)) {
@@ -295,17 +312,13 @@ export class A2AInboundRequestHandler {
       );
     }
 
-    const initialTask = await this.taskRuntime.load(params.id, context);
+    const initialTask = await this.loadTaskForRead(params.id, context);
 
     if (!initialTask) {
       throw A2AError.taskNotFound(params.id);
     }
 
     const afterSequence = parseAfterSequence(params.metadata);
-    await this.taskRuntime.reconcileOrphanedTask(
-      params.id,
-      this.liveExecutions.has(params.id),
-    );
 
     if (typeof afterSequence === "number") {
       const prepared = await this.taskRuntime.prepareReplayTail(
@@ -323,11 +336,10 @@ export class A2AInboundRequestHandler {
         yield this.taskRuntime.replayRecord(record);
       }
 
-      if (isTerminalTaskState(prepared.task.status.state)) {
-        return;
-      }
-
-      if (!prepared.subscription) {
+      if (
+        !isActiveExecutionTaskState(prepared.task.status.state) ||
+        !prepared.subscription
+      ) {
         return;
       }
 
@@ -343,7 +355,10 @@ export class A2AInboundRequestHandler {
 
     yield prepared.task;
 
-    if (isTerminalTaskState(prepared.task.status.state) || !prepared.subscription) {
+    if (
+      !isActiveExecutionTaskState(prepared.task.status.state) ||
+      !prepared.subscription
+    ) {
       return;
     }
 
@@ -502,17 +517,13 @@ export class A2AInboundRequestHandler {
     let referenceTasks: Task[] | undefined;
 
     if (incomingMessage.taskId) {
-      const loadedTask = await this.taskRuntime.load(incomingMessage.taskId, context);
+      const loadedTask = await this.loadTaskForRead(incomingMessage.taskId, context);
 
       if (!loadedTask) {
         throw A2AError.taskNotFound(incomingMessage.taskId);
       }
 
-      task =
-        (await this.taskRuntime.reconcileOrphanedTask(
-          incomingMessage.taskId,
-          this.liveExecutions.has(incomingMessage.taskId),
-        )) ?? loadedTask;
+      task = loadedTask;
 
       if (isTerminalTaskState(task.status.state)) {
         throw A2AError.invalidRequest(
@@ -600,5 +611,23 @@ export class A2AInboundRequestHandler {
     } finally {
       subscription.close();
     }
+  }
+
+  private async loadTaskForRead(
+    taskId: string,
+    context?: ServerCallContext,
+  ): Promise<Task | undefined> {
+    const task = await this.taskRuntime.load(taskId, context);
+
+    if (!task || !isActiveExecutionTaskState(task.status.state)) {
+      return task;
+    }
+
+    return (
+      await this.taskRuntime.reconcileOrphanedTask(
+        taskId,
+        this.liveExecutions.has(taskId),
+      )
+    ) ?? task;
   }
 }

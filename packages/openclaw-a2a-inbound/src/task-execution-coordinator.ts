@@ -20,6 +20,8 @@ import {
 
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
+const INPUT_REQUIRED_APPROVAL_MESSAGE =
+  "OpenClaw is waiting for tool approval to continue.";
 
 export interface OpenClawExecutionEvent {
   runId: string;
@@ -49,6 +51,10 @@ type ToolStage = {
 };
 
 type StagedOutput = AssistantStage | ToolStage;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function cloneMessageHistory(history: readonly Message[] | undefined): Message[] | undefined {
   return history ? (structuredClone(history) as Message[]) : undefined;
@@ -112,6 +118,33 @@ function readToolCallId(data: Record<string, unknown>): string | undefined {
     : undefined;
 }
 
+function readApprovalPauseMessage(result: unknown): string | undefined {
+  if (!isRecord(result)) {
+    return undefined;
+  }
+
+  const status = typeof result.status === "string" ? result.status : undefined;
+  const requiresApproval = isRecord(result.requiresApproval)
+    ? result.requiresApproval
+    : undefined;
+  const explicitApproval =
+    status === "approval-pending" ||
+    status === "needs_approval" ||
+    requiresApproval?.type === "approval_request";
+
+  if (!explicitApproval) {
+    return undefined;
+  }
+
+  const prompt =
+    typeof requiresApproval?.prompt === "string" &&
+    requiresApproval.prompt.trim().length > 0
+      ? requiresApproval.prompt.trim()
+      : undefined;
+
+  return prompt ?? INPUT_REQUIRED_APPROVAL_MESSAGE;
+}
+
 function normalizeAssistantPreviewText(
   currentPreview: string | undefined,
   incomingText: string,
@@ -145,6 +178,8 @@ export class A2ATaskExecutionCoordinator {
   private cancelRequested = false;
   private lifecyclePhase?: LifecyclePhase;
   private lifecycleError?: string;
+  private pausedForInputRequired = false;
+  private inputRequiredPublished = false;
   private assistantFlushQueued = false;
   private assistantFlushScheduled = false;
   private currentAgentEventMetadata?: JsonRecord;
@@ -308,6 +343,11 @@ export class A2ATaskExecutionCoordinator {
         final: true,
         messageText: this.lifecycleError,
       });
+      return;
+    }
+
+    if (this.pausedForInputRequired) {
+      this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
       return;
     }
 
@@ -506,6 +546,14 @@ export class A2ATaskExecutionCoordinator {
         isError: phase === "result" && data.isError === true,
       }),
     );
+
+    if (phase === "result" && data.isError !== true) {
+      const approvalPauseMessage = readApprovalPauseMessage(data.result);
+
+      if (approvalPauseMessage) {
+        this.publishInputRequiredStatus(approvalPauseMessage);
+      }
+    }
   }
 
   private ensureAssistantStage(): AssistantStage {
@@ -648,6 +696,31 @@ export class A2ATaskExecutionCoordinator {
         metadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
       }),
     );
+  }
+
+  private publishInputRequiredStatus(messageText: string): void {
+    if (this.finalPublished || this.inputRequiredPublished) {
+      return;
+    }
+
+    if (!this.taskPublished) {
+      this.promoteToTask("approval pause requires task state");
+    }
+
+    this.pausedForInputRequired = true;
+    this.inputRequiredPublished = true;
+    this.eventBus.publish(
+      createTaskStatusUpdate({
+        taskId: this.requestContext.taskId,
+        contextId: this.requestContext.contextId,
+        state: "input-required",
+        final: false,
+        messageText,
+        metadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
+      }),
+    );
+    this.liveExecutions.cleanup(this.requestContext.taskId);
+    this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
   }
 
   private publishFinalStatus(

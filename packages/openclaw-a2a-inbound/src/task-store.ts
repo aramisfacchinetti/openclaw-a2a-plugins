@@ -29,7 +29,11 @@ import type {
 } from "@a2a-js/sdk";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
 import type { A2AInboundTaskStoreConfig } from "./config.js";
-import { createTaskStatusUpdate, isTerminalTaskState } from "./response-mapping.js";
+import {
+  classifyTaskState,
+  createTaskStatusUpdate,
+  isActiveExecutionTaskState,
+} from "./response-mapping.js";
 
 type JsonRecord = Record<string, unknown>;
 type JournalEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
@@ -83,6 +87,12 @@ type PreparedReplayTail = {
   subscription?: TaskJournalSubscriptionHandle;
   task: Task;
   events: StoredTaskJournalRecord[];
+};
+
+type MaterializedTaskState = {
+  task: Task;
+  currentSequence: number;
+  runtime: StoredTaskRuntime;
 };
 
 interface TaskRuntimeStorage {
@@ -320,6 +330,34 @@ function mergeStatus(task: Task, event: TaskStatusUpdateEvent): Task {
   }
 
   return nextTask;
+}
+
+function foldTaskJournalOntoSnapshot(
+  snapshot: Task,
+  records: readonly StoredTaskJournalRecord[],
+): {
+  task: Task;
+  currentSequence: number;
+} {
+  let currentSequence = readTaskCurrentSequence(snapshot);
+  let nextTask = withCurrentSequence(snapshot, currentSequence);
+
+  for (const record of [...records].sort((left, right) => left.sequence - right.sequence)) {
+    if (record.sequence <= currentSequence) {
+      continue;
+    }
+
+    nextTask =
+      record.event.kind === "status-update"
+        ? mergeStatus(nextTask, record.event)
+        : mergeArtifact(nextTask, record.event);
+    currentSequence = record.sequence;
+  }
+
+  return {
+    task: withCurrentSequence(nextTask, currentSequence),
+    currentSequence,
+  };
 }
 
 function readLeaseExpiry(lease: TaskExecutionLease | undefined): number | undefined {
@@ -797,9 +835,12 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           continue;
         }
 
-        const snapshot = maybeReadJsonFileSync<Task>(this.snapshotPath(taskId));
+        const materialized = this.materializeTaskSync(taskId);
 
-        if (!snapshot || isTerminalTaskState(snapshot.status.state)) {
+        if (
+          !materialized ||
+          !isActiveExecutionTaskState(materialized.task.status.state)
+        ) {
           continue;
         }
 
@@ -811,11 +852,11 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           continue;
         }
 
-        const nextSequence = runtime.currentSequence + 1;
+        const nextSequence = materialized.currentSequence + 1;
         const failureEvent = decorateJournalEvent(
           createTaskStatusUpdate({
-            taskId: snapshot.id,
-            contextId: snapshot.contextId,
+            taskId: materialized.task.id,
+            contextId: materialized.task.contextId,
             state: "failed",
             final: true,
             messageText: INTERRUPTED_TASK_FAILURE_TEXT,
@@ -824,7 +865,7 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           nextSequence,
         );
         const nextSnapshot = withCurrentSequence(
-          mergeStatus(snapshot, failureEvent),
+          mergeStatus(materialized.task, failureEvent),
           nextSequence,
         );
         const nextRuntime = releaseLease(
@@ -900,6 +941,23 @@ class JsonFileTaskRuntimeStorage implements TaskRuntimeStorage {
           : {}),
       },
     };
+  }
+
+  private materializeTaskSync(taskId: string): {
+    task: Task;
+    currentSequence: number;
+  } | undefined {
+    const snapshot = maybeReadJsonFileSync<Task>(this.snapshotPath(taskId));
+
+    if (!snapshot) {
+      return undefined;
+    }
+
+    const tail = readNdjsonFileSync<StoredTaskJournalRecord>(this.eventsPath(taskId))
+      .map((record) => this.normalizeJournalRecord(record))
+      .filter((record) => record.sequence > readTaskCurrentSequence(snapshot));
+
+    return foldTaskJournalOntoSnapshot(snapshot, tail);
   }
 
   private writeJournalRecordSync(
@@ -1026,26 +1084,26 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
-
-      if (!snapshot) {
-        return undefined;
-      }
-
-      const runtime = await this.storage.readRuntime(taskId);
-      return withCurrentSequence(
-        snapshot,
-        runtime?.currentSequence ?? readTaskCurrentSequence(snapshot),
-      );
+      return (await this.readMaterializedTask(taskId))?.task;
     });
   }
 
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
     await this.enqueueByTask(task.id, async () => {
-      const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
-      const nextTask = withCurrentSequence(task, runtime.currentSequence);
+      const materialized = await this.readMaterializedTask(task.id);
+      const runtime =
+        materialized?.runtime ??
+        normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
+      const currentSequence = Math.max(
+        materialized?.currentSequence ?? 0,
+        readTaskCurrentSequence(task),
+      );
+      const nextTask = withCurrentSequence(task, currentSequence);
       await this.storage.writeSnapshot(task.id, nextTask);
-      await this.storage.writeRuntime(task.id, runtime);
+      await this.storage.writeRuntime(task.id, {
+        ...runtime,
+        currentSequence,
+      });
     });
   }
 
@@ -1055,20 +1113,22 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async persistIncomingMessage(taskId: string, message: Message): Promise<Task | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
+      const materialized = await this.readMaterializedTask(taskId);
 
-      if (!snapshot) {
+      if (!materialized) {
         return undefined;
       }
 
-      const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
       const nextSnapshot = withCurrentSequence(
-        ensureHistoryContainsMessage(snapshot, message),
-        runtime.currentSequence,
+        ensureHistoryContainsMessage(materialized.task, message),
+        materialized.currentSequence,
       );
 
       await this.storage.writeSnapshot(taskId, nextSnapshot);
-      await this.storage.writeRuntime(taskId, runtime);
+      await this.storage.writeRuntime(taskId, {
+        ...materialized.runtime,
+        currentSequence: materialized.currentSequence,
+      });
       return nextSnapshot;
     });
   }
@@ -1089,24 +1149,27 @@ export class A2ATaskRuntimeStore implements TaskStore {
     hasLiveInProcessOwner: boolean,
   ): Promise<Task | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
+      const materialized = await this.readMaterializedTask(taskId);
 
-      if (!snapshot || isTerminalTaskState(snapshot.status.state) || hasLiveInProcessOwner) {
-        return snapshot ? withCurrentSequence(snapshot, readTaskCurrentSequence(snapshot)) : undefined;
+      if (
+        !materialized ||
+        !isActiveExecutionTaskState(materialized.task.status.state) ||
+        hasLiveInProcessOwner
+      ) {
+        return materialized?.task;
       }
 
       const nowIso = new Date().toISOString();
-      const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
 
-      if (!hasExpiredOrMissingLease(runtime, Date.parse(nowIso))) {
-        return withCurrentSequence(snapshot, runtime.currentSequence);
+      if (!hasExpiredOrMissingLease(materialized.runtime, Date.parse(nowIso))) {
+        return materialized.task;
       }
 
-      const nextSequence = runtime.currentSequence + 1;
+      const nextSequence = materialized.currentSequence + 1;
       const journalEvent = decorateJournalEvent(
         createTaskStatusUpdate({
-          taskId: snapshot.id,
-          contextId: snapshot.contextId,
+          taskId: materialized.task.id,
+          contextId: materialized.task.contextId,
           state: "failed",
           final: true,
           messageText: INTERRUPTED_TASK_FAILURE_TEXT,
@@ -1115,18 +1178,18 @@ export class A2ATaskRuntimeStore implements TaskStore {
         nextSequence,
       );
       const nextSnapshot = withCurrentSequence(
-        mergeStatus(snapshot, journalEvent),
+        mergeStatus(materialized.task, journalEvent),
         nextSequence,
       );
       const nextRuntime = releaseLease(
         {
           currentSequence: nextSequence,
-          lease: runtime.lease,
+          lease: materialized.runtime.lease,
         },
         {
           nowIso,
-          ownerId: runtime.lease?.ownerId,
-          runId: runtime.lease?.runId,
+          ownerId: materialized.runtime.lease?.ownerId,
+          runId: materialized.runtime.lease?.runId,
         },
       );
       const record: StoredTaskJournalRecord = {
@@ -1147,20 +1210,18 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async prepareLiveTail(taskId: string): Promise<PreparedLiveTail | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
+      const materialized = await this.readMaterializedTask(taskId);
 
-      if (!snapshot) {
+      if (!materialized) {
         return undefined;
       }
 
-      const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
-      const nextSnapshot = withCurrentSequence(snapshot, runtime.currentSequence);
-      const subscription = isTerminalTaskState(nextSnapshot.status.state)
-        ? undefined
-        : this.createSubscription(taskId, runtime.currentSequence);
+      const subscription = isActiveExecutionTaskState(materialized.task.status.state)
+        ? this.createSubscription(taskId, materialized.currentSequence)
+        : undefined;
 
       return {
-        task: nextSnapshot,
+        task: materialized.task,
         subscription,
       };
     });
@@ -1171,22 +1232,24 @@ export class A2ATaskRuntimeStore implements TaskStore {
     afterSequence: number,
   ): Promise<PreparedReplayTail | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
+      const materialized = await this.readMaterializedTask(taskId);
 
-      if (!snapshot) {
+      if (!materialized) {
         return undefined;
       }
 
-      const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
-      const task = withCurrentSequence(snapshot, runtime.currentSequence);
       const events = await this.storage.readEventsAfter(taskId, afterSequence);
-      const lastSequence = events.at(-1)?.sequence ?? afterSequence;
-      const subscription = isTerminalTaskState(task.status.state)
-        ? undefined
-        : this.createSubscription(taskId, lastSequence);
+      const lastSequence = Math.max(
+        afterSequence,
+        materialized.currentSequence,
+        events.at(-1)?.sequence ?? 0,
+      );
+      const subscription = isActiveExecutionTaskState(materialized.task.status.state)
+        ? this.createSubscription(taskId, lastSequence)
+        : undefined;
 
       return {
-        task,
+        task: materialized.task,
         events,
         subscription,
       };
@@ -1195,20 +1258,22 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async renewLease(taskId: string, runId?: string): Promise<void> {
     await this.enqueueByTask(taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(taskId);
+      const materialized = await this.readMaterializedTask(taskId);
 
-      if (!snapshot || isTerminalTaskState(snapshot.status.state)) {
+      if (
+        !materialized ||
+        !isActiveExecutionTaskState(materialized.task.status.state)
+      ) {
         this.stopHeartbeat(taskId);
         return;
       }
 
       const nowIso = new Date().toISOString();
-      const currentRuntime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
-      const nextRuntime = createLease(currentRuntime.currentSequence, {
+      const nextRuntime = createLease(materialized.currentSequence, {
         ownerId: this.instanceId,
         nowIso,
-        ...(runId ?? currentRuntime.lease?.runId
-          ? { runId: runId ?? currentRuntime.lease?.runId }
+        ...(runId ?? materialized.runtime.lease?.runId
+          ? { runId: runId ?? materialized.runtime.lease?.runId }
           : {}),
       });
 
@@ -1225,7 +1290,14 @@ export class A2ATaskRuntimeStore implements TaskStore {
     latestUserMessage?: Message,
   ): Promise<Task> {
     return this.enqueueByTask(task.id, async () => {
-      const currentRuntime = normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
+      const materialized = await this.readMaterializedTask(task.id);
+      const currentRuntime =
+        materialized?.runtime ??
+        normalizeRuntimeRecord(await this.storage.readRuntime(task.id));
+      const currentSequence = Math.max(
+        materialized?.currentSequence ?? 0,
+        readTaskCurrentSequence(task),
+      );
       const runId = readEventProvenance(task).runId ?? currentRuntime.lease?.runId;
       const nowIso = new Date().toISOString();
       let nextTask = cloneTask(task);
@@ -1234,64 +1306,79 @@ export class A2ATaskRuntimeStore implements TaskStore {
         nextTask = ensureHistoryContainsMessage(nextTask, latestUserMessage);
       }
 
-      nextTask = withCurrentSequence(nextTask, currentRuntime.currentSequence);
+      nextTask = withCurrentSequence(nextTask, currentSequence);
 
       await this.storage.writeSnapshot(task.id, nextTask);
+      const nextRuntime =
+        classifyTaskState(nextTask.status.state) === "active"
+          ? createLease(currentSequence, {
+              ownerId: this.instanceId,
+              nowIso,
+              ...(runId ? { runId } : {}),
+            })
+          : releaseLease(
+              {
+                currentSequence,
+                lease: currentRuntime.lease,
+              },
+              {
+                nowIso,
+                ownerId: this.instanceId,
+                ...(runId ? { runId } : {}),
+              },
+            );
       await this.storage.writeRuntime(
         task.id,
-        createLease(currentRuntime.currentSequence, {
-          ownerId: this.instanceId,
-          nowIso,
-          ...(runId ? { runId } : {}),
-        }),
+        nextRuntime,
       );
-      this.startHeartbeat(task.id);
+      this.syncHeartbeat(task.id, nextTask.status.state);
       return nextTask;
     });
   }
 
   private async commitJournalEvent(event: JournalEvent): Promise<JournalEvent> {
     return this.enqueueByTask(event.taskId, async () => {
-      const snapshot = await this.storage.readSnapshot(event.taskId);
+      const materialized = await this.readMaterializedTask(event.taskId);
 
-      if (!snapshot) {
+      if (!materialized) {
         throw new Error(`Cannot commit journal event for unknown task ${event.taskId}.`);
       }
 
-      const currentRuntime = normalizeRuntimeRecord(
-        await this.storage.readRuntime(event.taskId),
-      );
-      const nextSequence = currentRuntime.currentSequence + 1;
+      const currentRuntime = materialized.runtime;
+      const nextSequence = materialized.currentSequence + 1;
       const committedAt = new Date().toISOString();
       const decoratedEvent = decorateJournalEvent(event, nextSequence);
       const nextSnapshot =
         decoratedEvent.kind === "status-update"
-          ? withCurrentSequence(mergeStatus(snapshot, decoratedEvent), nextSequence)
-          : withCurrentSequence(mergeArtifact(snapshot, decoratedEvent), nextSequence);
+          ? withCurrentSequence(
+              mergeStatus(materialized.task, decoratedEvent),
+              nextSequence,
+            )
+          : withCurrentSequence(
+              mergeArtifact(materialized.task, decoratedEvent),
+              nextSequence,
+            );
       const provenance = readEventProvenance(event);
-      const terminal =
-        decoratedEvent.kind === "status-update" &&
-        isTerminalTaskState(decoratedEvent.status.state) &&
-        decoratedEvent.final;
-      const nextRuntime = terminal
-        ? releaseLease(
-            {
-              currentSequence: nextSequence,
-              lease: currentRuntime.lease,
-            },
-            {
-              nowIso: committedAt,
+      const nextRuntime =
+        classifyTaskState(nextSnapshot.status.state) === "active"
+          ? createLease(nextSequence, {
               ownerId: this.instanceId,
-              runId: provenance.runId ?? currentRuntime.lease?.runId,
-            },
-          )
-        : createLease(nextSequence, {
-            ownerId: this.instanceId,
-            nowIso: committedAt,
-            ...(provenance.runId ?? currentRuntime.lease?.runId
-              ? { runId: provenance.runId ?? currentRuntime.lease?.runId }
-              : {}),
-          });
+              nowIso: committedAt,
+              ...(provenance.runId ?? currentRuntime.lease?.runId
+                ? { runId: provenance.runId ?? currentRuntime.lease?.runId }
+                : {}),
+            })
+          : releaseLease(
+              {
+                currentSequence: nextSequence,
+                lease: currentRuntime.lease,
+              },
+              {
+                nowIso: committedAt,
+                ownerId: this.instanceId,
+                runId: provenance.runId ?? currentRuntime.lease?.runId,
+              },
+            );
       const record: StoredTaskJournalRecord = {
         sequence: nextSequence,
         committedAt,
@@ -1303,15 +1390,40 @@ export class A2ATaskRuntimeStore implements TaskStore {
       await this.storage.writeSnapshot(event.taskId, nextSnapshot);
       await this.storage.writeRuntime(event.taskId, nextRuntime);
 
-      if (terminal) {
-        this.stopHeartbeat(event.taskId);
-      } else {
-        this.startHeartbeat(event.taskId);
-      }
-
+      this.syncHeartbeat(event.taskId, nextSnapshot.status.state);
       this.notifySubscribers(event.taskId, record);
       return decoratedEvent;
     });
+  }
+
+  private async readMaterializedTask(
+    taskId: string,
+  ): Promise<MaterializedTaskState | undefined> {
+    const snapshot = await this.storage.readSnapshot(taskId);
+
+    if (!snapshot) {
+      return undefined;
+    }
+
+    const { task, currentSequence } = foldTaskJournalOntoSnapshot(
+      snapshot,
+      await this.storage.readEventsAfter(taskId, readTaskCurrentSequence(snapshot)),
+    );
+
+    return {
+      task,
+      currentSequence,
+      runtime: normalizeRuntimeRecord(await this.storage.readRuntime(taskId)),
+    };
+  }
+
+  private syncHeartbeat(taskId: string, state: Task["status"]["state"]): void {
+    if (isActiveExecutionTaskState(state)) {
+      this.startHeartbeat(taskId);
+      return;
+    }
+
+    this.stopHeartbeat(taskId);
   }
 
   private enqueueByTask<T>(

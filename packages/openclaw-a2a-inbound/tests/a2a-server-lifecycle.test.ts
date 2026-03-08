@@ -19,7 +19,7 @@ import {
 
 type StreamEvent = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message;
 
-function isTask(value: Message | Task): value is Task {
+function isTask(value: StreamEvent | Message | Task): value is Task {
   return value.kind === "task";
 }
 
@@ -81,6 +81,29 @@ function getPersistedArtifactText(
     .filter((part): part is Extract<typeof part, { kind: "text" }> => part.kind === "text")
     .map((part) => part.text)
     .join("");
+}
+
+function getPersistedArtifactData(
+  task: Task,
+  artifactId: string,
+): Record<string, unknown> | undefined {
+  const artifact = task.artifacts?.find((entry) => entry.artifactId === artifactId);
+
+  if (!artifact) {
+    return undefined;
+  }
+
+  const dataPart = artifact.parts.find((part) => part.kind === "data");
+  return dataPart?.kind === "data"
+    ? (dataPart.data as Record<string, unknown>)
+    : undefined;
+}
+
+function getStatusMessageText(
+  value: Task | TaskStatusUpdateEvent,
+): string | undefined {
+  const part = value.status.message?.parts[0];
+  return part?.kind === "text" ? part.text : undefined;
 }
 
 function getOpenClawMetadata(
@@ -349,6 +372,81 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   );
 });
 
+test("blocking sendMessage returns input-required for explicit approval pauses and persists the tool payload", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-blocking-input-required");
+    emit({
+      runId: "run-blocking-input-required",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-blocking-input-required",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "exec",
+        toolCallId: "exec/1",
+        isError: false,
+        result: {
+          status: "approval-pending",
+          requiresApproval: {
+            type: "approval_request",
+          },
+          command: "npm publish",
+        },
+      },
+    });
+    emit({
+      runId: "run-blocking-input-required",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+  });
+
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected task result");
+  }
+
+  assert.equal(result.status.state, "input-required");
+  assert.equal(
+    getStatusMessageText(result),
+    "OpenClaw is waiting for tool approval to continue.",
+  );
+  assert.deepEqual(
+    getPersistedArtifactData(result, "tool-progress-exec_1"),
+    {
+      phase: "result",
+      name: "exec",
+      toolCallId: "exec/1",
+      isError: false,
+      result: {
+        status: "approval-pending",
+        requiresApproval: {
+          type: "approval_request",
+        },
+        command: "npm publish",
+      },
+    },
+  );
+
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
+
+  assert.equal(persisted.status.state, "input-required");
+  assert.equal(
+    getStatusMessageText(persisted),
+    "OpenClaw is waiting for tool approval to continue.",
+  );
+});
+
 test("sendMessageStream emits task-first assistant progress and a closing artifact event", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-fast");
@@ -478,9 +576,9 @@ test("sendMessageStream reconciles assistant deltas against the authoritative fi
 
   const streamed = await collectStream(server);
   const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
-  const authoritativeUpdate = assistantUpdates.findLast(
-    (event) => typeof getArtifactText(event) === "string",
-  );
+  const authoritativeUpdate = [...assistantUpdates]
+    .reverse()
+    .find((event) => typeof getArtifactText(event) === "string");
   const closingUpdate = assistantUpdates.at(-1);
   const completedIndex = streamed.findIndex(
     (event) =>
@@ -749,6 +847,106 @@ test("sendMessageStream emits stable live tool progress artifacts", async () => 
   });
 });
 
+test("streaming approval pauses replay input-required and paused tasks cancel directly", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-input-required");
+    emit({
+      runId: "run-stream-input-required",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-input-required",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "shell",
+        toolCallId: "shell/1",
+        isError: false,
+        result: {
+          status: "needs_approval",
+          requiresApproval: {
+            type: "approval_request",
+            prompt: "Approve shell command?",
+          },
+          command: "rm -rf ./build",
+        },
+      },
+    });
+    emit({
+      runId: "run-stream-input-required",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const task = streamed.find(isTask);
+  const toolProgress = getArtifactUpdates(streamed, "tool-progress-shell_1").at(-1);
+  assert.ok(toolProgress);
+  const pauseSequence = toolProgress ? getEventSequence(toolProgress) : undefined;
+
+  assert.ok(task);
+  assert.deepEqual(getStatusSequence(streamed), [
+    ["submitted", false],
+    ["working", false],
+    ["input-required", false],
+  ]);
+  assert.equal(
+    streamed.some(
+      (event) =>
+        isStatusUpdate(event) && event.status.state === "auth-required",
+    ),
+    false,
+  );
+  assert.equal(
+    getStatusMessageText(
+      streamed.filter(isStatusUpdate).at(-1) as TaskStatusUpdateEvent,
+    ),
+    "Approve shell command?",
+  );
+
+  if (!task) {
+    assert.fail("expected streamed task snapshot");
+  }
+
+  const persisted = await server.requestHandler.getTask({
+    id: task.id,
+    historyLength: 10,
+  });
+  assert.equal(persisted.status.state, "input-required");
+  assert.equal(getStatusMessageText(persisted), "Approve shell command?");
+
+  assert.equal(pauseSequence, 3);
+  const replayed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+  for await (const event of server.requestHandler.resubscribe({
+    id: task.id,
+    metadata: {
+      openclaw: {
+        afterSequence: pauseSequence,
+      },
+    },
+  })) {
+    replayed.push(event);
+  }
+
+  assert.deepEqual(
+    replayed
+      .filter(isStatusUpdate)
+      .map((event) => [event.status.state, event.final]),
+    [["input-required", false]],
+  );
+
+  const canceled = await server.requestHandler.cancelTask({ id: task.id });
+  assert.equal(canceled.status.state, "canceled");
+
+  const persistedCanceled = await server.requestHandler.getTask({
+    id: task.id,
+    historyLength: 10,
+  });
+  assert.equal(persistedCanceled.status.state, "canceled");
+});
+
 test("sendMessageStream emits both live tool progress and summarized tool results", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-mixed");
@@ -942,8 +1140,13 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
         },
       },
     );
+    const activeServer = liveServer;
 
-    const liveResult = await liveServer.requestHandler.sendMessage({
+    if (!activeServer) {
+      assert.fail("expected live server");
+    }
+
+    const liveResult = await activeServer.requestHandler.sendMessage({
       message: createUserMessage(),
       configuration: {
         blocking: false,
@@ -956,7 +1159,7 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
     }
 
     await waitFor(async () => {
-      const snapshot = await liveServer.requestHandler.getTask({
+      const snapshot = await activeServer.requestHandler.getTask({
         id: liveResult.id,
         historyLength: 10,
       });
@@ -966,7 +1169,7 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
 
     const resubscribed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
     const resubscribePromise = (async () => {
-      for await (const event of liveServer.requestHandler.resubscribe({
+      for await (const event of activeServer.requestHandler.resubscribe({
         id: liveResult.id,
         metadata: {
           openclaw: {
@@ -1013,7 +1216,7 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
     await resubscribePromise;
 
     await waitFor(async () => {
-      const persisted = await liveServer.requestHandler.getTask({
+      const persisted = await activeServer.requestHandler.getTask({
         id: liveResult.id,
         historyLength: 10,
       });

@@ -135,6 +135,21 @@ async function readJournal(rootPath: string, taskId: string): Promise<JournalRec
     .map((line) => JSON.parse(line) as JournalRecord);
 }
 
+async function readRuntime(
+  rootPath: string,
+  taskId: string,
+): Promise<Record<string, unknown>> {
+  const raw = await readFile(join(taskDirectory(rootPath, taskId), "runtime.json"), "utf8");
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+function getStatusMessageText(
+  value: Task | TaskStatusUpdateEvent,
+): string | undefined {
+  const part = value.status.message?.parts[0];
+  return part?.kind === "text" ? part.text : undefined;
+}
+
 function createWorkingSeed(params?: {
   taskId?: string;
   contextId?: string;
@@ -239,14 +254,14 @@ test("startup sweep finalizes orphaned durable tasks before any API call", async
 
     const sweptSnapshot = await readSnapshot(rootPath, seed.taskId);
     const journal = await readJournal(rootPath, seed.taskId);
+    const lastEvent = journal.at(-1)?.event;
 
     assert.equal(sweptSnapshot.status.state, "failed");
     assert.equal(getCurrentSequence(sweptSnapshot), 3);
     assert.equal(journal.at(-1)?.sequence, 3);
     assert.equal(
-      journal.at(-1)?.event.status.message?.parts[0] &&
-        "text" in journal.at(-1)!.event.status.message!.parts[0]
-        ? journal.at(-1)!.event.status.message!.parts[0].text
+      lastEvent?.kind === "status-update"
+        ? getStatusMessageText(lastEvent)
         : undefined,
       INTERRUPTED_TASK_FAILURE_TEXT,
     );
@@ -368,9 +383,295 @@ test("cancelTask returns failed after process loss instead of canceled", async (
   }
 });
 
+test("materialized reads prefer a journal-ahead terminal state over a stale active snapshot", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-journal-terminal-"));
+  const seed = createWorkingSeed({
+    lease: {
+      ownerId: "lost-process",
+      runId: "run-orphaned",
+      state: "active",
+      heartbeatAt: "2026-03-08T09:59:30.000Z",
+      leaseExpiresAt: "2026-03-08T09:59:40.000Z",
+    },
+  });
+  const completed = createTaskStatusUpdate({
+    taskId: seed.taskId,
+    contextId: seed.snapshot.contextId,
+    state: "completed",
+    final: true,
+    messageText: "Completed durably",
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: seed.snapshot,
+      runtime: seed.runtime,
+      events: [
+        ...seed.events,
+        {
+          sequence: 3,
+          committedAt: "2026-03-08T10:00:02.000Z",
+          event: completed,
+          provenance: {
+            runId: "run-orphaned",
+          },
+        },
+      ],
+    });
+
+    server = createServerHarness(async () => {}, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    const journal = await readJournal(rootPath, seed.taskId);
+    const lastEvent = journal.at(-1)?.event;
+    assert.equal(journal.length, 3);
+    assert.equal(lastEvent?.kind, "status-update");
+    assert.equal(
+      lastEvent?.kind === "status-update"
+        ? lastEvent.status.state
+        : undefined,
+      "completed",
+    );
+
+    const persisted = await server.requestHandler.getTask({
+      id: seed.taskId,
+      historyLength: 10,
+    });
+    assert.equal(persisted.status.state, "completed");
+    assert.equal(getCurrentSequence(persisted), 3);
+    assert.equal(getStatusMessageText(persisted), "Completed durably");
+
+    const resubscribed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+    for await (const event of server.requestHandler.resubscribe({ id: seed.taskId })) {
+      resubscribed.push(event);
+    }
+
+    assert.equal(resubscribed.length, 1);
+    assert.equal(isTask(resubscribed[0]), true);
+    assert.equal(
+      isTask(resubscribed[0]) ? resubscribed[0].status.state : undefined,
+      "completed",
+    );
+
+    const canceled = await server.requestHandler.cancelTask({ id: seed.taskId });
+    assert.equal(canceled.status.state, "completed");
+    assert.equal(getCurrentSequence(canceled), 3);
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("startup sweep preserves a journal-ahead input-required pause instead of synthesizing failed", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-journal-paused-"));
+  const seed = createWorkingSeed({
+    lease: {
+      ownerId: "lost-process",
+      runId: "run-orphaned",
+      state: "active",
+      heartbeatAt: "2026-03-08T09:59:30.000Z",
+      leaseExpiresAt: "2026-03-08T09:59:40.000Z",
+    },
+  });
+  const paused = createTaskStatusUpdate({
+    taskId: seed.taskId,
+    contextId: seed.snapshot.contextId,
+    state: "input-required",
+    final: false,
+    messageText: "Approve deploy",
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: seed.snapshot,
+      runtime: seed.runtime,
+      events: [
+        ...seed.events,
+        {
+          sequence: 3,
+          committedAt: "2026-03-08T10:00:02.000Z",
+          event: paused,
+          provenance: {
+            runId: "run-orphaned",
+          },
+        },
+      ],
+    });
+
+    server = createServerHarness(async () => {}, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    const journal = await readJournal(rootPath, seed.taskId);
+    const lastEvent = journal.at(-1)?.event;
+    assert.equal(journal.length, 3);
+    assert.equal(lastEvent?.kind, "status-update");
+    assert.equal(
+      lastEvent?.kind === "status-update"
+        ? lastEvent.status.state
+        : undefined,
+      "input-required",
+    );
+
+    const persisted = await server.requestHandler.getTask({
+      id: seed.taskId,
+      historyLength: 10,
+    });
+    assert.equal(persisted.status.state, "input-required");
+    assert.equal(getCurrentSequence(persisted), 3);
+    assert.equal(getStatusMessageText(persisted), "Approve deploy");
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("paused follow-up runs keep the snapshot sequence authoritative when runtime lags", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-sequence-authority-"));
+  const taskId = randomUUID();
+  const contextId = randomUUID();
+  const initialMessage = createUserMessage({ taskId, contextId });
+  const pausedSnapshot = createTaskSnapshot({
+    taskId,
+    contextId,
+    state: "input-required",
+    history: [initialMessage],
+    metadata: {
+      openclaw: {
+        currentSequence: 3,
+        runId: "run-paused",
+      },
+    },
+    messageText: "Awaiting approval",
+  });
+  let server: ReturnType<typeof createServerHarness> | undefined;
+
+  try {
+    await writeSeededTask({
+      rootPath,
+      task: pausedSnapshot,
+      runtime: {
+        currentSequence: 2,
+        lease: {
+          ownerId: "lost-process",
+          runId: "run-paused",
+          state: "released",
+          heartbeatAt: "2026-03-08T10:00:02.000Z",
+          leaseExpiresAt: "2026-03-08T10:00:02.000Z",
+          releasedAt: "2026-03-08T10:00:02.000Z",
+        },
+      },
+      events: [
+        {
+          sequence: 1,
+          committedAt: "2026-03-08T10:00:00.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId,
+            state: "submitted",
+          }),
+          provenance: {
+            runId: "run-paused",
+          },
+        },
+        {
+          sequence: 2,
+          committedAt: "2026-03-08T10:00:01.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId,
+            state: "working",
+          }),
+          provenance: {
+            runId: "run-paused",
+          },
+        },
+        {
+          sequence: 3,
+          committedAt: "2026-03-08T10:00:02.000Z",
+          event: createTaskStatusUpdate({
+            taskId,
+            contextId,
+            state: "input-required",
+            final: false,
+            messageText: "Awaiting approval",
+          }),
+          provenance: {
+            runId: "run-paused",
+          },
+        },
+      ],
+    });
+
+    server = createServerHarness(async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-resumed");
+      emit({
+        runId: "run-resumed",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Resumed answer" },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-resumed",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    }, {
+      taskStore: {
+        kind: "json-file",
+        path: rootPath,
+      },
+    });
+
+    const result = await server.requestHandler.sendMessage({
+      message: createUserMessage({
+        taskId,
+        contextId,
+        parts: [{ kind: "text", text: "Continue" }],
+      }),
+    });
+
+    assert.equal(isTask(result), true);
+    if (!isTask(result)) {
+      assert.fail("expected resumed task result");
+    }
+
+    assert.equal(result.status.state, "completed");
+    assert.equal(getCurrentSequence(result), 8);
+
+    const persisted = await server.requestHandler.getTask({
+      id: taskId,
+      historyLength: 10,
+    });
+    assert.equal(persisted.status.state, "completed");
+    assert.equal(getCurrentSequence(persisted), 8);
+
+    const runtime = await readRuntime(rootPath, taskId);
+    assert.equal(runtime.currentSequence, 8);
+  } finally {
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
 test("cursor replay returns committed submitted, working, artifact, and final events in order", async () => {
   const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-replay-"));
   let server: ReturnType<typeof createServerHarness> | undefined;
+  let result: Message | Task | undefined;
 
   try {
     server = createServerHarness(
@@ -419,7 +720,7 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
       },
     );
 
-    const result = await server.requestHandler.sendMessage({
+    result = await server.requestHandler.sendMessage({
       message: createUserMessage(),
       configuration: {
         blocking: false,
@@ -430,10 +731,11 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
     if (!isTask(result)) {
       assert.fail("expected completed task");
     }
+    const taskResult = result;
 
     await waitFor(async () => {
       const snapshot = await server!.requestHandler.getTask({
-        id: result.id,
+        id: taskResult.id,
         historyLength: 10,
       });
 
@@ -450,6 +752,10 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
         },
       },
     })) {
+      if (event.kind === "task") {
+        assert.fail("expected replay events only");
+      }
+
       replayed.push(event);
     }
 
@@ -488,9 +794,12 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
     );
   } finally {
     if (server && typeof result !== "undefined" && isTask(result)) {
+      const activeServer = server;
+      const taskResult = result;
+
       await waitFor(async () => {
-        const snapshot = await server.requestHandler.getTask({
-          id: result.id,
+        const snapshot = await activeServer.requestHandler.getTask({
+          id: taskResult.id,
           historyLength: 10,
         });
 
@@ -576,6 +885,10 @@ test("metadata exposes currentSequence plus sequence and replayed flags on live 
         },
       },
     })) {
+      if (event.kind === "task") {
+        assert.fail("expected replay events only");
+      }
+
       replayed.push(event);
     }
 
@@ -588,6 +901,10 @@ test("metadata exposes currentSequence plus sequence and replayed flags on live 
 
     const currentSnapshots: Task[] = [];
     for await (const event of server.requestHandler.resubscribe({ id: task.id })) {
+      if (!isTask(event)) {
+        assert.fail("expected current task snapshot");
+      }
+
       currentSnapshots.push(event);
     }
 
@@ -648,6 +965,10 @@ test("memory mode replays only within the current process lifetime", async () =>
         },
       },
     })) {
+      if (event.kind === "task") {
+        assert.fail("expected replay events only");
+      }
+
       replayed.push(event);
     }
 
@@ -712,10 +1033,11 @@ test("resubscribe rejects negative, fractional, and non-numeric afterSequence cu
     if (!isTask(result)) {
       assert.fail("expected completed task");
     }
+    const taskResult = result;
 
     await waitFor(async () => {
       const snapshot = await server!.requestHandler.getTask({
-        id: result.id,
+        id: taskResult.id,
         historyLength: 10,
       });
 
@@ -726,7 +1048,7 @@ test("resubscribe rejects negative, fractional, and non-numeric afterSequence cu
       await assert.rejects(
         async () => {
           for await (const _event of server!.requestHandler.resubscribe({
-            id: result.id,
+            id: taskResult.id,
             metadata: {
               openclaw: {
                 afterSequence: invalidCursor,
