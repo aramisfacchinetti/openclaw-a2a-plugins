@@ -44,3 +44,23 @@ test('SKILL.md teaches target_alias and task_handle preference', () => {
   assert.ok(content.includes('target_alias'))
   assert.ok(content.includes('task_handle'))
 })
+
+test('SKILL.md requires both outbound enable flags', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  const closingIndex = content.indexOf('\n---\n', 4)
+  assert.ok(closingIndex > 0, 'must have closing frontmatter delimiter')
+
+  const frontmatter = content.slice(4, closingIndex)
+  const metadataLine = frontmatter
+    .split('\n')
+    .find((line) => line.startsWith('metadata: '))
+
+  assert.ok(metadataLine, 'frontmatter must include metadata')
+
+  const metadata = JSON.parse(metadataLine.slice('metadata: '.length))
+
+  assert.deepEqual(metadata.openclaw.requires.config, [
+    'plugins.entries.openclaw-a2a-outbound.enabled',
+    'plugins.entries.openclaw-a2a-outbound.config.enabled',
+  ])
+})
