@@ -17,20 +17,54 @@ import {
   waitFor,
 } from "./runtime-harness.js";
 
+type StreamEvent = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message;
+
 function isTask(value: Message | Task): value is Task {
   return value.kind === "task";
 }
 
-function isStatusUpdate(
-  value: Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-): value is TaskStatusUpdateEvent {
+function isMessage(value: StreamEvent): value is Message {
+  return value.kind === "message";
+}
+
+function isStatusUpdate(value: StreamEvent): value is TaskStatusUpdateEvent {
   return value.kind === "status-update";
 }
 
-function isArtifactUpdate(
-  value: Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-): value is TaskArtifactUpdateEvent {
+function isArtifactUpdate(value: StreamEvent): value is TaskArtifactUpdateEvent {
   return value.kind === "artifact-update";
+}
+
+function getArtifactText(event: TaskArtifactUpdateEvent): string | undefined {
+  const textPart = event.artifact.parts.find((part) => part.kind === "text");
+  return textPart?.kind === "text" ? textPart.text : undefined;
+}
+
+function getArtifactData(
+  event: TaskArtifactUpdateEvent,
+): Record<string, unknown> | undefined {
+  const dataPart = event.artifact.parts.find((part) => part.kind === "data");
+  return dataPart?.kind === "data"
+    ? (dataPart.data as Record<string, unknown>)
+    : undefined;
+}
+
+function getArtifactUpdates(
+  events: readonly StreamEvent[],
+  artifactId: string,
+): TaskArtifactUpdateEvent[] {
+  return events.filter(
+    (event): event is TaskArtifactUpdateEvent =>
+      isArtifactUpdate(event) && event.artifact.artifactId === artifactId,
+  );
+}
+
+function getStatusSequence(
+  events: readonly StreamEvent[],
+): Array<[TaskStatusUpdateEvent["status"]["state"], boolean]> {
+  return events
+    .filter(isStatusUpdate)
+    .map((event) => [event.status.state, event.final]);
 }
 
 function createServerHarness(
@@ -45,6 +79,20 @@ function createServerHarness(
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
   });
+}
+
+async function collectStream(
+  server: ReturnType<typeof createServerHarness>,
+): Promise<StreamEvent[]> {
+  const streamed: StreamEvent[] = [];
+
+  for await (const event of server.requestHandler.sendMessageStream({
+    message: createUserMessage(),
+  })) {
+    streamed.push(event);
+  }
+
+  return streamed;
 }
 
 test("sendMessage returns a direct Message for terminal runs", async () => {
@@ -175,6 +223,27 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
       stream: "assistant",
       data: { text: "Collected context" },
     });
+    emit({
+      runId: "run-task",
+      stream: "tool",
+      data: {
+        phase: "start",
+        name: "search",
+        toolCallId: "tool/search:1",
+        args: { query: "weather" },
+      },
+    });
+    emit({
+      runId: "run-task",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "search",
+        toolCallId: "tool/search:1",
+        isError: false,
+        result: { hits: 3 },
+      },
+    });
     await params.dispatcherOptions.deliver(
       { text: "Fetched tool summary" },
       { kind: "tool" },
@@ -208,9 +277,10 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   assert.ok(result.artifacts?.some((artifact) => artifact.artifactId === "assistant-output"));
   assert.ok(result.artifacts?.some((artifact) => artifact.artifactId.startsWith("tool-result-")));
 
-  const persisted = await server.requestHandler.getTask(
-    { id: result.id, historyLength: 10 },
-  );
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
 
   assert.equal(persisted.status.state, "completed");
   assert.ok(persisted.history?.some((message) => message.role === "user"));
@@ -219,25 +289,347 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   );
 });
 
-test("sendMessageStream yields task creation, intermediate updates, and a final status", async () => {
+test("sendMessageStream stays task-first for text progress runs", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
-    params.replyOptions?.onAgentRunStart?.("run-stream");
+    params.replyOptions?.onAgentRunStart?.("run-stream-fast");
     emit({
-      runId: "run-stream",
+      runId: "run-stream-fast",
       stream: "lifecycle",
       data: { phase: "start" },
     });
     emit({
-      runId: "run-stream",
+      runId: "run-stream-fast",
       stream: "assistant",
-      data: { text: "Working" },
+      data: { delta: "Working..." },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Working..." },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-fast",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const taskIndex = streamed.findIndex((event) => event.kind === "task");
+  const firstAssistantIndex = streamed.findIndex(
+    (event) =>
+      isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output",
+  );
+  const completedIndex = streamed.findIndex(
+    (event) =>
+      isStatusUpdate(event) &&
+      event.status.state === "completed" &&
+      event.final === true,
+  );
+
+  assert.equal(streamed.some(isMessage), false);
+  assert.equal(taskIndex, 0);
+  assert.deepEqual(getStatusSequence(streamed), [
+    ["submitted", false],
+    ["working", false],
+    ["completed", true],
+  ]);
+  assert.ok(assistantUpdates.length >= 1);
+  assert.ok(firstAssistantIndex > taskIndex);
+  assert.ok(completedIndex > firstAssistantIndex);
+});
+
+test("sendMessageStream stays task-based when only the final reply arrives", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-final-only");
+    emit({
+      runId: "run-stream-final-only",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Final only answer" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-final-only",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const completedIndex = streamed.findIndex(
+    (event) =>
+      isStatusUpdate(event) &&
+      event.status.state === "completed" &&
+      event.final === true,
+  );
+
+  assert.equal(streamed.some(isMessage), false);
+  assert.equal(streamed[0]?.kind, "task");
+  assert.deepEqual(getStatusSequence(streamed), [
+    ["submitted", false],
+    ["working", false],
+    ["completed", true],
+  ]);
+  assert.equal(assistantUpdates.length, 1);
+  assert.equal(getArtifactText(assistantUpdates[0]), "Final only answer");
+  assert.ok(streamed.indexOf(assistantUpdates[0]) < completedIndex);
+});
+
+test("sendMessageStream reconciles assistant deltas against the authoritative final reply", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-reconcile");
+    emit({
+      runId: "run-stream-reconcile",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-reconcile",
+      stream: "assistant",
+      data: { delta: "Draft reply" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Authoritative final reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-reconcile",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+  const lastAssistantUpdate = assistantUpdates.at(-1);
+  const completedIndex = streamed.findIndex(
+    (event) =>
+      isStatusUpdate(event) &&
+      event.status.state === "completed" &&
+      event.final === true,
+  );
+
+  assert.ok(lastAssistantUpdate);
+  assert.equal(getArtifactText(lastAssistantUpdate), "Authoritative final reply");
+  assert.equal(lastAssistantUpdate.append, undefined);
+  assert.ok(streamed.indexOf(lastAssistantUpdate) < completedIndex);
+});
+
+test("sendMessageStream appends assistant-output for cumulative text snapshots", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-cumulative");
+    emit({
+      runId: "run-stream-cumulative",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-cumulative",
+      stream: "assistant",
+      data: { text: "Alpha" },
+    });
+    emit({
+      runId: "run-stream-cumulative",
+      stream: "assistant",
+      data: { text: "Alpha Beta" },
+    });
+    emit({
+      runId: "run-stream-cumulative",
+      stream: "assistant",
+      data: { text: "Alpha Beta Gamma" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Alpha Beta Gamma" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-cumulative",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+
+  assert.equal(assistantUpdates.length, 3);
+  assert.equal(getArtifactText(assistantUpdates[0]), "Alpha");
+  assert.equal(assistantUpdates[0].append, undefined);
+  assert.equal(getArtifactText(assistantUpdates[1]), " Beta");
+  assert.equal(assistantUpdates[1].append, true);
+  assert.equal(getArtifactText(assistantUpdates[2]), " Gamma");
+  assert.equal(assistantUpdates[2].append, true);
+});
+
+test("sendMessageStream emits stable live tool progress artifacts", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-tool-progress");
+    emit({
+      runId: "run-stream-tool-progress",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-tool-progress",
+      stream: "tool",
+      data: {
+        phase: "start",
+        name: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        args: { city: "Zurich" },
+      },
+    });
+    emit({
+      runId: "run-stream-tool-progress",
+      stream: "tool",
+      data: {
+        phase: "update",
+        name: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        partialResult: { percent: 50 },
+      },
+    });
+    emit({
+      runId: "run-stream-tool-progress",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        isError: false,
+        result: { temperatureC: 9 },
+      },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Weather fetched" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-tool-progress",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const toolProgressUpdates = getArtifactUpdates(
+    streamed,
+    "tool-progress-tool_weather_1",
+  );
+
+  assert.equal(toolProgressUpdates.length, 3);
+  assert.deepEqual(
+    toolProgressUpdates.map((event) => getArtifactText(event)),
+    [
+      "Started tool fetch-weather",
+      "Updated tool fetch-weather",
+      "Completed tool fetch-weather",
+    ],
+  );
+  assert.deepEqual(
+    toolProgressUpdates.map((event) => event.artifact.metadata),
+    [
+      {
+        source: "tool",
+        phase: "start",
+        toolName: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        sequence: toolProgressUpdates[0].artifact.metadata?.sequence,
+      },
+      {
+        source: "tool",
+        phase: "update",
+        toolName: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        sequence: toolProgressUpdates[1].artifact.metadata?.sequence,
+      },
+      {
+        source: "tool",
+        phase: "result",
+        toolName: "fetch-weather",
+        toolCallId: "tool:weather/1",
+        sequence: toolProgressUpdates[2].artifact.metadata?.sequence,
+      },
+    ],
+  );
+  assert.deepEqual(
+    toolProgressUpdates.map((event) => event.append),
+    [undefined, undefined, undefined],
+  );
+  assert.deepEqual(
+    toolProgressUpdates.map((event) => event.lastChunk),
+    [false, false, true],
+  );
+  assert.deepEqual(getArtifactData(toolProgressUpdates[0]), {
+    phase: "start",
+    name: "fetch-weather",
+    toolCallId: "tool:weather/1",
+    args: { city: "Zurich" },
+  });
+  assert.deepEqual(getArtifactData(toolProgressUpdates[1]), {
+    phase: "update",
+    name: "fetch-weather",
+    toolCallId: "tool:weather/1",
+    partialResult: { percent: 50 },
+  });
+  assert.deepEqual(getArtifactData(toolProgressUpdates[2]), {
+    phase: "result",
+    name: "fetch-weather",
+    toolCallId: "tool:weather/1",
+    isError: false,
+    result: { temperatureC: 9 },
+  });
+});
+
+test("sendMessageStream emits both live tool progress and summarized tool results", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-mixed");
+    emit({
+      runId: "run-stream-mixed",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-mixed",
+      stream: "tool",
+      data: {
+        phase: "start",
+        name: "search",
+        toolCallId: "search/1",
+        args: { query: "cafes" },
+      },
+    });
+    emit({
+      runId: "run-stream-mixed",
+      stream: "tool",
+      data: {
+        phase: "update",
+        name: "search",
+        toolCallId: "search/1",
+        partialResult: { hits: 1 },
+      },
+    });
+    emit({
+      runId: "run-stream-mixed",
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: "search",
+        toolCallId: "search/1",
+        isError: false,
+        result: { hits: 2 },
+      },
     });
     await params.dispatcherOptions.deliver(
       { text: "Visible tool output" },
       { kind: "tool" },
     );
     emit({
-      runId: "run-stream",
+      runId: "run-stream-mixed",
       stream: "assistant",
       data: { text: "Working\nDone" },
     });
@@ -246,30 +638,27 @@ test("sendMessageStream yields task creation, intermediate updates, and a final 
       { kind: "final" },
     );
     emit({
-      runId: "run-stream",
+      runId: "run-stream-mixed",
       stream: "lifecycle",
       data: { phase: "end" },
     });
   });
 
-  const streamed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message> = [];
+  const streamed = await collectStream(server);
 
-  for await (const event of server.requestHandler.sendMessageStream({
-    message: createUserMessage(),
-  })) {
-    streamed.push(event);
-  }
-
-  assert.ok(streamed.some((event) => event.kind === "task"));
-  assert.ok(streamed.some((event) => isArtifactUpdate(event)));
+  assert.equal(
+    getArtifactUpdates(streamed, "tool-progress-search_1").length,
+    3,
+  );
   assert.ok(
     streamed.some(
       (event) =>
-        isStatusUpdate(event) &&
-        event.status.state === "completed" &&
-        event.final === true,
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId.startsWith("tool-result-") &&
+        getArtifactText(event) === "Visible tool output",
     ),
   );
+  assert.ok(getArtifactUpdates(streamed, "assistant-output").length >= 1);
 });
 
 test("cancelTask aborts a live promoted execution and persists the canceled task", async () => {
@@ -319,7 +708,7 @@ test("cancelTask aborts a live promoted execution and persists the canceled task
   assert.equal(persisted.status.state, "canceled");
 });
 
-test("resubscribe works for a live in-process task and fails cleanly after process loss", async () => {
+test("resubscribe works for a live in-process task and replays new progress artifacts", async () => {
   let resumeLiveRun: (() => void) | undefined;
   const tempDir = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-"));
   const taskFile = join(tempDir, "tasks.json");
@@ -333,18 +722,39 @@ test("resubscribe works for a live in-process task and fails cleanly after proce
           stream: "lifecycle",
           data: { phase: "start" },
         });
-        await params.dispatcherOptions.deliver(
-          { text: "Tool summary" },
-          { kind: "tool" },
-        );
         await new Promise<void>((resolve) => {
           resumeLiveRun = resolve;
         });
         emit({
           runId: "run-live",
-          stream: "assistant",
-          data: { text: "Recovered answer" },
+          stream: "tool",
+          data: {
+            phase: "start",
+            name: "search",
+            toolCallId: "search/live:1",
+            args: { query: "pizza" },
+          },
         });
+        emit({
+          runId: "run-live",
+          stream: "assistant",
+          data: { delta: "Recovered answer" },
+        });
+        emit({
+          runId: "run-live",
+          stream: "tool",
+          data: {
+            phase: "result",
+            name: "search",
+            toolCallId: "search/live:1",
+            isError: false,
+            result: { hits: 4 },
+          },
+        });
+        await params.dispatcherOptions.deliver(
+          { text: "Tool summary" },
+          { kind: "tool" },
+        );
         await params.dispatcherOptions.deliver(
           { text: "Recovered answer" },
           { kind: "final" },
@@ -421,6 +831,20 @@ test("resubscribe works for a live in-process task and fails cleanly after proce
       return persisted.status.state === "completed";
     });
 
+    assert.ok(
+      resubscribed.some(
+        (event) =>
+          isArtifactUpdate(event) &&
+          event.artifact.artifactId === "tool-progress-search_live_1",
+      ),
+    );
+    assert.ok(
+      resubscribed.some(
+        (event) =>
+          isArtifactUpdate(event) &&
+          event.artifact.artifactId === "assistant-output",
+      ),
+    );
     assert.ok(
       resubscribed.some(
         (event) =>

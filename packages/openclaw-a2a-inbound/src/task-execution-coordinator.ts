@@ -9,15 +9,18 @@ import {
   createReplyArtifactUpdate,
   createTaskSnapshot,
   createTaskStatusUpdate,
+  createToolProgressArtifactUpdate,
   hasReplyPayloadExtras,
   normalizeReplyPayload,
   summarizeBufferedReplies,
   type NormalizedReplyPayload,
+  type ToolProgressPhase,
 } from "./response-mapping.js";
 
 type JsonRecord = Record<string, unknown>;
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
+type AssistantArtifactMode = "auto" | "append" | "replace";
 
 export interface OpenClawExecutionEvent {
   runId: string;
@@ -28,11 +31,14 @@ export interface OpenClawExecutionEvent {
 type AssistantStage = {
   kind: "assistant";
   blockTexts: string[];
+  streamedText?: string;
   finalText?: string;
   mediaUrls: string[];
   channelData?: JsonRecord;
   isError: boolean;
   finalCount: number;
+  publishedText?: string;
+  publishedExtrasKey?: string;
 };
 
 type ToolStage = {
@@ -61,13 +67,55 @@ function stringifyPayloadExtras(payload: NormalizedReplyPayload): string {
   });
 }
 
+function pickAssistantText(...candidates: Array<string | undefined>): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function readOptionalText(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? value
+    : [];
+}
+
+function readToolProgressPhase(value: unknown): ToolProgressPhase | undefined {
+  return value === "start" || value === "update" || value === "result"
+    ? value
+    : undefined;
+}
+
+function readToolName(data: Record<string, unknown>): string | undefined {
+  const rawName =
+    typeof data.toolName === "string"
+      ? data.toolName
+      : typeof data.name === "string"
+        ? data.name
+        : undefined;
+
+  return rawName && rawName.trim().length > 0 ? rawName.trim() : undefined;
+}
+
+function readToolCallId(data: Record<string, unknown>): string | undefined {
+  return typeof data.toolCallId === "string" && data.toolCallId.trim().length > 0
+    ? data.toolCallId.trim()
+    : undefined;
+}
+
 export class A2ATaskExecutionCoordinator {
   private runId?: string;
   private readonly abortController = new AbortController();
   private readonly responseMode: A2AInitialResponseMode;
   private readonly stagedOutputs: StagedOutput[] = [];
   private assistantStage?: AssistantStage;
-  private assistantStreamText?: string;
   private assistantMessageStarts = 0;
   private artifactSequence = 0;
   private toolArtifactCount = 0;
@@ -79,8 +127,6 @@ export class A2ATaskExecutionCoordinator {
   private cancelRequested = false;
   private lifecyclePhase?: LifecyclePhase;
   private lifecycleError?: string;
-  private publishedAssistantText?: string;
-  private publishedAssistantExtrasKey?: string;
   private initialResponsePromotionTimer?: ReturnType<typeof setTimeout>;
   private executionSettled = false;
 
@@ -101,6 +147,11 @@ export class A2ATaskExecutionCoordinator {
   prepareForExecution(): void {
     if (this.requestContext.task) {
       this.promoteToTask("continuing existing task");
+      return;
+    }
+
+    if (this.responseMode === "streaming") {
+      this.promoteToTask("streaming mode always starts as a task");
     }
   }
 
@@ -134,6 +185,11 @@ export class A2ATaskExecutionCoordinator {
 
     if (event.stream === "assistant") {
       this.handleAssistantEvent(event.data);
+      return;
+    }
+
+    if (event.stream === "tool") {
+      this.handleToolEvent(event.data);
     }
   }
 
@@ -141,12 +197,11 @@ export class A2ATaskExecutionCoordinator {
     const normalized = normalizeReplyPayload(payload);
 
     if (kind === "tool") {
-      this.stagedOutputs.push({
-        kind: "tool",
-        payload: normalized,
-      });
-
       if (!this.promoted) {
+        this.stagedOutputs.push({
+          kind: "tool",
+          payload: normalized,
+        });
         this.promoteToTask("tool result summaries require task artifacts");
       } else {
         this.publishToolArtifact(normalized);
@@ -157,15 +212,14 @@ export class A2ATaskExecutionCoordinator {
 
     const assistantStage = this.ensureAssistantStage();
 
-    if (normalized.text) {
-      if (kind === "final") {
-        assistantStage.finalCount += 1;
-        assistantStage.finalText = normalized.text;
-      } else {
-        assistantStage.blockTexts.push(normalized.text);
-      }
-    } else if (kind === "final") {
+    if (kind === "final") {
       assistantStage.finalCount += 1;
+
+      if (normalized.text) {
+        assistantStage.finalText = normalized.text;
+      }
+    } else if (normalized.text) {
+      assistantStage.blockTexts.push(normalized.text);
     }
 
     assistantStage.mediaUrls = mergeMediaUrls(
@@ -189,7 +243,10 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    this.publishAssistantArtifact(kind === "final");
+    this.publishAssistantArtifact({
+      lastChunk: false,
+      preferTerminalText: kind === "final",
+    });
   }
 
   async finalizeSuccess(): Promise<void> {
@@ -211,7 +268,10 @@ export class A2ATaskExecutionCoordinator {
 
     if (this.lifecycleError) {
       this.promoteToTask("lifecycle error requires failed task");
-      this.publishAssistantArtifact(true);
+      this.publishAssistantArtifact({
+        lastChunk: true,
+        preferTerminalText: true,
+      });
       this.publishFinalStatus("failed", {
         final: true,
         messageText: this.lifecycleError,
@@ -220,7 +280,7 @@ export class A2ATaskExecutionCoordinator {
     }
 
     if (this.canReturnDirectMessage()) {
-      const directText = this.resolveAssistantPayload().text;
+      const directText = this.resolveAssistantPayload(true).text;
 
       if (directText) {
         this.eventBus.publish(
@@ -235,7 +295,10 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.promoteToTask("terminal response requires task state");
-    const publishedAssistant = this.publishAssistantArtifact(true);
+    const publishedAssistant = this.publishAssistantArtifact({
+      lastChunk: true,
+      preferTerminalText: true,
+    });
 
     this.publishFinalStatus("completed", {
       final: true,
@@ -272,7 +335,10 @@ export class A2ATaskExecutionCoordinator {
 
     this.lifecycleError = this.lifecycleError ?? errorText;
     this.promoteToTask("execution error requires failed task");
-    this.publishAssistantArtifact(true);
+    this.publishAssistantArtifact({
+      lastChunk: true,
+      preferTerminalText: true,
+    });
     this.publishFinalStatus("failed", {
       final: true,
       messageText: this.lifecycleError,
@@ -298,7 +364,7 @@ export class A2ATaskExecutionCoordinator {
   }
 
   private canReturnDirectMessage(): boolean {
-    if (this.requestContext.task) {
+    if (this.responseMode === "streaming" || this.requestContext.task) {
       return false;
     }
 
@@ -314,7 +380,7 @@ export class A2ATaskExecutionCoordinator {
       return false;
     }
 
-    const payload = this.resolveAssistantPayload();
+    const payload = this.resolveAssistantPayload(true);
 
     if (!payload.text || hasReplyPayloadExtras(payload)) {
       return false;
@@ -349,23 +415,39 @@ export class A2ATaskExecutionCoordinator {
   }
 
   private handleAssistantEvent(data: Record<string, unknown>): void {
-    const text =
-      typeof data.text === "string" && data.text.trim().length > 0
-        ? data.text.trim()
-        : undefined;
-    const mediaUrls =
-      Array.isArray(data.mediaUrls) && data.mediaUrls.every((value) => typeof value === "string")
-        ? data.mediaUrls
-        : [];
+    const text = readOptionalText(data.text);
+    const delta = readOptionalText(data.delta);
+    const mediaUrls = readStringArray(data.mediaUrls);
 
-    if (!text && mediaUrls.length === 0) {
+    if (!text && !delta && mediaUrls.length === 0) {
       return;
     }
 
     const assistantStage = this.ensureAssistantStage();
+    const previousStreamedText = assistantStage.streamedText ?? "";
 
-    if (text) {
-      this.assistantStreamText = text;
+    let nextStreamedText = assistantStage.streamedText;
+    let mode: AssistantArtifactMode = "replace";
+    let appendText: string | undefined;
+
+    if (typeof delta === "string") {
+      nextStreamedText = `${previousStreamedText}${delta}`;
+      mode = "append";
+      appendText = delta;
+    } else if (typeof text === "string") {
+      nextStreamedText = text;
+
+      if (
+        previousStreamedText.length > 0 &&
+        text.startsWith(previousStreamedText)
+      ) {
+        mode = "append";
+        appendText = text.slice(previousStreamedText.length);
+      }
+    }
+
+    if (typeof nextStreamedText === "string") {
+      assistantStage.streamedText = nextStreamedText;
     }
 
     assistantStage.mediaUrls = mergeMediaUrls(assistantStage.mediaUrls, mediaUrls);
@@ -376,8 +458,44 @@ export class A2ATaskExecutionCoordinator {
     }
 
     if (this.promoted) {
-      this.publishAssistantArtifact(false);
+      this.publishAssistantArtifact({
+        lastChunk: false,
+        preferTerminalText: false,
+        mode,
+        appendText,
+      });
     }
+  }
+
+  private handleToolEvent(data: Record<string, unknown>): void {
+    const phase = readToolProgressPhase(data.phase);
+    const toolName = readToolName(data);
+    const toolCallId = readToolCallId(data);
+
+    if (!phase || !toolName || !toolCallId) {
+      return;
+    }
+
+    if (!this.promoted) {
+      this.promoteToTask("tool progress requires task artifacts");
+    }
+
+    if (!this.promoted) {
+      return;
+    }
+
+    this.eventBus.publish(
+      createToolProgressArtifactUpdate({
+        taskId: this.requestContext.taskId,
+        contextId: this.requestContext.contextId,
+        toolName,
+        toolCallId,
+        phase,
+        payload: data,
+        sequence: this.nextArtifactSequence(),
+        isError: phase === "result" && data.isError === true,
+      }),
+    );
   }
 
   private ensureAssistantStage(): AssistantStage {
@@ -392,23 +510,33 @@ export class A2ATaskExecutionCoordinator {
       isError: false,
       finalCount: 0,
     };
-    this.stagedOutputs.push(this.assistantStage);
+
+    if (!this.promoted) {
+      this.stagedOutputs.push(this.assistantStage);
+    }
+
     return this.assistantStage;
   }
 
-  private resolveAssistantPayload(): NormalizedReplyPayload {
-    const text =
-      this.assistantStreamText && this.assistantStreamText.trim().length > 0
-        ? this.assistantStreamText.trim()
-        : this.assistantStage?.finalText && this.assistantStage.finalText.trim().length > 0
-          ? this.assistantStage.finalText.trim()
-          : summarizeBufferedReplies(this.assistantStage?.blockTexts ?? []);
+  private resolveAssistantPayload(preferTerminalText: boolean): NormalizedReplyPayload {
+    const assistantStage = this.assistantStage;
+    const text = preferTerminalText
+      ? pickAssistantText(
+          assistantStage?.finalText,
+          assistantStage?.streamedText,
+          summarizeBufferedReplies(assistantStage?.blockTexts ?? []),
+        )
+      : pickAssistantText(
+          assistantStage?.streamedText,
+          assistantStage?.finalText,
+          summarizeBufferedReplies(assistantStage?.blockTexts ?? []),
+        );
 
     return {
       text,
-      mediaUrls: this.assistantStage?.mediaUrls ?? [],
-      channelData: this.assistantStage?.channelData,
-      isError: this.assistantStage?.isError ?? false,
+      mediaUrls: assistantStage?.mediaUrls ?? [],
+      channelData: assistantStage?.channelData,
+      isError: assistantStage?.isError ?? false,
     };
   }
 
@@ -551,31 +679,46 @@ export class A2ATaskExecutionCoordinator {
       }
     }
 
-    this.publishAssistantArtifact(false);
+    this.publishAssistantArtifact({
+      lastChunk: false,
+      preferTerminalText: true,
+    });
     this.stagedOutputs.length = 0;
   }
 
-  private publishAssistantArtifact(lastChunk: boolean): boolean {
+  private publishAssistantArtifact(params: {
+    lastChunk: boolean;
+    preferTerminalText: boolean;
+    mode?: AssistantArtifactMode;
+    appendText?: string;
+  }): boolean {
     if (!this.promoted) {
       return false;
     }
 
-    const payload = this.resolveAssistantPayload();
+    const payload = this.resolveAssistantPayload(params.preferTerminalText);
 
     if (!payload.text && !hasReplyPayloadExtras(payload)) {
       return false;
     }
 
+    const assistantStage = this.ensureAssistantStage();
     const nextText = payload.text ?? "";
     const nextExtrasKey = stringifyPayloadExtras(payload);
+    const publishedText = assistantStage.publishedText;
+    const publishedExtrasKey = assistantStage.publishedExtrasKey;
+    const mode = params.mode ?? "auto";
+
     const canAppend =
-      typeof this.publishedAssistantText === "string" &&
-      nextText.startsWith(this.publishedAssistantText) &&
-      nextExtrasKey === this.publishedAssistantExtrasKey;
+      mode !== "replace" &&
+      typeof publishedText === "string" &&
+      nextText.startsWith(publishedText) &&
+      nextExtrasKey === publishedExtrasKey &&
+      (mode !== "append" ||
+        nextText === `${publishedText}${params.appendText ?? nextText.slice(publishedText.length)}`);
 
     if (canAppend) {
-      const previousText = this.publishedAssistantText ?? "";
-      const delta = nextText.slice(previousText.length);
+      const delta = params.appendText ?? nextText.slice(publishedText.length);
 
       if (delta.length > 0) {
         this.eventBus.publish(
@@ -590,11 +733,16 @@ export class A2ATaskExecutionCoordinator {
               text: delta,
             },
             append: true,
-            lastChunk,
+            lastChunk: params.lastChunk,
           }),
         );
       }
-    } else {
+    } else if (
+      mode === "replace" ||
+      typeof publishedText !== "string" ||
+      nextText !== publishedText ||
+      nextExtrasKey !== publishedExtrasKey
+    ) {
       this.eventBus.publish(
         createReplyArtifactUpdate({
           taskId: this.requestContext.taskId,
@@ -603,13 +751,13 @@ export class A2ATaskExecutionCoordinator {
           name: "assistant",
           sequence: this.nextArtifactSequence(),
           payload,
-          lastChunk,
+          lastChunk: params.lastChunk,
         }),
       );
     }
 
-    this.publishedAssistantText = nextText;
-    this.publishedAssistantExtrasKey = nextExtrasKey;
+    assistantStage.publishedText = nextText;
+    assistantStage.publishedExtrasKey = nextExtrasKey;
     return true;
   }
 
@@ -635,7 +783,7 @@ export class A2ATaskExecutionCoordinator {
 
   private scheduleInitialResponsePromotion(): void {
     if (
-      this.responseMode === "blocking" ||
+      this.responseMode !== "non_blocking" ||
       this.promoted ||
       this.finalPublished ||
       this.executionSettled ||

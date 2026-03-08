@@ -9,7 +9,15 @@ import type {
 } from "@a2a-js/sdk";
 
 type JsonRecord = Record<string, unknown>;
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonRecord
+  | JsonValue[];
 type TaskState = Task["status"]["state"];
+export type ToolProgressPhase = "start" | "update" | "result";
 
 export interface NormalizedReplyPayload {
   text?: string;
@@ -20,6 +28,64 @@ export interface NormalizedReplyPayload {
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sanitizeJsonValue(value: unknown): JsonValue | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+
+  if (Array.isArray(value)) {
+    const sanitizedItems = value.flatMap((item) => {
+      const sanitized = sanitizeJsonValue(item);
+      return typeof sanitized === "undefined" ? [] : [sanitized];
+    });
+    return sanitizedItems;
+  }
+
+  if (isRecord(value)) {
+    const sanitized: JsonRecord = {};
+
+    for (const [key, entry] of Object.entries(value)) {
+      const nextValue = sanitizeJsonValue(entry);
+
+      if (typeof nextValue !== "undefined") {
+        sanitized[key] = nextValue;
+      }
+    }
+
+    return sanitized;
+  }
+
+  return String(value);
+}
+
+function sanitizeJsonRecord(value: unknown): JsonRecord | undefined {
+  const sanitized = sanitizeJsonValue(value);
+
+  if (isRecord(sanitized)) {
+    return sanitized;
+  }
+
+  if (typeof sanitized === "undefined") {
+    return undefined;
+  }
+
+  return {
+    value: sanitized,
+  };
 }
 
 export function collectReplyText(chunks: string[], payload: unknown): void {
@@ -197,6 +263,47 @@ export function createReplyArtifactUpdate(params: {
     },
     append: params.append,
     lastChunk: params.lastChunk,
+  });
+}
+
+export function sanitizeToolCallId(toolCallId: string): string {
+  return toolCallId.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+export function createToolProgressArtifactUpdate(params: {
+  taskId: string;
+  contextId: string;
+  toolName: string;
+  toolCallId: string;
+  phase: ToolProgressPhase;
+  payload: unknown;
+  sequence: number;
+  isError?: boolean;
+}): TaskArtifactUpdateEvent {
+  const text =
+    params.phase === "start"
+      ? `Started tool ${params.toolName}`
+      : params.phase === "update"
+        ? `Updated tool ${params.toolName}`
+        : params.isError
+          ? `Tool ${params.toolName} failed`
+          : `Completed tool ${params.toolName}`;
+
+  return createArtifactUpdate({
+    taskId: params.taskId,
+    contextId: params.contextId,
+    artifactId: `tool-progress-${sanitizeToolCallId(params.toolCallId)}`,
+    name: `${params.toolName} progress`,
+    text,
+    data: sanitizeJsonRecord(params.payload) ?? {},
+    metadata: {
+      source: "tool",
+      phase: params.phase,
+      toolName: params.toolName,
+      toolCallId: params.toolCallId,
+      sequence: params.sequence,
+    },
+    lastChunk: params.phase === "result",
   });
 }
 
