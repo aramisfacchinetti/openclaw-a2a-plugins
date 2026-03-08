@@ -3,6 +3,7 @@ import type { RequestContext } from "@a2a-js/sdk/server";
 
 type OpenClawRequestContext = RequestContext & {
   openclawOriginalUserMessage?: Message;
+  openclawAcceptedOutputModes?: string[];
 };
 
 export function attachOriginalUserMessage(
@@ -21,4 +22,23 @@ export function readOriginalUserMessage(
     (requestContext as OpenClawRequestContext).openclawOriginalUserMessage ??
       requestContext.userMessage,
   );
+}
+
+export function attachAcceptedOutputModes(
+  requestContext: RequestContext,
+  acceptedOutputModes: readonly string[],
+): RequestContext {
+  (requestContext as OpenClawRequestContext).openclawAcceptedOutputModes = [
+    ...acceptedOutputModes,
+  ];
+  return requestContext;
+}
+
+export function readAcceptedOutputModes(
+  requestContext: RequestContext,
+): string[] | undefined {
+  const acceptedOutputModes =
+    (requestContext as OpenClawRequestContext).openclawAcceptedOutputModes;
+
+  return acceptedOutputModes ? [...acceptedOutputModes] : undefined;
 }

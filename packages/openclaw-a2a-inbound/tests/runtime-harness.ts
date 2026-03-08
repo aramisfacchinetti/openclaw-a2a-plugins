@@ -262,7 +262,11 @@ export function createTestAccount(
       "application/json",
       "application/octet-stream",
     ],
-    defaultOutputModes: ["text"],
+    defaultOutputModes: [
+      "text/plain",
+      "application/json",
+      "application/octet-stream",
+    ],
     skills: [
       {
         id: "chat",

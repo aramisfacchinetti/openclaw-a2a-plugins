@@ -3,6 +3,7 @@ import type {
   ExecutionEventBus,
   RequestContext,
 } from "@a2a-js/sdk/server";
+import { A2AError } from "@a2a-js/sdk/server";
 import {
   createInboundEnvelopeBuilder,
   type ChannelGatewayContext,
@@ -227,6 +228,10 @@ export class OpenClawA2AExecutor implements AgentExecutor {
 
       await coordinator.finalizeSuccess();
     } catch (error) {
+      if (error instanceof A2AError && error.code === -32005) {
+        throw error;
+      }
+
       log(this.options.log, "error", "a2a.inbound.execute.error", {
         accountId: this.options.accountId,
         error: String(error),

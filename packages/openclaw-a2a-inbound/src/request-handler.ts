@@ -29,8 +29,10 @@ import {
   isActiveExecutionTaskState,
   isQuiescentTaskState,
   isTerminalTaskState,
+  normalizeOutputModes,
 } from "./response-mapping.js";
 import {
+  attachAcceptedOutputModes,
   attachOriginalUserMessage,
   readOriginalUserMessage,
 } from "./request-context.js";
@@ -101,6 +103,7 @@ export class A2AInboundRequestHandler {
     private readonly liveExecutions: A2ALiveExecutionRegistry,
     private readonly streamingEnabled: boolean,
     private readonly agentExecutor: AgentExecutor,
+    private readonly defaultOutputModes: readonly string[],
   ) {}
 
   getAgentCard(): Promise<AgentCard> {
@@ -118,6 +121,7 @@ export class A2AInboundRequestHandler {
     context?: ServerCallContext,
   ): Promise<Message | Task> {
     const prepared = this.prepareParams(params);
+    const resolvedOutputModes = this.resolveAcceptedOutputModes(prepared);
     const requestId = prepared.message.messageId;
 
     if (!requestId) {
@@ -131,17 +135,21 @@ export class A2AInboundRequestHandler {
     );
 
     try {
-      const requestContext = await this.createRequestContext(prepared.message, context);
+      const requestContext = await this.createRequestContext(
+        prepared.message,
+        context,
+        resolvedOutputModes,
+      );
       const eventBus = new DefaultExecutionEventBus();
       const eventQueue = new ExecutionEventQueue(eventBus);
-
-      this.executeWithFallback(requestContext, eventBus);
+      const executionPromise = this.executeWithFallback(requestContext, eventBus);
 
       if (blocking) {
         const result = await this.processBlockingExecution({
           eventQueue,
           latestUserMessage: prepared.message,
           taskId: requestContext.taskId,
+          executionPromise,
           context,
         });
 
@@ -152,6 +160,7 @@ export class A2AInboundRequestHandler {
         eventQueue,
         latestUserMessage: prepared.message,
         taskId: requestContext.taskId,
+        executionPromise,
         context,
       });
     } finally {
@@ -174,6 +183,7 @@ export class A2AInboundRequestHandler {
     }
 
     const prepared = this.prepareParams(params);
+    const resolvedOutputModes = this.resolveAcceptedOutputModes(prepared);
     const requestId = prepared.message.messageId;
 
     if (!requestId) {
@@ -183,11 +193,14 @@ export class A2AInboundRequestHandler {
     this.liveExecutions.setRequestMode(requestId, "streaming");
 
     try {
-      const requestContext = await this.createRequestContext(prepared.message, context);
+      const requestContext = await this.createRequestContext(
+        prepared.message,
+        context,
+        resolvedOutputModes,
+      );
       const eventBus = new DefaultExecutionEventBus();
       const eventQueue = new ExecutionEventQueue(eventBus);
-
-      this.executeWithFallback(requestContext, eventBus);
+      const executionPromise = this.executeWithFallback(requestContext, eventBus);
 
       let sawDurableEvent = false;
 
@@ -201,6 +214,8 @@ export class A2AInboundRequestHandler {
 
           yield committed;
         }
+
+        await executionPromise;
       } finally {
         if (!sawDurableEvent) {
           this.taskRuntime.discardPending(requestContext.taskId);
@@ -385,10 +400,22 @@ export class A2AInboundRequestHandler {
     return params;
   }
 
+  private resolveAcceptedOutputModes(params: MessageSendParams): string[] {
+    if (
+      params.configuration &&
+      "acceptedOutputModes" in params.configuration
+    ) {
+      return normalizeOutputModes(params.configuration.acceptedOutputModes);
+    }
+
+    return [...this.defaultOutputModes];
+  }
+
   private async processBlockingExecution(params: {
     eventQueue: ExecutionEventQueue;
     latestUserMessage: Message;
     taskId: string;
+    executionPromise: Promise<void>;
     context?: ServerCallContext;
   }): Promise<Message | Task> {
     let finalMessage: Message | undefined;
@@ -407,6 +434,8 @@ export class A2AInboundRequestHandler {
           sawDurableEvent = true;
         }
       }
+
+      await params.executionPromise;
 
       if (finalMessage) {
         return finalMessage;
@@ -432,6 +461,7 @@ export class A2AInboundRequestHandler {
     eventQueue: ExecutionEventQueue;
     latestUserMessage: Message;
     taskId: string;
+    executionPromise: Promise<void>;
     context?: ServerCallContext;
   }): Promise<Message | Task> {
     return new Promise<Message | Task>((resolve, reject) => {
@@ -463,6 +493,8 @@ export class A2AInboundRequestHandler {
               settle(committed);
             }
           }
+
+          await params.executionPromise;
 
           if (settled) {
             return;
@@ -510,8 +542,12 @@ export class A2AInboundRequestHandler {
   private executeWithFallback(
     requestContext: RequestContext,
     eventBus: DefaultExecutionEventBus,
-  ): void {
-    this.agentExecutor.execute(requestContext, eventBus).catch((error) => {
+  ): Promise<void> {
+    return this.agentExecutor.execute(requestContext, eventBus).catch((error) => {
+      if (error instanceof A2AError && error.code === -32005) {
+        throw error;
+      }
+
       const errorText =
         typeof error === "object" &&
         error !== null &&
@@ -542,12 +578,14 @@ export class A2AInboundRequestHandler {
         }),
       );
       eventBus.finished();
+      throw error;
     });
   }
 
   private async createRequestContext(
     incomingMessage: Message,
     context?: ServerCallContext,
+    acceptedOutputModes: readonly string[] = [],
   ): Promise<RequestContext> {
     let task: Task | undefined;
     let referenceTasks: Task[] | undefined;
@@ -616,16 +654,19 @@ export class A2AInboundRequestHandler {
       taskId,
     };
 
-    return attachOriginalUserMessage(
-      new RequestContext(
-        messageForContext,
-        taskId,
-        contextId,
-        task,
-        referenceTasks,
-        filteredContext,
+    return attachAcceptedOutputModes(
+      attachOriginalUserMessage(
+        new RequestContext(
+          messageForContext,
+          taskId,
+          contextId,
+          task,
+          referenceTasks,
+          filteredContext,
+        ),
+        incomingMessage,
       ),
-      incomingMessage,
+      acceptedOutputModes,
     );
   }
 

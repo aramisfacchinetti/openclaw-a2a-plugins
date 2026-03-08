@@ -19,6 +19,12 @@ export const DEFAULT_INPUT_MODES = [
   "application/octet-stream",
 ] as const;
 
+export const DEFAULT_OUTPUT_MODES = [
+  "text/plain",
+  "application/json",
+  "application/octet-stream",
+] as const;
+
 export interface A2AInboundSkillConfig {
   id: string;
   name: string;
@@ -143,7 +149,7 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
           defaultOutputModes: {
             type: "array",
             items: { type: "string" },
-            default: ["text"],
+            default: [...DEFAULT_OUTPUT_MODES],
           },
           skills: {
             type: "array",
@@ -462,7 +468,7 @@ function parseAccount(
     restPath: normalizePath(record.restPath, DEFAULT_REST_PATH),
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
     defaultInputModes: readStringArray(record.defaultInputModes, DEFAULT_INPUT_MODES),
-    defaultOutputModes: readStringArray(record.defaultOutputModes, ["text"]),
+    defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
     skills: parseSkills(record.skills),
     capabilities: {
       streaming: readBoolean(

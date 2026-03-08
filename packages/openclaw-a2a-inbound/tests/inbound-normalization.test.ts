@@ -423,9 +423,15 @@ test("durable task history preserves the original mixed-part inbound message ver
       historyLength: 10,
     });
 
-    assert.deepEqual(persisted.history, [
-      JSON.parse(JSON.stringify(inboundMessage)) as Message,
-    ]);
+    assert.deepEqual(persisted.history?.[0], JSON.parse(JSON.stringify(inboundMessage)) as Message);
+    assert.equal(persisted.history?.at(-1)?.role, "agent");
+    assert.equal(
+      persisted.history?.at(-1)?.parts[0] &&
+        "text" in persisted.history.at(-1)!.parts[0]
+        ? persisted.history.at(-1)!.parts[0].text
+        : undefined,
+      "Done",
+    );
   } finally {
     if (server && result && isTask(result)) {
       await waitFor(async () => {

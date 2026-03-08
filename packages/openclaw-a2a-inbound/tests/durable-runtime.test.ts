@@ -194,6 +194,19 @@ function getStatusMessageText(
   return part?.kind === "text" ? part.text : undefined;
 }
 
+function getPartFileUris(parts: readonly Message["parts"]): string[] {
+  return parts.flatMap((part) =>
+    part.kind === "file" && "uri" in part.file ? [part.file.uri] : [],
+  );
+}
+
+function getPartData(parts: readonly Message["parts"]): Record<string, unknown> | undefined {
+  const dataPart = parts.find((part) => part.kind === "data");
+  return dataPart?.kind === "data"
+    ? (dataPart.data as Record<string, unknown>)
+    : undefined;
+}
+
 function createWorkingSeed(params?: {
   taskId?: string;
   contextId?: string;
@@ -1275,7 +1288,8 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
     assert.ok(
       replayed.some(
         (event) =>
-          isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output",
+          isArtifactUpdate(event) &&
+          event.artifact.artifactId.startsWith("assistant-output-"),
       ),
     );
     assert.ok(
@@ -1310,6 +1324,152 @@ test("cursor replay returns committed submitted, working, artifact, and final ev
       });
     }
 
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("durable runtime preserves replayable assistant file parts and filtered vendor data parts", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-durable-parts-"));
+  let server: ReturnType<typeof createServerHarness> | undefined;
+  let result: StreamEvent | undefined;
+
+  try {
+    server = createServerHarness(
+      async ({ params, emit }) => {
+        params.replyOptions?.onAgentRunStart?.("run-durable-parts");
+        emit({
+          runId: "run-durable-parts",
+          stream: "lifecycle",
+          data: { phase: "start" },
+        });
+        await params.dispatcherOptions.deliver(
+          {
+            text: "Filtered text",
+            mediaUrl: "https://example.com/durable.pdf",
+            channelData: {
+              source: "durable",
+            },
+          },
+          { kind: "final" },
+        );
+        emit({
+          runId: "run-durable-parts",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+      },
+      {
+        taskStore: {
+          kind: "json-file",
+          path: rootPath,
+        },
+      },
+    );
+
+    result = await server.requestHandler.sendMessage({
+      message: createUserMessage(),
+      configuration: {
+        blocking: false,
+        acceptedOutputModes: [
+          "application/json",
+          "application/octet-stream",
+        ],
+      },
+    });
+
+    assert.equal(isTask(result), true);
+    if (!isTask(result)) {
+      assert.fail("expected task result");
+    }
+
+    await waitFor(async () => {
+      const snapshot = await server!.requestHandler.getTask({
+        id: result.id,
+        historyLength: 10,
+      });
+
+      return snapshot.status.state === "completed";
+    });
+
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+    const assistantArtifact = persisted.artifacts?.find(
+      (artifact) => artifact.artifactId === "assistant-output-0001",
+    );
+
+    assert.ok(assistantArtifact);
+    assert.deepEqual(
+      assistantArtifact?.parts.map((part) => part.kind),
+      ["file", "data"],
+    );
+    assert.deepEqual(
+      getPartFileUris(assistantArtifact?.parts ?? []),
+      ["https://example.com/durable.pdf"],
+    );
+    assert.deepEqual(getPartData(assistantArtifact?.parts ?? []), {
+      openclaw: {
+        reply: {
+          channelData: {
+            source: "durable",
+          },
+        },
+      },
+    });
+    assert.deepEqual(
+      persisted.status.message?.parts.map((part) => part.kind),
+      ["file", "data"],
+    );
+
+    const replayed: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+
+    for await (const event of server.requestHandler.resubscribe({
+      id: result.id,
+      metadata: {
+        openclaw: {
+          afterSequence: 0,
+        },
+      },
+    })) {
+      if (event.kind === "task") {
+        assert.fail("expected replay events only");
+      }
+
+      replayed.push(event);
+    }
+
+    const replayedAssistant = replayed.find(
+      (event) =>
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId === "assistant-output-0001" &&
+        event.artifact.parts.length > 0,
+    );
+
+    assert.ok(replayedAssistant);
+    if (!replayedAssistant || !isArtifactUpdate(replayedAssistant)) {
+      assert.fail("expected replayed assistant artifact");
+    }
+
+    assert.deepEqual(
+      replayedAssistant.artifact.parts.map((part) => part.kind),
+      ["file", "data"],
+    );
+    assert.deepEqual(
+      getPartFileUris(replayedAssistant.artifact.parts),
+      ["https://example.com/durable.pdf"],
+    );
+    assert.deepEqual(getPartData(replayedAssistant.artifact.parts), {
+      openclaw: {
+        reply: {
+          channelData: {
+            source: "durable",
+          },
+        },
+      },
+    });
+  } finally {
     server?.close();
     await rm(rootPath, { recursive: true, force: true });
   }
