@@ -1,21 +1,30 @@
-import type { Message } from "@a2a-js/sdk";
+import type { Message, Part } from "@a2a-js/sdk";
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
+import { DEFAULT_OUTPUT_MODES } from "./config.js";
 import type {
   A2AInitialResponseMode,
   A2ALiveExecutionRegistry,
 } from "./live-execution-registry.js";
-import { readOriginalUserMessage } from "./request-context.js";
 import {
-  createAgentTextMessage,
+  readAcceptedOutputModes,
+  readOriginalUserMessage,
+} from "./request-context.js";
+import {
+  buildReplyContent,
+  createAgentMessage,
+  createContentTypeNotSupportedError,
   createReplyArtifactUpdate,
   createTaskSnapshot,
   createTaskStatusUpdate,
   createToolProgressArtifactUpdate,
   hasReplyPayloadExtras,
+  mergeReplyVendorMetadata,
   normalizeReplyPayload,
   summarizeBufferedReplies,
+  type BuiltReplyContent,
   type JsonRecord,
   type NormalizedReplyPayload,
+  type ReplyVendorMetadata,
   type ToolProgressPhase,
 } from "./response-mapping.js";
 
@@ -35,21 +44,25 @@ export interface OpenClawExecutionEvent {
 
 type AssistantStage = {
   kind: "assistant";
+  index: number;
   blockTexts: string[];
   streamedText?: string;
   finalText?: string;
   mediaUrls: string[];
-  channelData?: JsonRecord;
-  isError: boolean;
-  finalCount: number;
-  publishedText?: string;
-  publishedExtrasKey?: string;
+  vendorMetadata?: ReplyVendorMetadata;
+  finalSeen: boolean;
+  completed: boolean;
+  publishedArtifact: boolean;
+  publishedText: string;
+  publishedNonTextKey?: string;
+  closedPublished: boolean;
   eventMetadata?: JsonRecord;
 };
 
 type ToolStage = {
   kind: "tool";
   payload: NormalizedReplyPayload;
+  eventMetadata?: JsonRecord;
 };
 
 type StagedOutput = AssistantStage | ToolStage;
@@ -67,14 +80,6 @@ function mergeMediaUrls(
   next: readonly string[],
 ): string[] {
   return Array.from(new Set([...current, ...next]));
-}
-
-function stringifyPayloadExtras(payload: NormalizedReplyPayload): string {
-  return JSON.stringify({
-    mediaUrls: payload.mediaUrls,
-    channelData: payload.channelData ?? null,
-    isError: payload.isError,
-  });
 }
 
 function pickAssistantText(...candidates: Array<string | undefined>): string | undefined {
@@ -169,13 +174,50 @@ function normalizeAssistantPreviewText(
   return `${previousPreview}${incomingText}`;
 }
 
+function extractText(parts: readonly Part[]): string {
+  return parts
+    .filter((part): part is Extract<Part, { kind: "text" }> => part.kind === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
+function serializeNonTextParts(parts: readonly Part[]): string {
+  return JSON.stringify(parts.filter((part) => part.kind !== "text"));
+}
+
+function buildDeltaReplyContent(
+  content: BuiltReplyContent,
+  deltaText: string,
+): BuiltReplyContent {
+  const textPart = content.parts.find(
+    (part): part is Extract<Part, { kind: "text" }> => part.kind === "text",
+  );
+
+  return {
+    ...content,
+    parts: textPart ? [{ ...textPart, text: deltaText }] : [],
+  };
+}
+
+function hasAssistantStageActivity(stage: AssistantStage): boolean {
+  return (
+    stage.blockTexts.length > 0 ||
+    typeof stage.streamedText === "string" ||
+    typeof stage.finalText === "string" ||
+    stage.mediaUrls.length > 0 ||
+    typeof stage.vendorMetadata !== "undefined" ||
+    stage.finalSeen
+  );
+}
+
 export class A2ATaskExecutionCoordinator {
   private runId?: string;
   private readonly abortController = new AbortController();
   private readonly responseMode: A2AInitialResponseMode;
+  private readonly acceptedOutputModes: string[];
   private readonly stagedOutputs: StagedOutput[] = [];
-  private assistantStage?: AssistantStage;
-  private assistantMessageStarts = 0;
+  private readonly assistantStages: AssistantStage[] = [];
+  private currentAssistantStage?: AssistantStage;
   private artifactSequence = 0;
   private toolArtifactCount = 0;
   private taskPublished = false;
@@ -204,6 +246,8 @@ export class A2ATaskExecutionCoordinator {
     this.responseMode =
       this.liveExecutions.getRequestMode(this.requestContext.userMessage.messageId) ??
       "blocking";
+    this.acceptedOutputModes =
+      readAcceptedOutputModes(this.requestContext) ?? [...DEFAULT_OUTPUT_MODES];
   }
 
   get signal(): AbortSignal {
@@ -242,10 +286,27 @@ export class A2ATaskExecutionCoordinator {
   }
 
   handleAssistantMessageStart(): void {
-    this.assistantMessageStarts += 1;
+    this.flushQueuedAssistantArtifact();
 
-    if (this.assistantMessageStarts > 1 && !this.promoted) {
-      this.promoteToTask("multiple assistant messages require task history");
+    const previous = this.currentAssistantStage;
+
+    if (previous && hasAssistantStageActivity(previous) && !previous.completed) {
+      previous.completed = true;
+    }
+
+    const nextStage = this.startAssistantStage();
+
+    if (
+      previous &&
+      previous !== nextStage &&
+      this.promoted &&
+      !previous.closedPublished
+    ) {
+      this.publishAssistantStage(previous, {
+        lastChunk: true,
+        preferTerminalText: true,
+        requireVisibleContent: true,
+      });
     }
   }
 
@@ -293,20 +354,24 @@ export class A2ATaskExecutionCoordinator {
         this.stagedOutputs.push({
           kind: "tool",
           payload: normalized,
+          eventMetadata: this.buildBaseEventMetadata(),
         });
         this.promoteToTask("tool result summaries require task artifacts");
       } else {
-        this.publishToolArtifact(normalized);
+        this.publishToolArtifact(
+          normalized,
+          this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
+        );
       }
 
       return;
     }
 
     this.flushQueuedAssistantArtifact();
-    const assistantStage = this.ensureAssistantStage();
+    const assistantStage = this.ensureAssistantStageForReply(kind);
 
     if (kind === "final") {
-      assistantStage.finalCount += 1;
+      assistantStage.finalSeen = true;
 
       if (normalized.text) {
         assistantStage.finalText = normalized.text;
@@ -319,28 +384,19 @@ export class A2ATaskExecutionCoordinator {
       assistantStage.mediaUrls,
       normalized.mediaUrls,
     );
-    assistantStage.channelData = normalized.channelData ?? assistantStage.channelData;
-    assistantStage.isError = assistantStage.isError || normalized.isError;
+    assistantStage.vendorMetadata = mergeReplyVendorMetadata(
+      assistantStage.vendorMetadata,
+      normalized.vendorMetadata,
+    );
     assistantStage.eventMetadata = this.buildBaseEventMetadata();
 
-    if (!this.promoted) {
-      if (assistantStage.finalCount > 1) {
-        this.promoteToTask("multiple terminal replies require task artifacts");
-        return;
-      }
-
-      if (hasReplyPayloadExtras(normalized)) {
-        this.promoteToTask("non-text reply payloads require task artifacts");
-        return;
-      }
-
-      return;
+    if (this.promoted) {
+      this.publishAssistantStage(assistantStage, {
+        lastChunk: false,
+        preferTerminalText: kind === "final",
+        requireVisibleContent: false,
+      });
     }
-
-    this.publishAssistantArtifact({
-      lastChunk: false,
-      preferTerminalText: kind === "final",
-    });
   }
 
   async finalizeSuccess(): Promise<void> {
@@ -352,8 +408,10 @@ export class A2ATaskExecutionCoordinator {
 
     if (this.cancelRequested || this.signal.aborted) {
       this.promoteToTask("cancellation requires task state");
+      this.closeCurrentAssistantStage(false);
       this.publishFinalStatus("canceled", {
         final: true,
+        message: this.buildCanonicalAssistantStatusMessage(),
         messageText: "Task cancellation requested by the client.",
       });
       return;
@@ -361,12 +419,10 @@ export class A2ATaskExecutionCoordinator {
 
     if (this.lifecycleError) {
       this.promoteToTask("lifecycle error requires failed task");
-      this.publishAssistantArtifact({
-        lastChunk: true,
-        preferTerminalText: true,
-      });
+      this.closeCurrentAssistantStage(false);
       this.publishFinalStatus("failed", {
         final: true,
+        message: this.buildCanonicalAssistantStatusMessage(),
         messageText: this.lifecycleError,
       });
       return;
@@ -378,28 +434,37 @@ export class A2ATaskExecutionCoordinator {
     }
 
     if (this.canReturnDirectMessage()) {
-      const directText = this.resolveAssistantPayload(true).text;
+      const directStage = this.currentAssistantStage;
+      const directContent = directStage
+        ? this.buildAssistantStageContent(directStage, true)
+        : undefined;
 
-      if (directText) {
+      if (directContent?.parts.length) {
         this.eventBus.publish(
-          createAgentTextMessage({
+          createAgentMessage({
             contextId: this.requestContext.contextId,
-            text: directText,
+            parts: directContent.parts,
+            metadata: directContent.metadata,
           }),
         );
         this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
         return;
       }
+
+      if (directContent?.hasCandidates) {
+        throw createContentTypeNotSupportedError({
+          acceptedOutputModes: this.acceptedOutputModes,
+          availableOutputModes: directContent.availableOutputModes,
+        });
+      }
     }
 
     this.promoteToTask("terminal response requires task state");
-    const publishedAssistant = this.publishAssistantArtifact({
-      lastChunk: true,
-      preferTerminalText: true,
-    });
+    const publishedAssistant = this.closeCurrentAssistantStage(true);
 
     this.publishFinalStatus("completed", {
       final: true,
+      message: this.buildCanonicalAssistantStatusMessage(),
       messageText: publishedAssistant
         ? undefined
         : "OpenClaw completed without a user-visible terminal reply.",
@@ -415,8 +480,10 @@ export class A2ATaskExecutionCoordinator {
 
     if (this.cancelRequested || this.signal.aborted) {
       this.promoteToTask("cancellation requires task state");
+      this.closeCurrentAssistantStage(false);
       this.publishFinalStatus("canceled", {
         final: true,
+        message: this.buildCanonicalAssistantStatusMessage(),
         messageText: "Task cancellation requested by the client.",
       });
       return;
@@ -432,12 +499,10 @@ export class A2ATaskExecutionCoordinator {
 
     this.lifecycleError = this.lifecycleError ?? errorText;
     this.promoteToTask("execution error requires failed task");
-    this.publishAssistantArtifact({
-      lastChunk: true,
-      preferTerminalText: true,
-    });
+    this.closeCurrentAssistantStage(false);
     this.publishFinalStatus("failed", {
       final: true,
+      message: this.buildCanonicalAssistantStatusMessage(),
       messageText: this.lifecycleError,
     });
   }
@@ -465,15 +530,15 @@ export class A2ATaskExecutionCoordinator {
   }
 
   private canReturnDirectMessage(): boolean {
-    if (this.responseMode === "streaming" || this.requestContext.task) {
-      return false;
-    }
-
-    if (this.promoted || this.cancelRequested || this.finalPublished) {
-      return false;
-    }
-
-    if (this.lifecycleError || this.assistantMessageStarts > 1) {
+    if (
+      this.responseMode !== "blocking" ||
+      this.requestContext.task ||
+      this.promoted ||
+      this.cancelRequested ||
+      this.finalPublished ||
+      this.lifecycleError ||
+      this.pausedForInputRequired
+    ) {
       return false;
     }
 
@@ -481,13 +546,8 @@ export class A2ATaskExecutionCoordinator {
       return false;
     }
 
-    const payload = this.resolveAssistantPayload(true);
-
-    if (!payload.text || hasReplyPayloadExtras(payload)) {
-      return false;
-    }
-
-    return true;
+    const activeStages = this.assistantStages.filter(hasAssistantStageActivity);
+    return activeStages.length === 1;
   }
 
   private matchesExpectedSessionKey(event: OpenClawExecutionEvent): boolean {
@@ -552,9 +612,14 @@ export class A2ATaskExecutionCoordinator {
 
   private handleAssistantEvent(data: Record<string, unknown>): void {
     const text = readOptionalText(data.text) ?? readOptionalText(data.delta);
-    const mediaUrls = readStringArray(data.mediaUrls);
+    const mediaUrls = mergeMediaUrls(
+      [],
+      readStringArray(data.mediaUrls),
+    );
+    const mediaUrl = readTrimmedString(data.mediaUrl);
+    const nextMediaUrls = mediaUrl ? mergeMediaUrls(mediaUrls, [mediaUrl]) : mediaUrls;
 
-    if (!text && mediaUrls.length === 0) {
+    if (!text && nextMediaUrls.length === 0) {
       return;
     }
 
@@ -567,14 +632,12 @@ export class A2ATaskExecutionCoordinator {
       );
     }
 
-    assistantStage.mediaUrls = mergeMediaUrls(assistantStage.mediaUrls, mediaUrls);
+    assistantStage.mediaUrls = mergeMediaUrls(
+      assistantStage.mediaUrls,
+      nextMediaUrls,
+    );
     assistantStage.eventMetadata =
       this.currentAgentEventMetadata ?? assistantStage.eventMetadata;
-
-    if (!this.promoted && mediaUrls.length > 0) {
-      this.promoteToTask("assistant media output requires task artifacts");
-      return;
-    }
 
     if (this.promoted) {
       this.queueAssistantArtifactFlush();
@@ -622,47 +685,100 @@ export class A2ATaskExecutionCoordinator {
     }
   }
 
-  private ensureAssistantStage(): AssistantStage {
-    if (this.assistantStage) {
-      return this.assistantStage;
+  private startAssistantStage(): AssistantStage {
+    if (this.currentAssistantStage && !this.currentAssistantStage.completed) {
+      return this.currentAssistantStage;
     }
 
-    this.assistantStage = {
+    const assistantStage: AssistantStage = {
       kind: "assistant",
+      index: this.assistantStages.length + 1,
       blockTexts: [],
       mediaUrls: [],
-      isError: false,
-      finalCount: 0,
+      finalSeen: false,
+      completed: false,
+      publishedArtifact: false,
+      publishedText: "",
       eventMetadata: this.buildBaseEventMetadata(),
+      closedPublished: false,
     };
 
+    this.assistantStages.push(assistantStage);
+    this.currentAssistantStage = assistantStage;
+
     if (!this.promoted) {
-      this.stagedOutputs.push(this.assistantStage);
+      this.stagedOutputs.push(assistantStage);
+
+      if (this.assistantStages.length > 1) {
+        this.promoteToTask("multiple assistant messages require task history");
+      }
     }
 
-    return this.assistantStage;
+    return assistantStage;
   }
 
-  private resolveAssistantPayload(preferTerminalText: boolean): NormalizedReplyPayload {
-    const assistantStage = this.assistantStage;
+  private ensureAssistantStage(): AssistantStage {
+    if (this.currentAssistantStage && !this.currentAssistantStage.completed) {
+      return this.currentAssistantStage;
+    }
+
+    return this.startAssistantStage();
+  }
+
+  private ensureAssistantStageForReply(kind: ReplyDispatchKind): AssistantStage {
+    const current = this.currentAssistantStage;
+
+    if (
+      current &&
+      !current.completed &&
+      kind === "final" &&
+      current.finalSeen
+    ) {
+      current.completed = true;
+
+      if (this.promoted && !current.closedPublished) {
+        this.publishAssistantStage(current, {
+          lastChunk: true,
+          preferTerminalText: true,
+          requireVisibleContent: true,
+        });
+      }
+    }
+
+    return this.ensureAssistantStage();
+  }
+
+  private resolveAssistantPayload(
+    stage: AssistantStage,
+    preferTerminalText: boolean,
+  ): NormalizedReplyPayload {
     const text = preferTerminalText
       ? pickAssistantText(
-          assistantStage?.finalText,
-          assistantStage?.streamedText,
-          summarizeBufferedReplies(assistantStage?.blockTexts ?? []),
+          stage.finalText,
+          stage.streamedText,
+          summarizeBufferedReplies(stage.blockTexts),
         )
       : pickAssistantText(
-          assistantStage?.streamedText,
-          assistantStage?.finalText,
-          summarizeBufferedReplies(assistantStage?.blockTexts ?? []),
+          stage.streamedText,
+          stage.finalText,
+          summarizeBufferedReplies(stage.blockTexts),
         );
 
     return {
-      text,
-      mediaUrls: assistantStage?.mediaUrls ?? [],
-      channelData: assistantStage?.channelData,
-      isError: assistantStage?.isError ?? false,
+      ...(text ? { text } : {}),
+      mediaUrls: stage.mediaUrls,
+      ...(stage.vendorMetadata ? { vendorMetadata: stage.vendorMetadata } : {}),
     };
+  }
+
+  private buildAssistantStageContent(
+    stage: AssistantStage,
+    preferTerminalText: boolean,
+  ): BuiltReplyContent {
+    return buildReplyContent({
+      payload: this.resolveAssistantPayload(stage, preferTerminalText),
+      acceptedOutputModes: this.acceptedOutputModes,
+    });
   }
 
   private promoteToTask(_reason: string): void {
@@ -794,6 +910,7 @@ export class A2ATaskExecutionCoordinator {
     state: "completed" | "failed" | "canceled",
     params: {
       final: boolean;
+      message?: Message;
       messageText?: string;
     },
   ): void {
@@ -815,7 +932,9 @@ export class A2ATaskExecutionCoordinator {
         contextId: this.requestContext.contextId,
         state,
         final: params.final,
-        messageText: params.messageText,
+        message: params.message,
+        messageText:
+          params.message ? undefined : params.messageText,
         metadata: this.buildBaseEventMetadata(),
       }),
     );
@@ -828,109 +947,157 @@ export class A2ATaskExecutionCoordinator {
 
     for (const output of this.stagedOutputs) {
       if (output.kind === "tool") {
-        this.publishToolArtifact(output.payload);
+        this.publishToolArtifact(
+          output.payload,
+          output.eventMetadata ?? this.buildBaseEventMetadata(),
+        );
+        continue;
       }
+
+      this.publishAssistantStage(output, {
+        lastChunk: output.completed,
+        preferTerminalText: output.completed,
+        requireVisibleContent: output.completed,
+      });
     }
 
-    this.publishAssistantArtifact({
-      lastChunk: false,
-      preferTerminalText: true,
-    });
     this.stagedOutputs.length = 0;
   }
 
-  private publishAssistantArtifact(params: {
-    lastChunk: boolean;
-    preferTerminalText: boolean;
-  }): boolean {
+  private publishAssistantStage(
+    stage: AssistantStage,
+    params: {
+      lastChunk: boolean;
+      preferTerminalText: boolean;
+      requireVisibleContent: boolean;
+    },
+  ): boolean {
     if (!this.promoted) {
       return false;
     }
 
-    const assistantStage = this.ensureAssistantStage();
-    const payload = this.resolveAssistantPayload(params.preferTerminalText);
-    const nextText = payload.text ?? "";
-    const publishedText = assistantStage.publishedText;
-    const hasPublishedArtifact = typeof publishedText === "string";
-    const hasPayloadContent =
-      nextText.length > 0 || hasReplyPayloadExtras(payload);
+    const content = this.buildAssistantStageContent(
+      stage,
+      params.preferTerminalText,
+    );
 
-    if (!hasPayloadContent && !(params.lastChunk && hasPublishedArtifact)) {
-      return false;
-    }
+    if (content.parts.length === 0) {
+      if (params.requireVisibleContent && !stage.publishedArtifact && content.hasCandidates) {
+        throw createContentTypeNotSupportedError({
+          acceptedOutputModes: this.acceptedOutputModes,
+          availableOutputModes: content.availableOutputModes,
+        });
+      }
 
-    const nextExtrasKey = stringifyPayloadExtras(payload);
-    const publishedExtrasKey = assistantStage.publishedExtrasKey;
-    const extrasChanged = nextExtrasKey !== publishedExtrasKey;
-
-    if (hasPublishedArtifact && nextText.startsWith(publishedText)) {
-      const delta = nextText.slice(publishedText.length);
-
-      if (delta.length > 0 || extrasChanged || params.lastChunk) {
+      if (params.lastChunk && stage.publishedArtifact && !stage.closedPublished) {
         this.eventBus.publish(
           createReplyArtifactUpdate({
             taskId: this.requestContext.taskId,
             contextId: this.requestContext.contextId,
-            artifactId: "assistant-output",
-            name: "assistant",
+            artifactId: this.assistantArtifactId(stage.index),
+            name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
-            eventMetadata:
-              assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
-            payload: {
-              text: delta.length > 0 ? delta : undefined,
-              mediaUrls: extrasChanged ? payload.mediaUrls : [],
-              channelData: extrasChanged ? payload.channelData : undefined,
-              isError: extrasChanged ? payload.isError : false,
+            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
+            content: {
+              ...content,
+              parts: [],
             },
+            append: true,
+            lastChunk: true,
+          }),
+        );
+        stage.closedPublished = true;
+      }
+
+      return stage.publishedArtifact;
+    }
+
+    const nextText = extractText(content.parts);
+    const nextNonTextKey = serializeNonTextParts(content.parts);
+
+    if (
+      stage.publishedArtifact &&
+      nextText.startsWith(stage.publishedText) &&
+      nextNonTextKey === stage.publishedNonTextKey
+    ) {
+      const deltaText = nextText.slice(stage.publishedText.length);
+
+      if (deltaText.length > 0) {
+        this.eventBus.publish(
+          createReplyArtifactUpdate({
+            taskId: this.requestContext.taskId,
+            contextId: this.requestContext.contextId,
+            artifactId: this.assistantArtifactId(stage.index),
+            name: `assistant-output-${stage.index}`,
+            sequence: this.nextArtifactSequence(),
+            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
+            content: buildDeltaReplyContent(content, deltaText),
             append: true,
             lastChunk: params.lastChunk,
           }),
         );
+        stage.closedPublished = params.lastChunk;
+      } else if (params.lastChunk && !stage.closedPublished) {
+        this.eventBus.publish(
+          createReplyArtifactUpdate({
+            taskId: this.requestContext.taskId,
+            contextId: this.requestContext.contextId,
+            artifactId: this.assistantArtifactId(stage.index),
+            name: `assistant-output-${stage.index}`,
+            sequence: this.nextArtifactSequence(),
+            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
+            content: {
+              ...content,
+              parts: [],
+            },
+            append: true,
+            lastChunk: true,
+          }),
+        );
+        stage.closedPublished = true;
       }
-    } else if (
-      !hasPublishedArtifact ||
-      nextText !== publishedText ||
-      extrasChanged
-    ) {
+    } else {
       this.eventBus.publish(
         createReplyArtifactUpdate({
           taskId: this.requestContext.taskId,
           contextId: this.requestContext.contextId,
-          artifactId: "assistant-output",
-          name: "assistant",
+          artifactId: this.assistantArtifactId(stage.index),
+          name: `assistant-output-${stage.index}`,
           sequence: this.nextArtifactSequence(),
-          eventMetadata:
-            assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
-          payload,
+          eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
+          content,
           lastChunk: params.lastChunk,
         }),
       );
-    } else if (params.lastChunk) {
-      this.eventBus.publish(
-        createReplyArtifactUpdate({
-          taskId: this.requestContext.taskId,
-          contextId: this.requestContext.contextId,
-          artifactId: "assistant-output",
-          name: "assistant",
-          sequence: this.nextArtifactSequence(),
-          eventMetadata:
-            assistantStage.eventMetadata ?? this.buildBaseEventMetadata(),
-          payload: {
-            mediaUrls: [],
-            isError: false,
-          },
-          append: true,
-          lastChunk: true,
-        }),
-      );
+      stage.closedPublished = params.lastChunk;
     }
 
-    assistantStage.publishedText = nextText;
-    assistantStage.publishedExtrasKey = nextExtrasKey;
+    stage.publishedArtifact = true;
+    stage.publishedText = nextText;
+    stage.publishedNonTextKey = nextNonTextKey;
     return true;
   }
 
-  private publishToolArtifact(payload: NormalizedReplyPayload): void {
+  private publishToolArtifact(
+    payload: NormalizedReplyPayload,
+    eventMetadata?: JsonRecord,
+  ): void {
+    const content = buildReplyContent({
+      payload,
+      acceptedOutputModes: this.acceptedOutputModes,
+    });
+
+    if (content.parts.length === 0) {
+      if (content.hasCandidates) {
+        throw createContentTypeNotSupportedError({
+          acceptedOutputModes: this.acceptedOutputModes,
+          availableOutputModes: content.availableOutputModes,
+        });
+      }
+
+      return;
+    }
+
     this.toolArtifactCount += 1;
 
     this.eventBus.publish(
@@ -940,10 +1107,50 @@ export class A2ATaskExecutionCoordinator {
         artifactId: `tool-result-${String(this.toolArtifactCount).padStart(4, "0")}`,
         name: `tool-result-${this.toolArtifactCount}`,
         sequence: this.nextArtifactSequence(),
-        eventMetadata: this.buildBaseEventMetadata(),
-        payload,
+        eventMetadata: eventMetadata ?? this.buildBaseEventMetadata(),
+        content,
       }),
     );
+  }
+
+  private buildCanonicalAssistantStatusMessage(): Message | undefined {
+    const stages = [...this.assistantStages].reverse();
+
+    for (const stage of stages) {
+      const content = this.buildAssistantStageContent(stage, true);
+
+      if (content.parts.length === 0) {
+        continue;
+      }
+
+      return createAgentMessage({
+        contextId: this.requestContext.contextId,
+        taskId: this.requestContext.taskId,
+        parts: content.parts,
+        metadata: content.metadata,
+      });
+    }
+
+    return undefined;
+  }
+
+  private closeCurrentAssistantStage(requireVisibleContent: boolean): boolean {
+    const stage = this.currentAssistantStage;
+
+    if (!stage) {
+      return false;
+    }
+
+    stage.completed = true;
+    return this.publishAssistantStage(stage, {
+      lastChunk: true,
+      preferTerminalText: true,
+      requireVisibleContent,
+    });
+  }
+
+  private assistantArtifactId(index: number): string {
+    return `assistant-output-${String(index).padStart(4, "0")}`;
   }
 
   private nextArtifactSequence(): number {
@@ -971,9 +1178,16 @@ export class A2ATaskExecutionCoordinator {
       }
 
       this.assistantFlushQueued = false;
-      this.publishAssistantArtifact({
+      const currentStage = this.currentAssistantStage;
+
+      if (!currentStage) {
+        return;
+      }
+
+      this.publishAssistantStage(currentStage, {
         lastChunk: false,
         preferTerminalText: false,
+        requireVisibleContent: false,
       });
     });
   }
@@ -984,9 +1198,16 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.assistantFlushQueued = false;
-    this.publishAssistantArtifact({
+    const currentStage = this.currentAssistantStage;
+
+    if (!currentStage) {
+      return;
+    }
+
+    this.publishAssistantStage(currentStage, {
       lastChunk: false,
       preferTerminalText: false,
+      requireVisibleContent: false,
     });
   }
 

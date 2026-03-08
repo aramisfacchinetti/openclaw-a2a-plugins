@@ -85,7 +85,10 @@ function getArtifactUpdates(
 ): TaskArtifactUpdateEvent[] {
   return events.filter(
     (event): event is TaskArtifactUpdateEvent =>
-      isArtifactUpdate(event) && event.artifact.artifactId === artifactId,
+      isArtifactUpdate(event) &&
+      (event.artifact.artifactId === artifactId ||
+        (artifactId === "assistant-output" &&
+          event.artifact.artifactId.startsWith("assistant-output-"))),
   );
 }
 
@@ -503,7 +506,7 @@ test("promoted run publishes task, working state, artifacts, and final completio
   assert.ok(
     artifactEvents.some(
       (event) =>
-        event.artifact.artifactId === "assistant-output" &&
+        event.artifact.artifactId === "assistant-output-0001" &&
         event.artifact.parts.some(
           (part) => part.kind === "text" && part.text.includes("Planning the work"),
         ),
@@ -559,7 +562,7 @@ test("lifecycle error produces a failed task state", async () => {
       "text" in finalStatus.status.message.parts[0]
       ? finalStatus.status.message.parts[0].text
       : undefined,
-    "Run exploded",
+    "Partial answer",
   );
 });
 

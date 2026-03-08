@@ -49,13 +49,33 @@ function getArtifactData(
     : undefined;
 }
 
+function getPartFileUris(
+  parts: readonly (Message | TaskArtifactUpdateEvent["artifact"])["parts"],
+): string[] {
+  return parts.flatMap((part) =>
+    part.kind === "file" && "uri" in part.file ? [part.file.uri] : [],
+  );
+}
+
+function getPartData(
+  parts: readonly (Message | TaskArtifactUpdateEvent["artifact"])["parts"],
+): Record<string, unknown> | undefined {
+  const dataPart = parts.find((part) => part.kind === "data");
+  return dataPart?.kind === "data"
+    ? (dataPart.data as Record<string, unknown>)
+    : undefined;
+}
+
 function getArtifactUpdates(
   events: readonly StreamEvent[],
   artifactId: string,
 ): TaskArtifactUpdateEvent[] {
   return events.filter(
     (event): event is TaskArtifactUpdateEvent =>
-      isArtifactUpdate(event) && event.artifact.artifactId === artifactId,
+      isArtifactUpdate(event) &&
+      (event.artifact.artifactId === artifactId ||
+        (artifactId === "assistant-output" &&
+          event.artifact.artifactId.startsWith("assistant-output-"))),
   );
 }
 
@@ -71,7 +91,12 @@ function getPersistedArtifactText(
   task: Task,
   artifactId: string,
 ): string | undefined {
-  const artifact = task.artifacts?.find((entry) => entry.artifactId === artifactId);
+  const artifact = task.artifacts?.find(
+    (entry) =>
+      entry.artifactId === artifactId ||
+      (artifactId === "assistant-output" &&
+        entry.artifactId.startsWith("assistant-output-")),
+  );
 
   if (!artifact) {
     return undefined;
@@ -87,7 +112,12 @@ function getPersistedArtifactData(
   task: Task,
   artifactId: string,
 ): Record<string, unknown> | undefined {
-  const artifact = task.artifacts?.find((entry) => entry.artifactId === artifactId);
+  const artifact = task.artifacts?.find(
+    (entry) =>
+      entry.artifactId === artifactId ||
+      (artifactId === "assistant-output" &&
+        entry.artifactId.startsWith("assistant-output-")),
+  );
 
   if (!artifact) {
     return undefined;
@@ -236,6 +266,215 @@ test("sendMessage keeps a blocking delayed terminal run as one direct Message", 
   );
 });
 
+test("sendMessage returns one multipart Message when the final reply includes text and media", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-direct-multipart");
+    emit({
+      runId: "run-direct-multipart",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Direct reply with attachment",
+        mediaUrl: "https://example.com/report.pdf",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-direct-multipart",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+  });
+
+  assert.equal(result.kind, "message");
+  assert.deepEqual(
+    result.parts.map((part) => part.kind),
+    ["text", "file"],
+  );
+  assert.equal(
+    result.parts[0] && "text" in result.parts[0] ? result.parts[0].text : undefined,
+    "Direct reply with attachment",
+  );
+  assert.deepEqual(getPartFileUris(result.parts), ["https://example.com/report.pdf"]);
+});
+
+test("sendMessage returns a direct file-only Message when octet-stream is accepted", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-direct-file");
+    emit({
+      runId: "run-direct-file",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        mediaUrl: "https://example.com/image.png",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-direct-file",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      acceptedOutputModes: ["application/octet-stream"],
+    },
+  });
+
+  assert.equal(result.kind, "message");
+  assert.deepEqual(result.parts.map((part) => part.kind), ["file"]);
+  assert.deepEqual(getPartFileUris(result.parts), ["https://example.com/image.png"]);
+});
+
+test("acceptedOutputModes text/plain strips vendor data and file parts when text remains", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-filter-text");
+    emit({
+      runId: "run-filter-text",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Plain text survives",
+        mediaUrl: "https://example.com/image.png",
+        channelData: {
+          source: "test",
+        },
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-filter-text",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      acceptedOutputModes: ["text/plain"],
+    },
+  });
+
+  assert.equal(result.kind, "message");
+  assert.deepEqual(result.parts.map((part) => part.kind), ["text"]);
+  assert.equal(
+    result.parts[0] && "text" in result.parts[0] ? result.parts[0].text : undefined,
+    "Plain text survives",
+  );
+});
+
+test("acceptedOutputModes application/json emits only the vendor DataPart when vendor metadata exists", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-filter-json");
+    emit({
+      runId: "run-filter-json",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Filtered text",
+        channelData: {
+          source: "test",
+        },
+        replyToId: "reply-123",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-filter-json",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      acceptedOutputModes: ["application/json"],
+    },
+  });
+
+  assert.equal(result.kind, "message");
+  assert.deepEqual(result.parts.map((part) => part.kind), ["data"]);
+  assert.deepEqual(getPartData(result.parts), {
+    openclaw: {
+      reply: {
+        channelData: {
+          source: "test",
+        },
+        replyToId: "reply-123",
+      },
+    },
+  });
+});
+
+test("incompatible acceptedOutputModes return content-type-not-supported", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-filter-error");
+    emit({
+      runId: "run-filter-error",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "No matching mode",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-filter-error",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  await assert.rejects(
+    () =>
+      server.requestHandler.sendMessage({
+        message: createUserMessage(),
+        configuration: {
+          acceptedOutputModes: ["application/json"],
+        },
+      }),
+    (error: unknown) => {
+      assert.equal(
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code: unknown }).code
+          : undefined,
+        -32005,
+      );
+      return true;
+    },
+  );
+});
+
+test("agent card advertises MIME-based default output modes", async () => {
+  const server = createServerHarness(async () => {});
+  const agentCard = await server.requestHandler.getAgentCard();
+
+  assert.deepEqual(agentCard.defaultOutputModes, [
+    "text/plain",
+    "application/json",
+    "application/octet-stream",
+  ]);
+});
+
 test("sendMessage returns an initial Task for a nonblocking terminal run", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-nonblocking-terminal");
@@ -289,7 +528,7 @@ test("sendMessage returns an initial Task for a nonblocking terminal run", async
     "Nonblocking terminal reply",
   );
   assert.ok(
-    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output"),
+    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"),
   );
 });
 
@@ -357,7 +596,7 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   }
 
   assert.equal(result.status.state, "completed");
-  assert.ok(result.artifacts?.some((artifact) => artifact.artifactId === "assistant-output"));
+  assert.ok(result.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"));
   assert.ok(result.artifacts?.some((artifact) => artifact.artifactId.startsWith("tool-result-")));
 
   const persisted = await server.requestHandler.getTask({
@@ -368,7 +607,7 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   assert.equal(persisted.status.state, "completed");
   assert.ok(persisted.history?.some((message) => message.role === "user"));
   assert.ok(
-    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output"),
+    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"),
   );
 });
 
@@ -477,7 +716,7 @@ test("sendMessageStream emits task-first assistant progress and a closing artifa
   const taskIndex = streamed.findIndex((event) => event.kind === "task");
   const firstAssistantIndex = streamed.findIndex(
     (event) =>
-      isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output",
+      isArtifactUpdate(event) && event.artifact.artifactId === "assistant-output-0001",
   );
   const completedIndex = streamed.findIndex(
     (event) =>
@@ -724,6 +963,201 @@ test("sendMessage persists the same final assistant-output for delta preview sna
   assert.equal(
     getPersistedArtifactText(persisted, "assistant-output"),
     "Alpha Beta Gamma",
+  );
+});
+
+test("multiple assistant messages use distinct indexed assistant artifact ids", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-multi-assistant");
+    emit({
+      runId: "run-multi-assistant",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    params.replyOptions?.onAssistantMessageStart?.();
+    await params.dispatcherOptions.deliver(
+      { text: "First answer" },
+      { kind: "final" },
+    );
+    params.replyOptions?.onAssistantMessageStart?.();
+    await params.dispatcherOptions.deliver(
+      { text: "Second answer" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-multi-assistant",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+  });
+
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected task result");
+  }
+
+  assert.ok(
+    result.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"),
+  );
+  assert.ok(
+    result.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0002"),
+  );
+});
+
+test("streaming assistant artifacts replace the full artifact when media appears after preview text", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-media-replace");
+    emit({
+      runId: "run-stream-media-replace",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    emit({
+      runId: "run-stream-media-replace",
+      stream: "assistant",
+      data: { delta: "Preview text" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Preview text",
+        mediaUrl: "https://example.com/preview.png",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-media-replace",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const assistantUpdates = getArtifactUpdates(streamed, "assistant-output");
+
+  assert.equal(assistantUpdates.length, 3);
+  assert.equal(getArtifactText(assistantUpdates[0]), "Preview text");
+  assert.equal(assistantUpdates[0].append, undefined);
+  assert.deepEqual(getPartFileUris(assistantUpdates[0].artifact.parts), []);
+  assert.equal(assistantUpdates[1].append, undefined);
+  assert.deepEqual(
+    assistantUpdates[1].artifact.parts.map((part) => part.kind),
+    ["text", "file"],
+  );
+  assert.deepEqual(
+    getPartFileUris(assistantUpdates[1].artifact.parts),
+    ["https://example.com/preview.png"],
+  );
+  assert.equal(assistantUpdates[2].lastChunk, true);
+  assert.equal(assistantUpdates[2].append, true);
+});
+
+test("tool-result artifacts emit file parts when tool payloads contain media URLs", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-tool-file");
+    emit({
+      runId: "run-tool-file",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Tool attachment",
+        mediaUrl: "https://example.com/tool-output.png",
+      },
+      { kind: "tool" },
+    );
+    await params.dispatcherOptions.deliver(
+      { text: "Done" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-tool-file",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const streamed = await collectStream(server);
+  const toolArtifact = streamed.find(
+    (event) =>
+      isArtifactUpdate(event) &&
+      event.artifact.artifactId.startsWith("tool-result-"),
+  );
+
+  assert.ok(toolArtifact);
+  if (!toolArtifact || !isArtifactUpdate(toolArtifact)) {
+    assert.fail("expected tool result artifact");
+  }
+
+  assert.deepEqual(
+    toolArtifact.artifact.parts.map((part) => part.kind),
+    ["text", "file"],
+  );
+  assert.deepEqual(
+    getPartFileUris(toolArtifact.artifact.parts),
+    ["https://example.com/tool-output.png"],
+  );
+});
+
+test("terminal task status.message uses the canonical multipart assistant Message", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-status-message");
+    emit({
+      runId: "run-status-message",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        text: "Status with attachment",
+        mediaUrl: "https://example.com/status.pdf",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-status-message",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await server.requestHandler.sendMessage({
+    message: createUserMessage(),
+    configuration: {
+      blocking: false,
+    },
+  });
+
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected task result");
+  }
+
+  await waitFor(async () => {
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+
+    return persisted.status.state === "completed";
+  });
+
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
+
+  assert.deepEqual(
+    persisted.status.message?.parts.map((part) => part.kind),
+    ["text", "file"],
+  );
+  assert.deepEqual(
+    getPartFileUris(persisted.status.message?.parts ?? []),
+    ["https://example.com/status.pdf"],
   );
 });
 
@@ -1217,7 +1651,7 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
       isArtifactUpdate(resubscribed[1])
         ? resubscribed[1].artifact.artifactId
         : undefined,
-      "assistant-output",
+      "assistant-output-0001",
     );
     assert.equal(
       isStatusUpdate(resubscribed[0]) ? isReplayedEvent(resubscribed[0]) : false,
@@ -1259,7 +1693,7 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
       resubscribed.some(
         (event) =>
           isArtifactUpdate(event) &&
-          event.artifact.artifactId === "assistant-output",
+          event.artifact.artifactId === "assistant-output-0001",
       ),
     );
     assert.ok(

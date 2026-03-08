@@ -160,6 +160,7 @@ export function createA2AInboundServer(
     liveExecutions,
     options.account.capabilities.streaming,
     agentExecutor,
+    options.account.defaultOutputModes,
   );
 
   const app = express();
