@@ -7,7 +7,7 @@
 
 `openclaw-a2a-plugins` is a monorepo for OpenClaw Agent-to-Agent (A2A) plugins.
 
-Today, the repository includes one production-oriented package, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound), and one inbound channel scaffold, [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound). The inbound package now has a concrete OpenClaw channel/plugin skeleton, but it is still exploratory and not ready to treat as a finished production integration.
+Today, the repository includes one production-oriented package, [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound), and one inbound channel scaffold, [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound). The inbound package now has a concrete OpenClaw channel/plugin skeleton, but it is still exploratory, remains private in the workspace, and is not yet treated as a finished production integration.
 
 ## Getting Started
 
@@ -66,7 +66,7 @@ Use [`packages/openclaw-a2a-outbound/README.md`](./packages/openclaw-a2a-outboun
 | Package | Status | Notes |
 | --- | --- | --- |
 | [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
-| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Exploratory scaffold | Concrete inbound channel/plugin skeleton using the official A2A SDK handlers, but task streaming and production-hardening remain unfinished. |
+| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Exploratory scaffold | Concrete inbound channel/plugin skeleton using the official A2A SDK handlers, but task streaming and production-hardening remain unfinished, so it stays private and is excluded from release automation for now. |
 
 ## Current Capabilities
 
@@ -120,7 +120,7 @@ pnpm version-packages
 
 Do not run `pnpm release` or `npm publish` for real publishes from a local checkout. Publishing is CI-only through [`.github/workflows/release.yml`](./.github/workflows/release.yml) on `master`, which opens or updates the Changesets release PR, publishes to npm after merge, and creates package-specific GitHub Releases. Local verification should use `npm publish --dry-run`.
 
-The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`.
+The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`. The exploratory inbound scaffold is intentionally excluded from the current publish flow until it is ready for a first public npm release.
 
 ## License
 
