@@ -40,6 +40,25 @@ function isArtifactUpdate(event: unknown): event is TaskArtifactUpdateEvent {
   );
 }
 
+function getOpenClawMetadata(
+  value: { metadata?: Record<string, unknown> | undefined },
+): Record<string, unknown> | undefined {
+  const metadata = value.metadata;
+
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata) ||
+    typeof metadata.openclaw !== "object" ||
+    metadata.openclaw === null ||
+    Array.isArray(metadata.openclaw)
+  ) {
+    return undefined;
+  }
+
+  return metadata.openclaw as Record<string, unknown>;
+}
+
 function getArtifactText(event: TaskArtifactUpdateEvent): string | undefined {
   const textPart = event.artifact.parts.find((part) => part.kind === "text");
   return textPart?.kind === "text" ? textPart.text : undefined;
@@ -190,6 +209,53 @@ test("non_blocking mode publishes a Task before a simple terminal reply", async 
     ],
   );
   assert.equal(getArtifactText(assistantUpdates[0]), "Nonblocking reply");
+});
+
+test("non_blocking mode learns runId from agent events instead of session or context ids", async () => {
+  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+    emit({
+      runId: "run-event-owned",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Event-owned reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-event-owned",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext({
+    contextId: "context-event-owned",
+  });
+  liveExecutions.setRequestMode(requestContext.userMessage.messageId, "non_blocking");
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const statusEvents = recorder.events.filter(isStatusUpdate);
+  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
+  const workingStatus = statusEvents.find((event) => event.status.state === "working");
+  const finalStatus = statusEvents.at(-1);
+  const workingRunId = workingStatus
+    ? getOpenClawMetadata(workingStatus)?.runId
+    : undefined;
+  const finalRunId = finalStatus
+    ? getOpenClawMetadata(finalStatus)?.runId
+    : undefined;
+  const artifactRunId = assistantUpdates[0]
+    ? getOpenClawMetadata(assistantUpdates[0])?.runId
+    : undefined;
+
+  assert.equal(workingRunId, "run-event-owned");
+  assert.equal(finalRunId, "run-event-owned");
+  assert.equal(artifactRunId, "run-event-owned");
+  assert.notEqual(workingRunId, requestContext.contextId);
+  assert.notEqual(workingRunId, "session:test");
 });
 
 test("streaming mode publishes task-first assistant progress and closes the artifact", async () => {

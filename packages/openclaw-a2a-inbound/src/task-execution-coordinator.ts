@@ -29,6 +29,7 @@ export interface OpenClawExecutionEvent {
   data: Record<string, unknown>;
   seq?: number;
   ts?: number;
+  sessionKey?: string;
 }
 
 type AssistantStage = {
@@ -87,6 +88,12 @@ function pickAssistantText(...candidates: Array<string | undefined>): string | u
 
 function readOptionalText(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function readTrimmedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 }
 
 function readStringArray(value: unknown): string[] {
@@ -183,12 +190,15 @@ export class A2ATaskExecutionCoordinator {
   private assistantFlushQueued = false;
   private assistantFlushScheduled = false;
   private currentAgentEventMetadata?: JsonRecord;
+  private expectedSessionKey?: string;
 
   constructor(
     private readonly requestContext: RequestContext,
     private readonly eventBus: ExecutionEventBus,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
+    expectedSessionKey?: string,
   ) {
+    this.expectedSessionKey = expectedSessionKey;
     this.responseMode =
       this.liveExecutions.getRequestMode(this.requestContext.userMessage.messageId) ??
       "blocking";
@@ -196,6 +206,10 @@ export class A2ATaskExecutionCoordinator {
 
   get signal(): AbortSignal {
     return this.abortController.signal;
+  }
+
+  setExpectedSessionKey(sessionKey: string | undefined): void {
+    this.expectedSessionKey = readTrimmedString(sessionKey);
   }
 
   prepareForExecution(): void {
@@ -215,12 +229,8 @@ export class A2ATaskExecutionCoordinator {
   }
 
   handleAgentRunStart(runId: string): void {
-    this.runId = runId;
-
-    if (this.promoted) {
-      this.liveExecutions.update(this.requestContext.taskId, { runId });
-      this.publishWorkingStatus();
-    }
+    this.captureRunId(runId);
+    this.publishWorkingStatus();
   }
 
   handleAssistantMessageStart(): void {
@@ -232,11 +242,19 @@ export class A2ATaskExecutionCoordinator {
   }
 
   handleAgentEvent(event: OpenClawExecutionEvent): void {
-    if (this.runId && event.runId !== this.runId) {
+    if (!this.matchesExpectedSessionKey(event)) {
       return;
     }
 
+    const eventRunId = readTrimmedString(event.runId);
+
+    if (this.runId && eventRunId && eventRunId !== this.runId) {
+      return;
+    }
+
+    this.captureRunId(eventRunId);
     this.currentAgentEventMetadata = this.buildAgentEventMetadata(event);
+    this.publishWorkingStatus();
 
     try {
       if (event.stream === "lifecycle") {
@@ -457,6 +475,40 @@ export class A2ATaskExecutionCoordinator {
     }
 
     return true;
+  }
+
+  private matchesExpectedSessionKey(event: OpenClawExecutionEvent): boolean {
+    if (!this.expectedSessionKey) {
+      return true;
+    }
+
+    const eventSessionKey = readTrimmedString(event.sessionKey);
+
+    if (!eventSessionKey) {
+      return true;
+    }
+
+    return eventSessionKey === this.expectedSessionKey;
+  }
+
+  private captureRunId(runId: string | undefined): void {
+    const normalizedRunId = readTrimmedString(runId);
+
+    if (!normalizedRunId || this.runId === normalizedRunId) {
+      return;
+    }
+
+    if (this.runId) {
+      return;
+    }
+
+    this.runId = normalizedRunId;
+
+    if (this.promoted) {
+      this.liveExecutions.update(this.requestContext.taskId, {
+        runId: normalizedRunId,
+      });
+    }
   }
 
   private handleLifecycleEvent(data: Record<string, unknown>): void {

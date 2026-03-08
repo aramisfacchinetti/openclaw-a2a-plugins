@@ -916,6 +916,108 @@ test("metadata exposes currentSequence plus sequence and replayed flags on live 
   }
 });
 
+test("persisted task metadata keeps runId distinct from SessionKey and contextId when learned from agent events", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-runid-"));
+  let server: ReturnType<typeof createServerHarness> | undefined;
+  let result: Task | Message | undefined;
+
+  try {
+    server = createServerHarness(
+      async ({ params, emit }) => {
+        emit({
+          runId: "run-event-owned",
+          stream: "lifecycle",
+          data: { phase: "start" },
+        });
+        emit({
+          runId: "run-event-owned",
+          stream: "assistant",
+          data: { delta: "Hello" },
+        });
+        await params.dispatcherOptions.deliver(
+          { text: "Hello" },
+          { kind: "final" },
+        );
+        emit({
+          runId: "run-event-owned",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+      },
+      {
+        taskStore: {
+          kind: "json-file",
+          path: rootPath,
+        },
+      },
+    );
+
+    result = await server.requestHandler.sendMessage({
+      message: createUserMessage({
+        contextId: "context-event-owned",
+      }),
+      configuration: {
+        blocking: false,
+      },
+    });
+
+    assert.ok(isTask(result));
+
+    if (!isTask(result)) {
+      assert.fail("expected task result");
+    }
+
+    await waitFor(async () => {
+      const snapshot = await server?.requestHandler.getTask({
+        id: result.id,
+        historyLength: 10,
+      });
+
+      return snapshot?.status.state === "completed";
+    });
+
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+    const runtime = await readRuntime(rootPath, result.id);
+    const journal = await readJournal(rootPath, result.id);
+    const runtimeLease =
+      typeof runtime.lease === "object" &&
+      runtime.lease !== null &&
+      !Array.isArray(runtime.lease)
+        ? (runtime.lease as Record<string, unknown>)
+        : undefined;
+
+    assert.equal(getOpenClawMetadata(persisted)?.runId, "run-event-owned");
+    assert.notEqual(getOpenClawMetadata(persisted)?.runId, persisted.contextId);
+    assert.notEqual(getOpenClawMetadata(persisted)?.runId, "session:test");
+    assert.equal(runtimeLease?.runId, "run-event-owned");
+    assert.equal(
+      journal.some((record) => record.provenance.runId === "run-event-owned"),
+      true,
+    );
+    assert.equal(journal.at(-1)?.provenance.runId, "run-event-owned");
+  } finally {
+    if (server && typeof result !== "undefined" && isTask(result)) {
+      const activeServer = server;
+      const taskResult = result;
+
+      await waitFor(async () => {
+        const snapshot = await activeServer.requestHandler.getTask({
+          id: taskResult.id,
+          historyLength: 10,
+        });
+
+        return snapshot.status.state === "completed";
+      });
+    }
+
+    server?.close();
+    await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
 test("memory mode replays only within the current process lifetime", async () => {
   let server: ReturnType<typeof createServerHarness> | undefined;
   let restarted: ReturnType<typeof createServerHarness> | undefined;

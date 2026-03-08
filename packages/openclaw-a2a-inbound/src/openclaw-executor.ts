@@ -64,7 +64,6 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       eventBus,
       this.options.liveExecutions,
     );
-
     let unsubscribeAgentEvents: (() => boolean) | undefined;
 
     try {
@@ -86,6 +85,8 @@ export class OpenClawA2AExecutor implements AgentExecutor {
           sessionStore: this.options.account.sessionStore,
         },
       );
+
+      coordinator.setExpectedSessionKey(route.sessionKey);
 
       const { storePath, body } = buildEnvelope({
         channel: "A2A",
@@ -116,6 +117,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         OriginatingTo: inbound.to,
         Timestamp: inbound.timestamp,
       });
+      coordinator.setExpectedSessionKey(ctxPayload.SessionKey ?? route.sessionKey);
 
       await this.options.channelRuntime.session.recordInboundSession({
         storePath,

@@ -248,6 +248,18 @@ function withCurrentSequence(task: Task, sequence: number): Task {
   return nextTask;
 }
 
+function withTaskRunId(task: Task, runId: string | undefined): Task {
+  if (!runId || runId.trim().length === 0) {
+    return task;
+  }
+
+  const nextTask = cloneTask(task);
+  nextTask.metadata = mergeMetadata(nextTask.metadata as JsonRecord | undefined, {
+    runId,
+  });
+  return nextTask;
+}
+
 function decorateJournalEvent<T extends JournalEvent>(
   event: T,
   sequence: number,
@@ -351,6 +363,7 @@ function foldTaskJournalOntoSnapshot(
       record.event.kind === "status-update"
         ? mergeStatus(nextTask, record.event)
         : mergeArtifact(nextTask, record.event);
+    nextTask = withTaskRunId(nextTask, record.provenance.runId);
     currentSequence = record.sequence;
   }
 
@@ -1307,6 +1320,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
       }
 
       nextTask = withCurrentSequence(nextTask, currentSequence);
+      nextTask = withTaskRunId(nextTask, runId);
 
       await this.storage.writeSnapshot(task.id, nextTask);
       const nextRuntime =
@@ -1359,6 +1373,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
               nextSequence,
             );
       const provenance = readEventProvenance(event);
+      const snapshotRunId = provenance.runId ?? currentRuntime.lease?.runId;
       const nextRuntime =
         classifyTaskState(nextSnapshot.status.state) === "active"
           ? createLease(nextSequence, {
@@ -1387,7 +1402,10 @@ export class A2ATaskRuntimeStore implements TaskStore {
       };
 
       await this.storage.appendEvent(event.taskId, record);
-      await this.storage.writeSnapshot(event.taskId, nextSnapshot);
+      await this.storage.writeSnapshot(
+        event.taskId,
+        withTaskRunId(nextSnapshot, snapshotRunId),
+      );
       await this.storage.writeRuntime(event.taskId, nextRuntime);
 
       this.syncHeartbeat(event.taskId, nextSnapshot.status.state);
@@ -1405,15 +1423,16 @@ export class A2ATaskRuntimeStore implements TaskStore {
       return undefined;
     }
 
+    const runtime = normalizeRuntimeRecord(await this.storage.readRuntime(taskId));
     const { task, currentSequence } = foldTaskJournalOntoSnapshot(
       snapshot,
       await this.storage.readEventsAfter(taskId, readTaskCurrentSequence(snapshot)),
     );
 
     return {
-      task,
+      task: withTaskRunId(task, runtime.lease?.runId),
       currentSequence,
-      runtime: normalizeRuntimeRecord(await this.storage.readRuntime(taskId)),
+      runtime,
     };
   }
 
