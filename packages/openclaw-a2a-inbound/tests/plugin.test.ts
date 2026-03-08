@@ -10,6 +10,7 @@ import plugin from "../dist/index.js";
 type HttpRouteRegistration = {
   path: string;
   auth: "gateway" | "plugin";
+  match?: "exact" | "prefix";
 };
 
 function createApi(config: Record<string, unknown>): OpenClawPluginApi {
@@ -36,7 +37,7 @@ function createApi(config: Record<string, unknown>): OpenClawPluginApi {
     registerTool() {},
     registerHook() {},
     registerHttpRoute(params) {
-      routes.push({ path: params.path, auth: params.auth });
+      routes.push({ path: params.path, auth: params.auth, match: params.match });
     },
     registerChannel(registration) {
       channels.push(
@@ -104,8 +105,13 @@ test("plugin registers one channel, account routes, and a gateway method", () =>
   assert.equal(channels.length, 1);
   assert.equal(channels[0]?.id, "a2a");
   assert.deepEqual(
-    routes.map((route) => route.path),
-    ["/.well-known/agent-card.json", "/a2a/jsonrpc", "/a2a/rest"],
+    routes.map((route) => [route.path, route.match ?? "exact"]),
+    [
+      ["/.well-known/agent-card.json", "exact"],
+      ["/a2a/jsonrpc", "exact"],
+      ["/a2a/rest", "exact"],
+      ["/a2a/files", "prefix"],
+    ],
   );
   assert.equal(
     routes.every((route) => route.auth === "plugin"),

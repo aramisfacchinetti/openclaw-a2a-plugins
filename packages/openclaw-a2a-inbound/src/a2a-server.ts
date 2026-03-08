@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentCard } from "@a2a-js/sdk";
 import { DefaultRequestHandler } from "@a2a-js/sdk/server";
@@ -15,6 +16,10 @@ import type {
 } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID, PLUGIN_VERSION } from "./constants.js";
+import {
+  deriveFilesBasePath,
+  parseTaskFileRequestPath,
+} from "./file-delivery.js";
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
@@ -30,6 +35,10 @@ export interface A2AInboundServerOptions {
   channelRuntime: ChannelRuntime;
   pluginRuntime: PluginRuntime;
   log?: ChannelLogSink;
+  fileDelivery?: {
+    fetchImpl?: typeof fetch;
+    lookupFn?: typeof import("node:dns/promises").lookup;
+  };
 }
 
 export interface A2AInboundServer {
@@ -136,8 +145,9 @@ function createExpressDispatcher(
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
-  const taskStore = createTaskStore(options.account.taskStore);
+  const taskStore = createTaskStore(options.account.taskStore, options.fileDelivery);
   const liveExecutions = new A2ALiveExecutionRegistry();
+  const filesBasePath = deriveFilesBasePath(options.account.jsonRpcPath);
   const agentExecutor = createOpenClawA2AExecutor({
     accountId: options.accountId,
     account: options.account,
@@ -189,6 +199,68 @@ export function createA2AInboundServer(
       userBuilder: UserBuilder.noAuthentication,
     }),
   );
+  app.use(filesBasePath, async (req, res) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.setHeader("allow", "GET, HEAD");
+      res.status(405).end();
+      return;
+    }
+
+    const requestPath = new URL(req.originalUrl ?? req.url, "http://localhost").pathname;
+    const target = parseTaskFileRequestPath({
+      filesBasePath,
+      requestPath,
+    });
+
+    if (!target) {
+      res.status(404).end();
+      return;
+    }
+
+    try {
+      const download = await taskStore.materializeTaskFile({
+        ...target,
+        publicBaseUrl: options.account.publicBaseUrl ?? "https://agents.invalid",
+        auth: options.account.auth,
+      });
+
+      if (!download) {
+        res.status(404).end();
+        return;
+      }
+
+      res.status(200);
+      res.setHeader("content-type", download.contentType);
+
+      if (typeof download.contentLength === "number") {
+        res.setHeader("content-length", String(download.contentLength));
+      }
+
+      if (download.contentDisposition) {
+        res.setHeader("content-disposition", download.contentDisposition);
+      }
+
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+
+      const stream = createReadStream(download.blobPath);
+      stream.on("error", () => {
+        if (!res.writableEnded) {
+          res.destroy();
+        }
+      });
+      stream.pipe(res);
+    } catch {
+      if (!res.headersSent) {
+        res.status(502).end();
+        return;
+      }
+
+      res.destroy();
+    }
+  });
 
   if (options.account.capabilities.rest) {
     app.use(

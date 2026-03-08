@@ -598,6 +598,7 @@ export class A2AInboundRequestHandler {
       }
 
       task = loadedTask;
+      await this.taskRuntime.primePersistedFileRegistry(incomingMessage.taskId);
 
       if (
         typeof incomingMessage.contextId === "string" &&

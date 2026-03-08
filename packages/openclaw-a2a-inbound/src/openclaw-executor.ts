@@ -12,6 +12,7 @@ import {
 } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID } from "./constants.js";
+import { deriveFilesBasePath } from "./file-delivery.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { log } from "./logging.js";
 import { createAgentTextMessage } from "./response-mapping.js";
@@ -77,6 +78,9 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       requestContext,
       eventBus,
       this.options.liveExecutions,
+      this.options.taskRuntime,
+      this.options.account.publicBaseUrl ?? "http://invalid.local",
+      deriveFilesBasePath(this.options.account.jsonRpcPath),
       undefined,
       (runId) => this.options.taskRuntime.captureRunId(requestContext.taskId, runId),
     );

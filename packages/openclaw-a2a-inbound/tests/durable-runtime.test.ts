@@ -12,6 +12,10 @@ import type {
 } from "@a2a-js/sdk";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
 import {
+  buildTaskFileUrl,
+  deriveFilesBasePath,
+} from "../dist/file-delivery.js";
+import {
   createArtifactUpdate,
   createTaskSnapshot,
   createTaskStatusUpdate,
@@ -98,14 +102,37 @@ function createServerHarness(
   accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
   runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
+  const account = createTestAccount(accountOverrides);
   const { pluginRuntime } = createPluginRuntimeHarness(script, runtimeOverrides);
-  return createA2AInboundServer({
+  const server = createA2AInboundServer({
     accountId: "default",
-    account: createTestAccount(accountOverrides),
+    account,
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
   });
+
+  return {
+    ...server,
+    account,
+  };
+}
+
+function assertTaskFileUriMatches(params: {
+  server: ReturnType<typeof createServerHarness>;
+  uri: string;
+  taskId: string;
+  artifactId: string;
+}): void {
+  const expectedPrefix = buildTaskFileUrl({
+    publicBaseUrl: params.server.account.publicBaseUrl ?? "https://agents.example.com",
+    filesBasePath: deriveFilesBasePath(params.server.account.jsonRpcPath),
+    taskId: params.taskId,
+    artifactId: params.artifactId,
+    fileId: "ignored",
+  }).replace(/ignored$/, "");
+
+  assert.equal(params.uri.startsWith(expectedPrefix), true, params.uri);
 }
 
 function taskDirectory(rootPath: string, taskId: string): string {
@@ -1405,10 +1432,14 @@ test("durable runtime preserves replayable assistant file parts and filtered ven
       assistantArtifact?.parts.map((part) => part.kind),
       ["file", "data"],
     );
-    assert.deepEqual(
-      getPartFileUris(assistantArtifact?.parts ?? []),
-      ["https://example.com/durable.pdf"],
-    );
+    const persistedFileUri = getPartFileUris(assistantArtifact?.parts ?? [])[0];
+    assert.ok(persistedFileUri);
+    assertTaskFileUriMatches({
+      server,
+      uri: persistedFileUri!,
+      taskId: result.id,
+      artifactId: "assistant-output-0001",
+    });
     assert.deepEqual(getPartData(assistantArtifact?.parts ?? []), {
       openclaw: {
         reply: {
@@ -1422,6 +1453,7 @@ test("durable runtime preserves replayable assistant file parts and filtered ven
       persisted.status.message?.parts.map((part) => part.kind),
       ["file", "data"],
     );
+    assert.deepEqual(getPartFileUris(persisted.status.message?.parts ?? []), [persistedFileUri]);
 
     const replayed: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
 
@@ -1456,10 +1488,7 @@ test("durable runtime preserves replayable assistant file parts and filtered ven
       replayedAssistant.artifact.parts.map((part) => part.kind),
       ["file", "data"],
     );
-    assert.deepEqual(
-      getPartFileUris(replayedAssistant.artifact.parts),
-      ["https://example.com/durable.pdf"],
-    );
+    assert.deepEqual(getPartFileUris(replayedAssistant.artifact.parts), [persistedFileUri]);
     assert.deepEqual(getPartData(replayedAssistant.artifact.parts), {
       openclaw: {
         reply: {

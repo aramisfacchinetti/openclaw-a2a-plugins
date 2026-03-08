@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { basename, extname } from "node:path";
 import { A2AError } from "@a2a-js/sdk/server";
 import type {
   Artifact,
@@ -12,6 +11,7 @@ import type {
   TaskStatusUpdateEvent,
   TextPart,
 } from "@a2a-js/sdk";
+import { inferMimeTypeFromUri, readUriBasename } from "./file-delivery.js";
 
 export type JsonRecord = Record<string, unknown>;
 type JsonValue =
@@ -28,24 +28,6 @@ export type ToolProgressPhase = "start" | "update" | "result";
 const TEXT_PLAIN_OUTPUT_MODE = "text/plain";
 const JSON_OUTPUT_MODE = "application/json";
 const OCTET_STREAM_OUTPUT_MODE = "application/octet-stream";
-const FILE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  ".csv": "text/csv",
-  ".gif": "image/gif",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".json": "application/json",
-  ".md": "text/markdown",
-  ".mp3": "audio/mpeg",
-  ".mp4": "video/mp4",
-  ".ogg": "audio/ogg",
-  ".pdf": "application/pdf",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain",
-  ".wav": "audio/wav",
-  ".webm": "video/webm",
-  ".webp": "image/webp",
-};
 
 export interface ReplyVendorMetadata {
   channelData?: JsonRecord;
@@ -288,27 +270,6 @@ function normalizeMediaUrls(payload: JsonRecord): string[] {
 
   const mediaUrl = readTrimmedString(payload.mediaUrl);
   return mediaUrl ? [mediaUrl] : [];
-}
-
-function readUriBasename(uri: string): string | undefined {
-  try {
-    const parsed = new URL(uri);
-    const name = basename(parsed.pathname);
-    return name.length > 0 ? name : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function inferMimeTypeFromUri(uri: string): string | undefined {
-  const name = readUriBasename(uri);
-
-  if (!name) {
-    return undefined;
-  }
-
-  const extension = extname(name).toLowerCase();
-  return FILE_MIME_BY_EXTENSION[extension];
 }
 
 function buildReplyFilePart(

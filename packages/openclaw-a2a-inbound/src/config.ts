@@ -10,6 +10,7 @@ import {
   DEFAULT_PROTOCOL_VERSION,
   DEFAULT_REST_PATH,
 } from "./constants.js";
+import { deriveFilesBasePath } from "./file-delivery.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -489,7 +490,54 @@ function parseAccount(
 function validateEnabledRoutePaths(
   accounts: readonly A2AInboundAccountConfig[],
 ): void {
-  const seen = new Map<string, string>();
+  const exactRoutes = new Map<string, string>();
+  const prefixRoutes: Array<{ accountId: string; path: string }> = [];
+
+  const conflictsWithPrefixRoute = (path: string, prefixPath: string): boolean =>
+    path === prefixPath || path.startsWith(`${prefixPath}/`);
+
+  const registerExactRoute = (accountId: string, path: string): void => {
+    const owner = exactRoutes.get(path);
+
+    if (owner) {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${accountId} reuses route path "${path}" already assigned to account "${owner}"`,
+      );
+    }
+
+    for (const prefixRoute of prefixRoutes) {
+      if (conflictsWithPrefixRoute(path, prefixRoute.path)) {
+        throw new Error(
+          `channels.${CHANNEL_ID}.accounts.${accountId} reuses route path "${path}" that collides with files prefix "${prefixRoute.path}" owned by account "${prefixRoute.accountId}"`,
+        );
+      }
+    }
+
+    exactRoutes.set(path, accountId);
+  };
+
+  const registerPrefixRoute = (accountId: string, path: string): void => {
+    for (const [exactPath, owner] of exactRoutes.entries()) {
+      if (conflictsWithPrefixRoute(exactPath, path)) {
+        throw new Error(
+          `channels.${CHANNEL_ID}.accounts.${accountId} derives files prefix "${path}" that collides with route path "${exactPath}" owned by account "${owner}"`,
+        );
+      }
+    }
+
+    for (const prefixRoute of prefixRoutes) {
+      if (
+        conflictsWithPrefixRoute(path, prefixRoute.path) ||
+        conflictsWithPrefixRoute(prefixRoute.path, path)
+      ) {
+        throw new Error(
+          `channels.${CHANNEL_ID}.accounts.${accountId} derives files prefix "${path}" that collides with files prefix "${prefixRoute.path}" owned by account "${prefixRoute.accountId}"`,
+        );
+      }
+    }
+
+    prefixRoutes.push({ accountId, path });
+  };
 
   for (const account of accounts) {
     if (!account.enabled) {
@@ -503,16 +551,10 @@ function validateEnabledRoutePaths(
     ];
 
     for (const path of paths) {
-      const owner = seen.get(path);
-
-      if (owner) {
-        throw new Error(
-          `channels.${CHANNEL_ID}.accounts.${account.accountId} reuses route path "${path}" already assigned to account "${owner}"`,
-        );
-      }
-
-      seen.set(path, account.accountId);
+      registerExactRoute(account.accountId, path);
     }
+
+    registerPrefixRoute(account.accountId, deriveFilesBasePath(account.jsonRpcPath));
   }
 }
 
