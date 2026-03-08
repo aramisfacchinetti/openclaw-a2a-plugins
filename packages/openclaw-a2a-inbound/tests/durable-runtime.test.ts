@@ -1688,6 +1688,16 @@ test("agent card advertises stateTransitionHistory only for durable json-file st
 
     assert.equal(memoryCard.capabilities.stateTransitionHistory, undefined);
     assert.equal(durableCard.capabilities.stateTransitionHistory, true);
+    assert.deepEqual(memoryCard.defaultInputModes, [
+      "text/plain",
+      "application/json",
+      "application/octet-stream",
+    ]);
+    assert.deepEqual(durableCard.defaultInputModes, [
+      "text/plain",
+      "application/json",
+      "application/octet-stream",
+    ]);
   } finally {
     memoryServer.close();
     durableServer.close();

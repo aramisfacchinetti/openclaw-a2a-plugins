@@ -30,6 +30,11 @@ import {
   isQuiescentTaskState,
   isTerminalTaskState,
 } from "./response-mapping.js";
+import {
+  attachOriginalUserMessage,
+  readOriginalUserMessage,
+} from "./request-context.js";
+import { validateInboundMessageParts } from "./session-routing.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import {
   A2ATaskRuntimeStore,
@@ -376,6 +381,7 @@ export class A2AInboundRequestHandler {
   }
 
   private prepareParams(params: MessageSendParams): MessageSendParams {
+    validateInboundMessageParts(params.message);
     return params;
   }
 
@@ -520,7 +526,7 @@ export class A2AInboundRequestHandler {
             taskId: requestContext.taskId,
             contextId: requestContext.contextId,
             state: "failed",
-            history: [structuredClone(requestContext.userMessage)],
+            history: [readOriginalUserMessage(requestContext)],
             messageText: `Agent execution error: ${errorText}`,
           }),
         );
@@ -610,13 +616,16 @@ export class A2AInboundRequestHandler {
       taskId,
     };
 
-    return new RequestContext(
-      messageForContext,
-      taskId,
-      contextId,
-      task,
-      referenceTasks,
-      filteredContext,
+    return attachOriginalUserMessage(
+      new RequestContext(
+        messageForContext,
+        taskId,
+        contextId,
+        task,
+        referenceTasks,
+        filteredContext,
+      ),
+      incomingMessage,
     );
   }
 
