@@ -1,10 +1,12 @@
 ---
 name: remote-agent
 description: Delegate work to external A2A agents using the remote_agent tool.
-metadata: {"openclaw": {"requires": {"config": ["plugins.entries.openclaw-a2a-outbound.enabled"]}}}
+metadata: {"openclaw": {"requires": {"config": ["plugins.entries.openclaw-a2a-outbound.enabled", "plugins.entries.openclaw-a2a-outbound.config.enabled"]}}}
 ---
 
 # Remote Agent Delegation
+
+If the plugin is not installed or configured yet, use the `a2a-delegation-setup` skill first.
 
 Use the `remote_agent` tool to delegate work to external A2A-compatible agents and manage delegated tasks.
 

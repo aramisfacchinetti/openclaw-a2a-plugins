@@ -16,6 +16,14 @@ Pin the exact published version if you want reproducible installs:
 openclaw plugins install @aramisfa/openclaw-a2a-outbound --pin
 ```
 
+Optional guided setup helper:
+
+```bash
+clawhub install a2a-delegation-setup
+```
+
+The ClawHub skill is an optional guided setup helper for installing, enabling, configuring, verifying, updating, and troubleshooting `@aramisfa/openclaw-a2a-outbound`. The plugin itself still installs through `openclaw plugins install @aramisfa/openclaw-a2a-outbound`.
+
 ## Requirements
 
 - Node.js `>=22.12.0`

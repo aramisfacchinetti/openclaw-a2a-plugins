@@ -24,6 +24,14 @@ Start with the outbound plugin, [`@aramisfa/openclaw-a2a-outbound`](./packages/o
 openclaw plugins install @aramisfa/openclaw-a2a-outbound
 ```
 
+Optional guided setup helper:
+
+```bash
+clawhub install a2a-delegation-setup
+```
+
+The ClawHub skill is a slash-command setup helper for installing, enabling, configuring, verifying, updating, and troubleshooting `@aramisfa/openclaw-a2a-outbound`. It is optional and does not replace the primary plugin distribution path above.
+
 ### Quickstart
 
 1. Enable plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config and add at least one target:
