@@ -116,6 +116,8 @@ pnpm changeset
 pnpm version-packages
 ```
 
+`pnpm version-packages` runs `changeset version` and then syncs any `openclaw.plugin.json` manifest version with its package version before the release PR is committed.
+
 Do not run `pnpm release` or `npm publish` for real publishes from a local checkout. Publishing is CI-only through [`.github/workflows/release.yml`](./.github/workflows/release.yml) on `master`, which opens or updates the Changesets release PR, publishes to npm after merge, and creates package-specific GitHub Releases. Local verification should use `npm publish --dry-run`.
 
 The release workflow uses npm trusted publishing through GitHub Actions OIDC instead of an `NPM_TOKEN` secret. Configure npm trusted publishing for each package you want CI to publish, and keep the workflow filename exactly `release.yml`.

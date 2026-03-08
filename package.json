@@ -11,7 +11,7 @@
     "test": "corepack pnpm run test:root && corepack pnpm run test:packages",
     "clean": "corepack pnpm -r run clean",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "node ./scripts/version-packages.cjs",
     "release": "node ./scripts/run-release.cjs"
   },
   "devDependencies": {
