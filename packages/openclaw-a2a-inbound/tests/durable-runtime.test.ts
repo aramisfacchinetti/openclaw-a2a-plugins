@@ -26,6 +26,7 @@ import {
 } from "../dist/task-store.js";
 import {
   createPluginRuntimeHarness,
+  type TestAccountOverrides,
   createTestAccount,
   createUserMessage,
   waitFor,
@@ -99,7 +100,7 @@ function isReplayed(
 
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
-  accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
+  accountOverrides: TestAccountOverrides = {},
   runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
   const account = createTestAccount(accountOverrides);
@@ -110,6 +111,10 @@ function createServerHarness(
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
+    internal: {
+      enableStreamingMethods: true,
+      taskStoreConfig: accountOverrides.taskStore,
+    },
   });
 
   return {
@@ -1861,7 +1866,7 @@ test("resubscribe rejects negative, fractional, and non-numeric afterSequence cu
   }
 });
 
-test("agent card advertises stateTransitionHistory only for durable json-file stores", async () => {
+test("agent card keeps minimal-core defaults regardless of runtime task store", async () => {
   const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-agent-card-"));
   const memoryServer = createServerHarness(async () => {});
   const durableServer = createServerHarness(async () => {}, {
@@ -1876,16 +1881,14 @@ test("agent card advertises stateTransitionHistory only for durable json-file st
     const durableCard = await durableServer.requestHandler.getAgentCard();
 
     assert.equal(memoryCard.capabilities.stateTransitionHistory, undefined);
-    assert.equal(durableCard.capabilities.stateTransitionHistory, true);
+    assert.equal(durableCard.capabilities.stateTransitionHistory, undefined);
     assert.deepEqual(memoryCard.defaultInputModes, [
       "text/plain",
       "application/json",
-      "application/octet-stream",
     ]);
     assert.deepEqual(durableCard.defaultInputModes, [
       "text/plain",
       "application/json",
-      "application/octet-stream",
     ]);
   } finally {
     memoryServer.close();

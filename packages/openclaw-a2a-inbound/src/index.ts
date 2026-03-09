@@ -41,7 +41,6 @@ function registerPlugin(api: OpenClawPluginApi): void {
         publicBaseUrl: account.publicBaseUrl,
         agentCardPath: account.agentCardPath,
         jsonRpcPath: account.jsonRpcPath,
-        restPath: account.capabilities.rest ? account.restPath : undefined,
       })),
     });
   });

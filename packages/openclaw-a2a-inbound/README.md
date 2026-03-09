@@ -2,7 +2,7 @@
 
 Native OpenClaw inbound A2A channel plugin.
 
-This package accepts inbound A2A traffic on the official `@a2a-js/sdk` transport surface and routes requests into OpenClaw through the channel runtime.
+This package serves an A2A agent card plus a JSON-RPC endpoint and routes supported inbound A2A requests into OpenClaw through the channel runtime.
 
 ## Installation
 
@@ -16,82 +16,37 @@ Pin the exact published version if you want reproducible installs:
 openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 ```
 
-## Current Scope
+## Minimal-Core Contract
 
 - Plugin/package id: `openclaw-a2a-inbound`
 - Registers one OpenClaw channel: `a2a`
-- Registers per-account HTTP routes for:
+- Serves:
   - agent card
   - JSON-RPC
-  - REST
-- Builds A2A transport handlers on the official SDK types
-- Bridges inbound A2A requests with text, structured data, and files into the OpenClaw reply pipeline
-- Exposes a diagnostic gateway RPC method: `openclaw-a2a-inbound.describe`
-- Includes a repo-local durable task runtime for snapshot persistence, ordered event replay, and orphan recovery
-- Advertises `defaultInputModes = ["text/plain", "application/json", "application/octet-stream"]` by default
+- Default input modes: `["text/plain", "application/json"]`
+- Default output modes: `["text/plain", "application/json"]`
+- Documented supported A2A methods:
+  - `message/send`
+  - `tasks/get`
+  - `tasks/cancel`
 
-## Response Behavior
+The channel account contract is:
 
-The inbound executor uses request mode to decide whether the initial A2A response stays on the direct `Message` fast path or starts as a `Task`.
+- `enabled`
+- `label`
+- `description`
+- `publicBaseUrl`
+- `defaultAgentId`
+- `sessionStore`
+- `protocolVersion`
+- `agentCardPath`
+- `jsonRpcPath`
+- `maxBodyBytes`
+- `defaultInputModes`
+- `defaultOutputModes`
+- `skills`
 
-| A2A call | Initial response | Incremental progress | Terminal completion |
-| --- | --- | --- | --- |
-| `sendMessage(...)` with default blocking behavior | Direct `Message` for simple terminal runs; promoted `Task` when task-only features are needed | None on the direct-message path | Direct `Message` or terminal `Task` |
-| `sendMessage({ blocking: false })` | Always `Task` with initial `submitted` state | `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent` updates during execution | Persisted terminal `Task` |
-| `sendMessageStream(...)` | Always `Task` as the first streamed event | `submitted` / `working` status updates plus incremental `assistant-output`, tool-progress, and tool-result artifact updates | Final status update with a completed, failed, or canceled task |
-
-Assistant preview text is emitted through a single `assistant-output` artifact for the whole run. Streaming and non-blocking executions publish incremental artifact updates as OpenClaw emits assistant and tool events, then close the artifact with a final `lastChunk` update when execution finishes.
-
-`resubscribe()` now serves the latest task snapshot plus durable replay from the committed journal instead of depending on a live in-process event bus. If a nonterminal task is found without a live owner and with an expired or missing lease, it is reconciled to terminal `failed` with the message `Task execution was interrupted by process loss before completion.`
-
-Durable task continuation is now pinned to the original OpenClaw binding for the task lifetime. If current routing config drifts after a task is created, later `sendMessage(...)` continuations still reuse the persisted session and store binding instead of silently rerouting.
-
-## Durable Task Runtime
-
-`taskStore.kind = "json-file"` enables a directory-backed runtime store rooted at `taskStore.path`.
-
-Per task, the runtime stores:
-
-- `tasks/<base64url(taskId)>/binding.json`
-- `tasks/<base64url(taskId)>/snapshot.json`
-- `tasks/<base64url(taskId)>/events.ndjson`
-- `tasks/<base64url(taskId)>/runtime.json`
-
-Notes:
-
-- `taskStore.path` is a directory root in v1, not a single JSON file.
-- The file-backed runtime is single-writer. Startup fails fast if another live process already owns the same root.
-- `binding.json` is the durable source of truth for OpenClaw agent/session/store identity once a task is promoted.
-- Blocking requests that finish as a direct `Message` never flush `binding.json`; bindings are only written on the first durable task write path.
-- Durable replay and `AgentCard.capabilities.stateTransitionHistory = true` are only enabled for `json-file` mode.
-- `memory` mode keeps the same replay API inside the current process lifetime, but all task state disappears on restart.
-- Durable tasks created before `binding.json` was introduced remain readable, replayable, cancelable when already quiescent or terminal, and orphan-recoverable, but they cannot be resumed.
-
-## Vendor Extensions
-
-The inbound runtime uses `openclaw` metadata extensions for durable replay cursors and journal sequence reporting.
-
-- Request cursor: `params.metadata.openclaw.afterSequence`
-- Task snapshot metadata: `task.metadata.openclaw.currentSequence`
-- Stream event metadata: `metadata.openclaw.sequence`
-- Replay marker on replayed events: `metadata.openclaw.replayed = true`
-
-## Identifier Mapping
-
-The inbound runtime keeps A2A and OpenClaw identifiers separate:
-
-- `taskId` and `contextId` come from the A2A request/task surface.
-- `SessionKey` is the OpenClaw routing/session key used for inbound conversation state.
-- `runId` is the OpenClaw execution identifier captured from `onAgentRunStart` or agent events and persisted under `metadata.openclaw.runId` when available.
-
-Do not assume `runId` equals `SessionKey`, `contextId`, or `taskId`. Some current OpenClaw builds may fall back to a session-derived value when no explicit run id is provided, but the inbound plugin treats that as an implementation detail rather than a contract.
-
-For new durable tasks, the bound peer id now falls back in this order: authenticated `ServerCallContext.user.userName`, then A2A `contextId`, then `taskId`, then `messageId`. Continued tasks keep using the original bound peer id from `binding.json`, even if later inbound messages carry a different `messageId`.
-
-## Current Limitations
-
-- push notifications
-- outbound delivery back to remote A2A peers initiated by OpenClaw
+Legacy config fields such as `restPath`, `capabilities`, `auth`, and `taskStore` are rejected during config parsing.
 
 ## Requirements
 
@@ -114,16 +69,15 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
           defaultAgentId: "main",
           agentCardPath: "/.well-known/agent-card.json",
           jsonRpcPath: "/a2a/jsonrpc",
-          restPath: "/a2a/rest",
-          auth: {
-            mode: "header-token",
-            headerName: "authorization",
-            tokenEnv: "OPENCLAW_A2A_TOKEN"
-          },
-          taskStore: {
-            kind: "json-file",
-            path: "/var/lib/openclaw/a2a-runtime"
-          }
+          maxBodyBytes: 1048576,
+          defaultInputModes: ["text/plain", "application/json"],
+          defaultOutputModes: ["text/plain", "application/json"],
+          skills: [
+            {
+              id: "chat",
+              name: "Chat"
+            }
+          ]
         }
       }
     }
@@ -131,16 +85,18 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 }
 ```
 
+`publicBaseUrl` is the only required readiness prerequisite because the plugin needs it to publish a valid agent card URL.
+
 ## Package Layout
 
 - `src/index.ts`: plugin entrypoint and registration
 - `src/channel.ts`: OpenClaw channel definition
 - `src/http-routes.ts`: plugin HTTP route registration
-- `src/plugin-host.ts`: active account registry and auth gate
-- `src/a2a-server.ts`: official A2A SDK server wiring
+- `src/plugin-host.ts`: active account registry
+- `src/a2a-server.ts`: A2A SDK server wiring
 - `src/openclaw-executor.ts`: bridge from A2A `AgentExecutor` into OpenClaw
 - `src/session-routing.ts`: inbound message and session mapping helpers
-- `src/task-store.ts`: in-memory and JSON-file durable runtime store implementations
+- `src/task-store.ts`: internal task runtime implementation
 - `src/config.ts`: channel config schema and parser
 
 ## Development

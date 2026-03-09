@@ -31,16 +31,6 @@ export function registerA2AInboundHttpRoutes(
     });
     registered += 1;
 
-    if (account.capabilities.rest) {
-      api.registerHttpRoute({
-        path: account.restPath,
-        auth: "plugin",
-        handler: (req, res) =>
-          host.handleHttpRoute({ accountId: account.accountId, req, res }),
-      });
-      registered += 1;
-    }
-
     api.registerHttpRoute({
       path: deriveFilesBasePath(account.jsonRpcPath),
       auth: "plugin",

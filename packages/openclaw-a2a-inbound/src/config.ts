@@ -8,7 +8,6 @@ import {
   DEFAULT_JSON_RPC_PATH,
   DEFAULT_MAX_BODY_BYTES,
   DEFAULT_PROTOCOL_VERSION,
-  DEFAULT_REST_PATH,
 } from "./constants.js";
 import { deriveFilesBasePath } from "./file-delivery.js";
 
@@ -17,13 +16,11 @@ type JsonRecord = Record<string, unknown>;
 export const DEFAULT_INPUT_MODES = [
   "text/plain",
   "application/json",
-  "application/octet-stream",
 ] as const;
 
 export const DEFAULT_OUTPUT_MODES = [
   "text/plain",
   "application/json",
-  "application/octet-stream",
 ] as const;
 
 export interface A2AInboundSkillConfig {
@@ -32,18 +29,6 @@ export interface A2AInboundSkillConfig {
   description?: string;
   tags: string[];
   examples: string[];
-}
-
-export interface A2AInboundAuthConfig {
-  mode: "none" | "header-token";
-  headerName: string;
-  token?: string;
-  tokenEnv?: string;
-}
-
-export interface A2AInboundTaskStoreConfig {
-  kind: "memory" | "json-file";
-  path?: string;
 }
 
 export interface A2AInboundAccountConfig {
@@ -57,18 +42,10 @@ export interface A2AInboundAccountConfig {
   protocolVersion: string;
   agentCardPath: string;
   jsonRpcPath: string;
-  restPath: string;
   maxBodyBytes: number;
   defaultInputModes: string[];
   defaultOutputModes: string[];
   skills: A2AInboundSkillConfig[];
-  capabilities: {
-    streaming: boolean;
-    pushNotifications: boolean;
-    rest: boolean;
-  };
-  auth: A2AInboundAuthConfig;
-  taskStore: A2AInboundTaskStoreConfig;
 }
 
 export interface A2AInboundChannelConfig {
@@ -133,10 +110,6 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
             type: "string",
             default: DEFAULT_JSON_RPC_PATH,
           },
-          restPath: {
-            type: "string",
-            default: DEFAULT_REST_PATH,
-          },
           maxBodyBytes: {
             type: "integer",
             minimum: 1,
@@ -176,50 +149,6 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
             },
             default: [...DEFAULT_SKILLS],
           },
-          capabilities: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              streaming: { type: "boolean", default: false },
-              pushNotifications: { type: "boolean", default: false },
-              rest: { type: "boolean", default: true },
-            },
-          },
-          auth: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              mode: {
-                type: "string",
-                enum: ["none", "header-token"],
-                default: "none",
-              },
-              headerName: {
-                type: "string",
-                default: "authorization",
-              },
-              token: {
-                type: "string",
-              },
-              tokenEnv: {
-                type: "string",
-              },
-            },
-          },
-          taskStore: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              kind: {
-                type: "string",
-                enum: ["memory", "json-file"],
-                default: "memory",
-              },
-              path: {
-                type: "string",
-              },
-            },
-          },
         },
       },
     },
@@ -249,42 +178,6 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
     label: "JSON-RPC Path",
     help: "HTTP path serving the A2A JSON-RPC transport.",
     advanced: true,
-  },
-  "accounts.*.restPath": {
-    label: "REST Path",
-    help: "HTTP path serving the A2A REST transport.",
-    advanced: true,
-  },
-  "accounts.*.auth.mode": {
-    label: "Auth Mode",
-    help: "Choose whether the inbound endpoint is unauthenticated or guarded by a shared header token.",
-  },
-  "accounts.*.auth.headerName": {
-    label: "Auth Header",
-    help: "Header name checked when auth.mode is header-token.",
-    advanced: true,
-  },
-  "accounts.*.auth.token": {
-    label: "Static Auth Token",
-    help: "Optional shared secret for header-token auth.",
-    advanced: true,
-    sensitive: true,
-  },
-  "accounts.*.auth.tokenEnv": {
-    label: "Auth Token Env Var",
-    help: "Environment variable used to load the shared secret.",
-    advanced: true,
-  },
-  "accounts.*.taskStore.kind": {
-    label: "Task Store Kind",
-    help: "Choose whether A2A tasks are kept in memory or persisted under a single-writer runtime directory.",
-    advanced: true,
-  },
-  "accounts.*.taskStore.path": {
-    label: "Task Store Path",
-    help: "Required when taskStore.kind is json-file. The path is a runtime-store directory root, not a single file.",
-    advanced: true,
-    placeholder: "/var/lib/openclaw/a2a-runtime",
   },
 } satisfies NonNullable<ChannelConfigSchema["uiHints"]>;
 
@@ -410,32 +303,24 @@ function parseSkills(value: unknown): A2AInboundSkillConfig[] {
       }));
 }
 
-function parseAuth(value: unknown): A2AInboundAuthConfig {
-  const record = asRecord(value);
-  const mode = record.mode === "header-token" ? "header-token" : "none";
+const FORBIDDEN_ACCOUNT_KEYS = [
+  "restPath",
+  "capabilities",
+  "auth",
+  "taskStore",
+] as const;
 
-  return {
-    mode,
-    headerName: readString(record.headerName, "authorization"),
-    ...(readOptionalString(record.token)
-      ? { token: readOptionalString(record.token) }
-      : {}),
-    ...(readOptionalString(record.tokenEnv)
-      ? { tokenEnv: readOptionalString(record.tokenEnv) }
-      : {}),
-  };
-}
-
-function parseTaskStore(value: unknown): A2AInboundTaskStoreConfig {
-  const record = asRecord(value);
-  const kind = record.kind === "json-file" ? "json-file" : "memory";
-
-  return {
-    kind,
-    ...(readOptionalString(record.path)
-      ? { path: readOptionalString(record.path) }
-      : {}),
-  };
+function assertNoForbiddenAccountKeys(
+  accountId: string,
+  record: JsonRecord,
+): void {
+  for (const key of FORBIDDEN_ACCOUNT_KEYS) {
+    if (key in record) {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${accountId}.${key} is not supported; remove "${key}" from the A2A inbound account config.`,
+      );
+    }
+  }
 }
 
 function parseAccount(
@@ -443,6 +328,7 @@ function parseAccount(
   value: unknown,
 ): A2AInboundAccountConfig {
   const record = asRecord(value);
+  assertNoForbiddenAccountKeys(accountId, record);
 
   return {
     accountId,
@@ -466,24 +352,10 @@ function parseAccount(
     ),
     agentCardPath: normalizePath(record.agentCardPath, DEFAULT_AGENT_CARD_PATH),
     jsonRpcPath: normalizePath(record.jsonRpcPath, DEFAULT_JSON_RPC_PATH),
-    restPath: normalizePath(record.restPath, DEFAULT_REST_PATH),
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
     defaultInputModes: readStringArray(record.defaultInputModes, DEFAULT_INPUT_MODES),
     defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
     skills: parseSkills(record.skills),
-    capabilities: {
-      streaming: readBoolean(
-        asRecord(record.capabilities).streaming,
-        false,
-      ),
-      pushNotifications: readBoolean(
-        asRecord(record.capabilities).pushNotifications,
-        false,
-      ),
-      rest: readBoolean(asRecord(record.capabilities).rest, true),
-    },
-    auth: parseAuth(record.auth),
-    taskStore: parseTaskStore(record.taskStore),
   };
 }
 
@@ -547,7 +419,6 @@ function validateEnabledRoutePaths(
     const paths = [
       account.agentCardPath,
       account.jsonRpcPath,
-      ...(account.capabilities.rest ? [account.restPath] : []),
     ];
 
     for (const path of paths) {
@@ -605,43 +476,10 @@ export function resolveA2AInboundAccount(
   );
 }
 
-export function resolveConfiguredAuthToken(
-  auth: A2AInboundAuthConfig,
-): string | undefined {
-  if (auth.mode !== "header-token") {
-    return undefined;
-  }
-
-  if (auth.token) {
-    return auth.token;
-  }
-
-  if (auth.tokenEnv) {
-    const envValue = process.env[auth.tokenEnv];
-    return typeof envValue === "string" && envValue.trim().length > 0
-      ? envValue.trim()
-      : undefined;
-  }
-
-  return undefined;
-}
-
 export function isA2AInboundAccountConfigured(
   account: A2AInboundAccountConfig,
 ): boolean {
-  if (!account.publicBaseUrl) {
-    return false;
-  }
-
-  if (account.taskStore.kind === "json-file" && !account.taskStore.path) {
-    return false;
-  }
-
-  if (account.auth.mode === "header-token") {
-    return resolveConfiguredAuthToken(account.auth) !== undefined;
-  }
-
-  return true;
+  return Boolean(account.publicBaseUrl);
 }
 
 export function explainA2AInboundAccountUnconfigured(
@@ -649,17 +487,6 @@ export function explainA2AInboundAccountUnconfigured(
 ): string {
   if (!account.publicBaseUrl) {
     return "publicBaseUrl is required to advertise a valid agent card.";
-  }
-
-  if (
-    account.auth.mode === "header-token" &&
-    resolveConfiguredAuthToken(account.auth) === undefined
-  ) {
-    return "auth.mode=header-token requires auth.token or an env var referenced by auth.tokenEnv.";
-  }
-
-  if (account.taskStore.kind === "json-file" && !account.taskStore.path) {
-    return "taskStore.kind=json-file requires taskStore.path.";
   }
 
   return "account is not ready to start.";

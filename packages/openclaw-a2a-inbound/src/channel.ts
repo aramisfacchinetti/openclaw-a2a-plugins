@@ -39,9 +39,9 @@ export function buildA2AInboundChannel(
     meta: {
       id: CHANNEL_ID,
       label: CHANNEL_LABEL,
-      selectionLabel: "A2A Inbound (HTTP/JSON-RPC)",
+      selectionLabel: "A2A Inbound (JSON-RPC)",
       docsPath: CHANNEL_DOCS_PATH,
-      blurb: "Expose OpenClaw agents to external A2A peers.",
+      blurb: "Expose OpenClaw agents to external A2A peers through A2A JSON-RPC.",
       aliases: ["a2a"],
     },
     capabilities: {
