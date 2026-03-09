@@ -30,21 +30,6 @@ function registerPlugin(api: OpenClawPluginApi): void {
     channelConfig,
   );
 
-  api.registerGatewayMethod(`${PLUGIN_ID}.describe`, ({ respond }) => {
-    respond(true, {
-      pluginId: PLUGIN_ID,
-      channelId: CHANNEL_ID,
-      registeredRouteCount,
-      accounts: Object.values(channelConfig.accounts).map((account) => ({
-        accountId: account.accountId,
-        enabled: account.enabled,
-        publicBaseUrl: account.publicBaseUrl,
-        agentCardPath: account.agentCardPath,
-        jsonRpcPath: account.jsonRpcPath,
-      })),
-    });
-  });
-
   log(api.logger, "info", "a2a.inbound.plugin.loaded", {
     pluginId: PLUGIN_ID,
     channelId: CHANNEL_ID,

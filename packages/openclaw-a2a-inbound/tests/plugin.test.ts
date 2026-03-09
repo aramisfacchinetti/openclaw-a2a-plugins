@@ -84,7 +84,7 @@ function getInternalCollections(api: OpenClawPluginApi): {
   };
 }
 
-test("plugin registers one channel, minimal-core routes, and a gateway method", () => {
+test("plugin registers one channel and only the minimal-core HTTP routes", () => {
   const api = createApi({
     channels: {
       a2a: {
@@ -109,47 +109,13 @@ test("plugin registers one channel, minimal-core routes, and a gateway method", 
     [
       ["/.well-known/agent-card.json", "exact"],
       ["/a2a/jsonrpc", "exact"],
-      ["/a2a/files", "prefix"],
     ],
   );
   assert.equal(
     routes.every((route) => route.auth === "plugin"),
     true,
   );
-  assert.equal(gatewayMethods.has("openclaw-a2a-inbound.describe"), true);
-
-  const describe = gatewayMethods.get("openclaw-a2a-inbound.describe");
-  let describeResult:
-    | {
-        ok: boolean;
-        payload: unknown;
-      }
-    | undefined;
-
-  assert.ok(describe);
-  describe?.({
-    respond(ok, payload) {
-      describeResult = { ok, payload };
-    },
-  } as never);
-
-  assert.deepEqual(describeResult, {
-    ok: true,
-    payload: {
-      pluginId: "openclaw-a2a-inbound",
-      channelId: "a2a",
-      registeredRouteCount: 3,
-      accounts: [
-        {
-          accountId: "default",
-          enabled: true,
-          publicBaseUrl: "https://agents.example.com/",
-          agentCardPath: "/.well-known/agent-card.json",
-          jsonRpcPath: "/a2a/jsonrpc",
-        },
-      ],
-    },
-  });
+  assert.equal(gatewayMethods.size, 0);
 });
 
 test("plugin tolerates missing channel accounts and only registers the channel", () => {
@@ -161,5 +127,5 @@ test("plugin tolerates missing channel accounts and only registers the channel",
 
   assert.equal(channels.length, 1);
   assert.equal(routes.length, 0);
-  assert.equal(gatewayMethods.has("openclaw-a2a-inbound.describe"), true);
+  assert.equal(gatewayMethods.size, 0);
 });

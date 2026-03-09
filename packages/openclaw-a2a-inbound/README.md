@@ -23,6 +23,9 @@ openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 - Serves:
   - agent card
   - JSON-RPC
+- Does not expose:
+  - file-delivery HTTP routes
+  - outbound A2A file transport
 - Default input modes: `["text/plain", "application/json"]`
 - Default output modes: `["text/plain", "application/json"]`
 - Documented supported A2A methods:
@@ -47,6 +50,8 @@ The channel account contract is:
 - `skills`
 
 Legacy config fields such as `restPath`, `capabilities`, `auth`, and `taskStore` are rejected during config parsing.
+
+Outbound replies only surface representable text and OpenClaw vendor-data JSON parts. If a reply only contains media URLs after filtering, the request fails with A2A content-type-not-supported instead of exposing dead file links.
 
 ## Requirements
 
