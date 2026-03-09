@@ -523,6 +523,10 @@ export class A2AInboundRequestHandler {
           return;
         }
 
+        if (error instanceof A2AError && error.code === -32005) {
+          return;
+        }
+
         console.error(`Task ${params.taskId} background processing failed.`, error);
       });
     });
@@ -598,7 +602,6 @@ export class A2AInboundRequestHandler {
       }
 
       task = loadedTask;
-      await this.taskRuntime.primePersistedFileRegistry(incomingMessage.taskId);
 
       if (
         typeof incomingMessage.contextId === "string" &&

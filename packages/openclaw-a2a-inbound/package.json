@@ -53,7 +53,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "rm -rf dist && tsc -b",
     "typecheck:src": "tsc -b --pretty false",
     "typecheck:tests": "tsc -p tsconfig.tests.json --pretty false",
     "typecheck": "corepack pnpm run typecheck:src && corepack pnpm run typecheck:tests",

@@ -75,6 +75,6 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
 
   assert.equal(channels.length, 1);
   assert.equal(channels[0]?.id, "a2a");
-  assert.equal(routes.length, 3);
-  assert.equal(gatewayMethods.has("openclaw-a2a-inbound.describe"), true);
+  assert.equal(routes.length, 2);
+  assert.equal(gatewayMethods.size, 0);
 });

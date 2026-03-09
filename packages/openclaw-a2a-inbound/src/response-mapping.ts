@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { basename, extname } from "node:path";
 import { A2AError } from "@a2a-js/sdk/server";
 import type {
   Artifact,
   DataPart,
-  FilePart,
   Message,
   Part,
   Task,
@@ -11,7 +11,6 @@ import type {
   TaskStatusUpdateEvent,
   TextPart,
 } from "@a2a-js/sdk";
-import { inferMimeTypeFromUri, readUriBasename } from "./file-delivery.js";
 
 export type JsonRecord = Record<string, unknown>;
 type JsonValue =
@@ -28,6 +27,24 @@ export type ToolProgressPhase = "start" | "update" | "result";
 const TEXT_PLAIN_OUTPUT_MODE = "text/plain";
 const JSON_OUTPUT_MODE = "application/json";
 const OCTET_STREAM_OUTPUT_MODE = "application/octet-stream";
+const FILE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  ".csv": "text/csv",
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".md": "text/markdown",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".ogg": "audio/ogg",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
+};
 
 export interface ReplyVendorMetadata {
   channelData?: JsonRecord;
@@ -121,6 +138,27 @@ function readTrimmedString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
+}
+
+function readUriBasename(uri: string): string | undefined {
+  try {
+    const parsed = new URL(uri);
+    const name = basename(parsed.pathname);
+    return name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferMimeTypeFromUri(uri: string): string | undefined {
+  const name = readUriBasename(uri);
+
+  if (!name) {
+    return undefined;
+  }
+
+  const extension = extname(name).toLowerCase();
+  return FILE_MIME_BY_EXTENSION[extension];
 }
 
 function mergeMetadata(
@@ -272,32 +310,6 @@ function normalizeMediaUrls(payload: JsonRecord): string[] {
   return mediaUrl ? [mediaUrl] : [];
 }
 
-function buildReplyFilePart(
-  payload: NormalizedReplyPayload,
-  uri: string,
-): {
-  availableOutputModes: string[];
-  part: FilePart;
-} {
-  const name = readUriBasename(uri);
-  const mimeType = inferMimeTypeFromUri(uri);
-
-  return {
-    availableOutputModes: mimeType
-      ? [mimeType, OCTET_STREAM_OUTPUT_MODE]
-      : [OCTET_STREAM_OUTPUT_MODE],
-    part: {
-      kind: "file",
-      file: {
-        uri,
-        ...(name ? { name } : {}),
-        ...(mimeType ? { mimeType } : {}),
-      },
-      ...(buildReplyPartMetadata(payload) ? { metadata: buildReplyPartMetadata(payload) } : {}),
-    },
-  };
-}
-
 function hasAllowedOutputMode(
   acceptedOutputModes: ReadonlySet<string>,
   mode: string,
@@ -438,18 +450,11 @@ export function buildReplyContent(params: {
   }
 
   for (const uri of params.payload.mediaUrls) {
-    const filePart = buildReplyFilePart(params.payload, uri);
+    const mimeType = inferMimeTypeFromUri(uri);
+    availableOutputModes.add(OCTET_STREAM_OUTPUT_MODE);
 
-    for (const mode of filePart.availableOutputModes) {
-      availableOutputModes.add(mode);
-    }
-
-    if (
-      filePart.availableOutputModes.some((mode) =>
-        hasAllowedOutputMode(acceptedOutputModes, mode),
-      )
-    ) {
-      parts.push(filePart.part);
+    if (mimeType) {
+      availableOutputModes.add(mimeType);
     }
   }
 
