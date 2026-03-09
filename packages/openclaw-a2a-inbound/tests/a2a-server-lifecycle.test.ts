@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,10 +11,6 @@ import type {
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
-import {
-  buildTaskFileUrl,
-  deriveFilesBasePath,
-} from "../dist/file-delivery.js";
 import {
   createPluginRuntimeHarness,
   type TestAccountOverrides,
@@ -180,6 +177,32 @@ function isReplayedEvent(
   return getOpenClawMetadata(event)?.replayed === true;
 }
 
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to resolve test server address.");
+  }
+
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function closeHttpServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: TestAccountOverrides = {},
@@ -202,36 +225,6 @@ function createServerHarness(
     ...server,
     account,
   };
-}
-
-function buildExpectedTaskFileUri(params: {
-  server: ReturnType<typeof createServerHarness>;
-  taskId: string;
-  artifactId: string;
-  fileId?: string;
-}): string {
-  return buildTaskFileUrl({
-    publicBaseUrl: params.server.account.publicBaseUrl ?? "https://agents.example.com",
-    filesBasePath: deriveFilesBasePath(params.server.account.jsonRpcPath),
-    taskId: params.taskId,
-    artifactId: params.artifactId,
-    fileId: params.fileId ?? "ignored",
-  });
-}
-
-function assertTaskFileUriMatches(params: {
-  server: ReturnType<typeof createServerHarness>;
-  uri: string;
-  taskId: string;
-  artifactId: string;
-}): void {
-  const expectedPrefix = buildExpectedTaskFileUri({
-    server: params.server,
-    taskId: params.taskId,
-    artifactId: params.artifactId,
-  }).replace(/ignored$/, "");
-
-  assert.equal(params.uri.startsWith(expectedPrefix), true, params.uri);
 }
 
 async function collectStream(
@@ -349,7 +342,34 @@ test("sendMessage drops file parts from blocking replies under the default text/
   );
 });
 
-test("sendMessage promotes blocking file-only replies to a Task when octet-stream is accepted", async () => {
+test("former /files paths now fall through to the server 404 route", async () => {
+  const harness = createServerHarness(async () => {});
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const response = await fetch(`${baseUrl}/a2a/files/missing/missing/missing`);
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), {
+      error: {
+        code: "A2A_ROUTE_NOT_FOUND",
+        message: "No A2A inbound route matched this request.",
+        details: {
+          channel: "a2a",
+          accountId: "default",
+        },
+      },
+    });
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+  }
+});
+
+test("sendMessage rejects file-only blocking replies when only octet-stream would match", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct-file");
     emit({
@@ -370,23 +390,81 @@ test("sendMessage promotes blocking file-only replies to a Task when octet-strea
     });
   });
 
+  await assert.rejects(
+    () =>
+      server.requestHandler.sendMessage({
+        message: createUserMessage(),
+        configuration: {
+          acceptedOutputModes: ["application/octet-stream"],
+        },
+      }),
+    (error: unknown) => {
+      assert.equal(
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code: unknown }).code
+          : undefined,
+        -32005,
+      );
+      return true;
+    },
+  );
+});
+
+test("nonblocking file-only replies fail the promoted task without file parts", async () => {
+  const server = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-nonblocking-file");
+    emit({
+      runId: "run-nonblocking-file",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      {
+        mediaUrl: "https://example.com/image.png",
+      },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-nonblocking-file",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
   const result = await server.requestHandler.sendMessage({
     message: createUserMessage(),
     configuration: {
+      blocking: false,
       acceptedOutputModes: ["application/octet-stream"],
     },
   });
 
   assert.equal(result.kind, "task");
-  assert.deepEqual(result.status.message?.parts.map((part) => part.kind), ["file"]);
-  const fileUri = getPartFileUris(result.status.message?.parts ?? [])[0];
-  assert.ok(fileUri);
-  assertTaskFileUriMatches({
-    server,
-    uri: fileUri!,
-    taskId: result.id,
-    artifactId: "assistant-output-0001",
+
+  await waitFor(async () => {
+    const persisted = await server.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+
+    return persisted.status.state === "failed";
   });
+
+  const persisted = await server.requestHandler.getTask({
+    id: result.id,
+    historyLength: 10,
+  });
+
+  assert.equal(persisted.status.state, "failed");
+  assert.equal(
+    getStatusMessageText(persisted),
+    "The response could not be represented in any accepted output mode.",
+  );
+  assert.deepEqual(getPartFileUris(persisted.status.message?.parts ?? []), []);
+  assert.equal(
+    persisted.artifacts?.some((artifact) => getPartFileUris(artifact.parts).length > 0) ?? false,
+    false,
+  );
 });
 
 test("acceptedOutputModes text/plain strips vendor data and file parts when text remains", async () => {

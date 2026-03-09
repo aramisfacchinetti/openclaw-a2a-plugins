@@ -64,31 +64,30 @@ test("duplicate enabled route paths are rejected", () => {
   );
 });
 
-test("colliding derived files prefixes are rejected", () => {
-  assert.throws(
-    () =>
-      parseA2AInboundChannelConfig({
-        channels: {
-          a2a: {
-            accounts: {
-              primary: {
-                enabled: true,
-                publicBaseUrl: "https://agents.example.com",
-                agentCardPath: "/primary/agent-card.json",
-                jsonRpcPath: "/shared/jsonrpc",
-              },
-              secondary: {
-                enabled: true,
-                publicBaseUrl: "https://agents.example.com",
-                agentCardPath: "/secondary/agent-card.json",
-                jsonRpcPath: "/shared/rpc",
-              },
-            },
+test("sibling JSON-RPC paths are allowed when only the removed files prefix would have collided", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          primary: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            agentCardPath: "/primary/agent-card.json",
+            jsonRpcPath: "/shared/jsonrpc",
+          },
+          secondary: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            agentCardPath: "/secondary/agent-card.json",
+            jsonRpcPath: "/shared/rpc",
           },
         },
-      }),
-    /files prefix/,
-  );
+      },
+    },
+  });
+
+  assert.equal(parsed.accounts.primary?.jsonRpcPath, "/shared/jsonrpc");
+  assert.equal(parsed.accounts.secondary?.jsonRpcPath, "/shared/rpc");
 });
 
 test("synthetic fallback accounts are disabled when not configured", () => {

@@ -20,10 +20,8 @@ The current codebase has completed the public-contract freeze:
 
 The current codebase has not yet completed the deeper runtime simplification:
 
-- file delivery and `/a2a/files` still exist
 - durable task-store code still exists internally
 - OpenClaw vendor metadata is still emitted
-- the diagnostic gateway RPC still exists
 - push notification config methods have not been removed from the request handler surface
 
 This document now records both:
@@ -77,22 +75,20 @@ Breaking changes are acceptable. The repo is still pre-1.0 and the project instr
 - Default modes are now:
   - `["text/plain", "application/json"]` for input
   - `["text/plain", "application/json"]` for output
-- The plugin diagnostic RPC payload no longer exposes removed config fields.
+- The plugin no longer registers `/a2a/files`.
+- The plugin no longer registers `openclaw-a2a-inbound.describe`.
+- Outbound reply file parts are filtered instead of being rewritten to same-origin transport URLs.
+- File-only outbound replies now fail with A2A `-32005` instead of returning dead file links.
 - Production startup defaults to in-memory task storage because task-store config was removed from the public account contract.
 - Production startup does not enable streaming methods because the plugin path does not pass the internal streaming switch.
-- Same-origin auth forwarding for file materialization was removed along with the public auth config.
 
 ### Still present in the current codebase
 
-- `/a2a/files` is still registered by the plugin.
-- File output delivery still works when output modes explicitly allow file content.
-- Internal file-delivery machinery still exists.
 - Durable task-store code still exists in `src/task-store.ts`.
 - Internal/test-only server options can still enable:
   - durable `json-file` task storage
   - streaming request-handler methods
 - OpenClaw metadata extensions such as `metadata.openclaw.*` still exist in tasks and events.
-- The diagnostic gateway RPC `openclaw-a2a-inbound.describe` is still registered.
 - Push notification config methods are still delegated through the underlying SDK request handler.
 
 ### Practical consequence
@@ -119,12 +115,8 @@ No longer part of the public contract:
 - REST config
 - auth config
 - task-store config
-
-Important current implementation note:
-
-- the plugin still registers `/a2a/files`
-
-That route is not part of the intended minimal-core contract, but it still exists today because the file-delivery internals have not been removed yet.
+- outbound file-delivery HTTP routes
+- outbound file transport URLs
 
 ### Advertised capabilities
 
@@ -189,9 +181,7 @@ The final target described by this RFC is still not reached. The main remaining 
 
 ### Transport/runtime extras still present
 
-- remove `/a2a/files`
-- remove file-delivery runtime behavior
-- remove diagnostic gateway RPC registration
+- complete the remaining task-runtime replacement work after file transport removal
 
 ### Task-runtime simplification still pending
 
@@ -207,9 +197,7 @@ The final target described by this RFC is still not reached. The main remaining 
 
 ### Content handling cleanup still pending
 
-- explicitly decide whether file inputs/outputs should be rejected outright or remain available only behind explicit non-default modes until later removal
-
-The current implementation still allows file-oriented behavior in some runtime paths even though the public defaults and public docs no longer advertise that capability.
+- decide whether inbound file inputs should remain accepted in the final minimal-core package
 
 ## Updated Phasing
 
@@ -228,17 +216,16 @@ Completed work:
 
 ### Phase 2: Remove remaining public/runtime mismatches
 
-Status: Partial
+Status: Complete
 
 Completed work:
 
 - removed REST route registration
 - removed plugin-host auth gating
-
-Still pending in this phase:
-
-- remove `/a2a/files`
-- remove diagnostic gateway RPC registration
+- removed `/a2a/files`
+- removed diagnostic gateway RPC registration
+- removed outbound file URL materialization and registration plumbing
+- changed outbound file-only replies to fail with A2A `-32005`
 
 ### Phase 3: Replace the task runtime
 
@@ -275,7 +262,7 @@ Completed work:
 
 - config normalization tests now enforce the reduced contract
 - schema tests now assert the removed fields are absent
-- route/plugin tests now reflect no REST route and reduced describe payload
+- route/plugin tests now reflect the two-route minimal surface with no describe RPC
 - default-mode tests now reflect text/JSON defaults
 
 Still pending:
@@ -290,26 +277,24 @@ Still pending:
 - removed config keys fail fast during parse
 - public docs describe the reduced contract
 - no REST route is registered
+- no file route
+- no plugin diagnostic RPC
 - agent cards advertise JSON-RPC only
 - agent cards advertise `streaming = false`
 - agent cards advertise `pushNotifications = false`
 - default modes no longer include `application/octet-stream`
+- outbound file-only replies fail instead of exposing dead links
 
 ### Criteria not yet satisfied
 
-- no file route
-- no plugin diagnostic RPC
 - no durable/runtime replay internals
 - no streaming/replay method surface
 - no OpenClaw metadata extensions in A2A responses
-- no file-delivery behavior remaining in the package runtime
 
 ## Follow-up Work
 
 The next updates to this RFC should happen when one of the following lands:
 
-- `/a2a/files` is removed
-- `openclaw-a2a-inbound.describe` is removed
 - durable task-store internals are deleted
 - streaming/replay/push config methods are removed
 - OpenClaw metadata extensions are removed from task/event payloads
