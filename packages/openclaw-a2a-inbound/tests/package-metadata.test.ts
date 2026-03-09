@@ -44,13 +44,21 @@ test("package channel metadata stays aligned with the exported channel id", () =
     new URL("../package.json", import.meta.url),
     "utf8",
   );
+  const rawManifest = readFileSync(
+    new URL("../openclaw.plugin.json", import.meta.url),
+    "utf8",
+  );
   const packageJson = asRecord(JSON.parse(rawPackage));
+  const manifest = asRecord(JSON.parse(rawManifest));
   const openclaw = asRecord(packageJson.openclaw);
   const channel = asRecord(openclaw.channel);
+  const manifestChannels = manifest.channels;
 
   assert.equal(CHANNEL_ID, "a2a");
   assert.notEqual(CHANNEL_ID, PLUGIN_ID);
   assert.equal(channel.id, CHANNEL_ID);
+  assert.ok(Array.isArray(manifestChannels));
+  assert.ok(manifestChannels.includes(CHANNEL_ID));
 });
 
 test("inbound package stays publishable", () => {
