@@ -37,11 +37,6 @@ import type {
 } from "@a2a-js/sdk";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk";
-import type {
-  A2AInboundAuthConfig,
-  A2AInboundTaskStoreConfig,
-} from "./config.js";
-import { resolveConfiguredAuthToken } from "./config.js";
 import {
   MAX_MATERIALIZED_FILE_BYTES,
   buildContentDispositionHeader,
@@ -187,6 +182,11 @@ type TaskStoreOptions = {
   fetchImpl?: TaskFileFetchLike;
   lookupFn?: TaskFileLookupFn;
 };
+
+export interface A2AInboundTaskStoreConfig {
+  kind: "memory" | "json-file";
+  path?: string;
+}
 
 interface TaskRuntimeStorage {
   readonly kind: A2AInboundTaskStoreConfig["kind"];
@@ -2054,8 +2054,6 @@ export class A2ATaskRuntimeStore implements TaskStore {
     taskId: string;
     artifactId: string;
     fileId: string;
-    publicBaseUrl: string;
-    auth: A2AInboundAuthConfig;
   }): Promise<TaskFileDownload | undefined> {
     const descriptor = await this.readTaskFileDescriptor(params.taskId, params.artifactId, params.fileId);
 
@@ -2661,8 +2659,6 @@ export class A2ATaskRuntimeStore implements TaskStore {
       taskId: string;
       artifactId: string;
       fileId: string;
-      publicBaseUrl: string;
-      auth: A2AInboundAuthConfig;
     },
     descriptor: StoredTaskFileDescriptor,
   ): Promise<TaskFileDownload> {
@@ -2681,11 +2677,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
     try {
       await mkdir(tempDirectory, { recursive: true });
-      const { response, release } = await this.fetchSourceFile({
-        sourceUrl,
-        publicBaseUrl: params.publicBaseUrl,
-        auth: params.auth,
-      });
+      const { response, release } = await this.fetchSourceFile(sourceUrl);
       releaseResponse = release;
       writer = await open(tempPath, "w");
       const reader = response.body?.getReader();
@@ -2781,29 +2773,13 @@ export class A2ATaskRuntimeStore implements TaskStore {
     return parsed;
   }
 
-  private async fetchSourceFile(params: {
-    sourceUrl: URL;
-    publicBaseUrl: string;
-    auth: A2AInboundAuthConfig;
-  }): Promise<{
+  private async fetchSourceFile(sourceUrl: URL): Promise<{
     response: Response;
     release: () => Promise<void>;
   }> {
-    const upstreamOrigin = new URL(params.publicBaseUrl).origin;
-    let currentUrl = new URL(params.sourceUrl);
+    let currentUrl = new URL(sourceUrl);
 
     for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
-      const sameOrigin = currentUrl.origin === upstreamOrigin;
-      const authToken =
-        sameOrigin && params.auth.mode === "header-token"
-          ? resolveConfiguredAuthToken(params.auth)
-          : undefined;
-      const headers = new Headers();
-
-      if (authToken) {
-        headers.set(params.auth.headerName, authToken);
-      }
-
       const guarded = await fetchWithSsrFGuard({
         url: currentUrl.toString(),
         fetchImpl: this.fetchImpl,
@@ -2812,7 +2788,6 @@ export class A2ATaskRuntimeStore implements TaskStore {
         pinDns: true,
         init: {
           method: "GET",
-          headers,
           redirect: "manual",
         },
       });
@@ -2827,7 +2802,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         }
 
         if (redirectCount >= 3) {
-          throw new Error(`Redirect limit exceeded while fetching ${params.sourceUrl}.`);
+          throw new Error(`Redirect limit exceeded while fetching ${sourceUrl}.`);
         }
 
         currentUrl = new URL(location, currentUrl);
@@ -2850,7 +2825,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
       };
     }
 
-    throw new Error(`Redirect limit exceeded while fetching ${params.sourceUrl}.`);
+    throw new Error(`Redirect limit exceeded while fetching ${sourceUrl}.`);
   }
 
   private syncHeartbeat(taskId: string, state: Task["status"]["state"]): void {

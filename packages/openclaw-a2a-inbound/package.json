@@ -42,10 +42,10 @@
     "channel": {
       "id": "a2a",
       "label": "A2A Inbound",
-      "selectionLabel": "A2A Inbound (HTTP/JSON-RPC)",
+      "selectionLabel": "A2A Inbound (JSON-RPC)",
       "docsPath": "/channels/a2a",
       "docsLabel": "a2a",
-      "blurb": "Expose an OpenClaw agent as an inbound A2A endpoint.",
+      "blurb": "Expose an OpenClaw agent as an inbound A2A JSON-RPC endpoint.",
       "order": 70,
       "aliases": [
         "a2a"

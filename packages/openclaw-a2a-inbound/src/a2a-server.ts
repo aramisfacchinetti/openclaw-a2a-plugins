@@ -6,7 +6,6 @@ import {
   UserBuilder,
   agentCardHandler,
   jsonRpcHandler,
-  restHandler,
 } from "@a2a-js/sdk/server/express";
 import express, { type RequestHandler } from "express";
 import type {
@@ -23,7 +22,7 @@ import {
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
-import { createTaskStore } from "./task-store.js";
+import { createTaskStore, type A2AInboundTaskStoreConfig } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
 type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
@@ -38,6 +37,10 @@ export interface A2AInboundServerOptions {
   fileDelivery?: {
     fetchImpl?: typeof fetch;
     lookupFn?: typeof import("node:dns/promises").lookup;
+  };
+  internal?: {
+    enableStreamingMethods?: boolean;
+    taskStoreConfig?: A2AInboundTaskStoreConfig;
   };
 }
 
@@ -59,19 +62,6 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
   }
 
   const jsonRpcUrl = resolvePublicUrl(account.publicBaseUrl, account.jsonRpcPath);
-  const additionalInterfaces: AgentCard["additionalInterfaces"] = [
-    {
-      url: jsonRpcUrl,
-      transport: "JSONRPC",
-    },
-  ];
-
-  if (account.capabilities.rest) {
-    additionalInterfaces.push({
-      url: resolvePublicUrl(account.publicBaseUrl, account.restPath),
-      transport: "HTTP+JSON",
-    });
-  }
 
   return {
     name: account.label,
@@ -89,15 +79,17 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
       examples: [...skill.examples],
     })),
     capabilities: {
-      pushNotifications: account.capabilities.pushNotifications,
-      streaming: account.capabilities.streaming,
-      ...(account.taskStore.kind === "json-file"
-        ? { stateTransitionHistory: true }
-        : {}),
+      pushNotifications: false,
+      streaming: false,
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
-    additionalInterfaces,
+    additionalInterfaces: [
+      {
+        url: jsonRpcUrl,
+        transport: "JSONRPC",
+      },
+    ],
   };
 }
 
@@ -145,7 +137,10 @@ function createExpressDispatcher(
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
-  const taskStore = createTaskStore(options.account.taskStore, options.fileDelivery);
+  const taskStore = createTaskStore(
+    options.internal?.taskStoreConfig ?? { kind: "memory" },
+    options.fileDelivery,
+  );
   const liveExecutions = new A2ALiveExecutionRegistry();
   const filesBasePath = deriveFilesBasePath(options.account.jsonRpcPath);
   const agentExecutor = createOpenClawA2AExecutor({
@@ -168,7 +163,7 @@ export function createA2AInboundServer(
     defaultRequestHandler,
     taskStore,
     liveExecutions,
-    options.account.capabilities.streaming,
+    options.internal?.enableStreamingMethods ?? false,
     agentExecutor,
     options.account.defaultOutputModes,
   );
@@ -220,8 +215,6 @@ export function createA2AInboundServer(
     try {
       const download = await taskStore.materializeTaskFile({
         ...target,
-        publicBaseUrl: options.account.publicBaseUrl ?? "https://agents.invalid",
-        auth: options.account.auth,
       });
 
       if (!download) {
@@ -261,16 +254,6 @@ export function createA2AInboundServer(
       res.destroy();
     }
   });
-
-  if (options.account.capabilities.rest) {
-    app.use(
-      options.account.restPath,
-      restHandler({
-        requestHandler,
-        userBuilder: UserBuilder.noAuthentication,
-      }),
-    );
-  }
 
   app.use((_req, res) => {
     res.status(404).json({

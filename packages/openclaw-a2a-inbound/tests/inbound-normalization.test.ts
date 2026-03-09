@@ -12,6 +12,7 @@ import {
 import {
   createPluginRuntimeHarness,
   createRequestContext,
+  type TestAccountOverrides,
   createTestAccount,
   createUserMessage,
   waitFor,
@@ -19,7 +20,7 @@ import {
 
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
-  accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
+  accountOverrides: TestAccountOverrides = {},
   runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
   const { pluginRuntime } = createPluginRuntimeHarness(script, runtimeOverrides);
@@ -29,6 +30,10 @@ function createServerHarness(
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
+    internal: {
+      enableStreamingMethods: true,
+      taskStoreConfig: accountOverrides.taskStore,
+    },
   });
 }
 

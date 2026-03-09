@@ -16,6 +16,7 @@ import {
 } from "../dist/file-delivery.js";
 import {
   createPluginRuntimeHarness,
+  type TestAccountOverrides,
   createTestAccount,
   createUserMessage,
   waitFor,
@@ -181,7 +182,7 @@ function isReplayedEvent(
 
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
-  accountOverrides: Partial<ReturnType<typeof createTestAccount>> = {},
+  accountOverrides: TestAccountOverrides = {},
 ) {
   const account = createTestAccount(accountOverrides);
   const { pluginRuntime } = createPluginRuntimeHarness(script);
@@ -191,6 +192,10 @@ function createServerHarness(
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
+    internal: {
+      enableStreamingMethods: true,
+      taskStoreConfig: accountOverrides.taskStore,
+    },
   });
 
   return {
@@ -231,11 +236,13 @@ function assertTaskFileUriMatches(params: {
 
 async function collectStream(
   server: ReturnType<typeof createServerHarness>,
+  acceptedOutputModes?: string[],
 ): Promise<StreamEvent[]> {
   const streamed: StreamEvent[] = [];
 
   for await (const event of server.requestHandler.sendMessageStream({
     message: createUserMessage(),
+    configuration: acceptedOutputModes ? { acceptedOutputModes } : undefined,
   })) {
     streamed.push(event);
   }
@@ -306,7 +313,7 @@ test("sendMessage keeps a blocking delayed terminal run as one direct Message", 
   );
 });
 
-test("sendMessage promotes blocking file replies to a Task with plugin-owned file URIs", async () => {
+test("sendMessage drops file parts from blocking replies under the default text/json modes", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct-multipart");
     emit({
@@ -332,25 +339,14 @@ test("sendMessage promotes blocking file replies to a Task with plugin-owned fil
     message: createUserMessage(),
   });
 
-  assert.equal(result.kind, "task");
-  assert.deepEqual(
-    result.status.message?.parts.map((part) => part.kind),
-    ["text", "file"],
-  );
+  assert.equal(result.kind, "message");
+  assert.deepEqual(result.parts.map((part) => part.kind), ["text"]);
   assert.equal(
-    result.status.message?.parts[0] && "text" in result.status.message.parts[0]
-      ? result.status.message.parts[0].text
+    result.parts[0] && "text" in result.parts[0]
+      ? result.parts[0].text
       : undefined,
     "Direct reply with attachment",
   );
-  const fileUri = getPartFileUris(result.status.message?.parts ?? [])[0];
-  assert.ok(fileUri);
-  assertTaskFileUriMatches({
-    server,
-    uri: fileUri!,
-    taskId: result.id,
-    artifactId: "assistant-output-0001",
-  });
 });
 
 test("sendMessage promotes blocking file-only replies to a Task when octet-stream is accepted", async () => {
@@ -527,7 +523,6 @@ test("agent card advertises MIME-based default output modes", async () => {
   assert.deepEqual(agentCard.defaultOutputModes, [
     "text/plain",
     "application/json",
-    "application/octet-stream",
   ]);
 });
 
@@ -1064,7 +1059,7 @@ test("multiple assistant messages use distinct indexed assistant artifact ids", 
   );
 });
 
-test("streaming assistant artifacts replace the full artifact when media appears after preview text", async () => {
+test("streaming assistant artifacts stay text-only under the default text/json modes", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-media-replace");
     emit({
@@ -1100,28 +1095,17 @@ test("streaming assistant artifacts replace the full artifact when media appears
     assert.fail("expected task snapshot");
   }
 
-  assert.equal(assistantUpdates.length, 3);
+  assert.equal(assistantUpdates.length, 2);
   assert.equal(getArtifactText(assistantUpdates[0]), "Preview text");
   assert.equal(assistantUpdates[0].append, undefined);
   assert.deepEqual(getPartFileUris(assistantUpdates[0].artifact.parts), []);
-  assert.equal(assistantUpdates[1].append, undefined);
-  assert.deepEqual(
-    assistantUpdates[1].artifact.parts.map((part) => part.kind),
-    ["text", "file"],
-  );
-  const previewUri = getPartFileUris(assistantUpdates[1].artifact.parts)[0];
-  assert.ok(previewUri);
-  assertTaskFileUriMatches({
-    server,
-    uri: previewUri!,
-    taskId: task.id,
-    artifactId: assistantUpdates[1].artifact.artifactId,
-  });
-  assert.equal(assistantUpdates[2].lastChunk, true);
-  assert.equal(assistantUpdates[2].append, true);
+  assert.deepEqual(assistantUpdates[1].artifact.parts.map((part) => part.kind), []);
+  assert.deepEqual(getPartFileUris(assistantUpdates[1].artifact.parts), []);
+  assert.equal(assistantUpdates[1].lastChunk, true);
+  assert.equal(assistantUpdates[1].append, true);
 });
 
-test("tool-result artifacts emit file parts when tool payloads contain media URLs", async () => {
+test("tool-result artifacts stay text-only under the default text/json modes", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-tool-file");
     emit({
@@ -1167,19 +1151,12 @@ test("tool-result artifacts emit file parts when tool payloads contain media URL
 
   assert.deepEqual(
     toolArtifact.artifact.parts.map((part) => part.kind),
-    ["text", "file"],
+    ["text"],
   );
-  const toolFileUri = getPartFileUris(toolArtifact.artifact.parts)[0];
-  assert.ok(toolFileUri);
-  assertTaskFileUriMatches({
-    server,
-    uri: toolFileUri!,
-    taskId: task.id,
-    artifactId: toolArtifact.artifact.artifactId,
-  });
+  assert.deepEqual(getPartFileUris(toolArtifact.artifact.parts), []);
 });
 
-test("terminal task status.message uses the canonical multipart assistant Message", async () => {
+test("terminal task status.message stays text-only under the default text/json modes", async () => {
   const server = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-status-message");
     emit({
@@ -1229,22 +1206,15 @@ test("terminal task status.message uses the canonical multipart assistant Messag
 
   assert.deepEqual(
     persisted.status.message?.parts.map((part) => part.kind),
-    ["text", "file"],
+    ["text"],
   );
-  const statusFileUri = getPartFileUris(persisted.status.message?.parts ?? [])[0];
-  assert.ok(statusFileUri);
-  assertTaskFileUriMatches({
-    server,
-    uri: statusFileUri!,
-    taskId: result.id,
-    artifactId: "assistant-output-0001",
-  });
+  assert.deepEqual(getPartFileUris(persisted.status.message?.parts ?? []), []);
   assert.deepEqual(
     getPartFileUris(
       persisted.artifacts?.find((artifact) => artifact.artifactId === "assistant-output-0001")
         ?.parts ?? [],
     ),
-    [statusFileUri],
+    [],
   );
 });
 

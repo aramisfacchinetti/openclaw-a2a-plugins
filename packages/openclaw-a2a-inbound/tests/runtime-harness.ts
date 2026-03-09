@@ -41,6 +41,16 @@ type RuntimeHarnessOptions = {
   ) => number | undefined;
 };
 
+export type TestTaskStoreConfig = {
+  kind: "memory" | "json-file";
+  path?: string;
+};
+
+export type TestAccountOverrides = Partial<A2AInboundAccountConfig> & {
+  [key: string]: unknown;
+  taskStore?: TestTaskStoreConfig;
+};
+
 export function createPluginRuntimeHarness(script: RuntimeScript): {
   pluginRuntime: PluginRuntime;
 };
@@ -242,8 +252,20 @@ export function createPluginRuntimeHarness(
 }
 
 export function createTestAccount(
-  overrides: Partial<A2AInboundAccountConfig> = {},
+  overrides: TestAccountOverrides = {},
 ): A2AInboundAccountConfig {
+  const {
+    taskStore: _taskStore,
+    auth: _auth,
+    capabilities: _capabilities,
+    restPath: _restPath,
+    ...accountOverrides
+  } = overrides as TestAccountOverrides & {
+    auth?: unknown;
+    capabilities?: unknown;
+    restPath?: unknown;
+  };
+
   return {
     accountId: "default",
     enabled: true,
@@ -255,17 +277,14 @@ export function createTestAccount(
     protocolVersion: "0.3.0",
     agentCardPath: "/.well-known/agent-card.json",
     jsonRpcPath: "/a2a/jsonrpc",
-    restPath: "/a2a/rest",
     maxBodyBytes: 1024 * 1024,
     defaultInputModes: [
       "text/plain",
       "application/json",
-      "application/octet-stream",
     ],
     defaultOutputModes: [
       "text/plain",
       "application/json",
-      "application/octet-stream",
     ],
     skills: [
       {
@@ -275,19 +294,7 @@ export function createTestAccount(
         examples: [],
       },
     ],
-    capabilities: {
-      streaming: true,
-      pushNotifications: false,
-      rest: true,
-    },
-    auth: {
-      mode: "none",
-      headerName: "authorization",
-    },
-    taskStore: {
-      kind: "memory",
-    },
-    ...overrides,
+    ...accountOverrides,
   };
 }
 

@@ -23,12 +23,8 @@ test("parser normalizes paths, defaults, and account labels", () => {
           default: {
             enabled: true,
             publicBaseUrl: "https://agents.example.com",
+            agentCardPath: "agent-card.json",
             jsonRpcPath: "rpc",
-            restPath: "rest",
-            auth: {
-              mode: "header-token",
-              token: "secret",
-            },
           },
         },
       },
@@ -38,10 +34,8 @@ test("parser normalizes paths, defaults, and account labels", () => {
   const account = parsed.accounts.default;
   assert.ok(account);
   assert.equal(account.label, "default");
+  assert.equal(account.agentCardPath, "/agent-card.json");
   assert.equal(account.jsonRpcPath, "/rpc");
-  assert.equal(account.restPath, "/rest");
-  assert.equal(account.auth.mode, "header-token");
-  assert.equal(account.auth.headerName, "authorization");
   assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.deepEqual(account.defaultOutputModes, [...DEFAULT_OUTPUT_MODES]);
   assert.equal(isA2AInboundAccountConfigured(account), true);
@@ -81,14 +75,12 @@ test("colliding derived files prefixes are rejected", () => {
                 enabled: true,
                 publicBaseUrl: "https://agents.example.com",
                 agentCardPath: "/primary/agent-card.json",
-                restPath: "/primary/rest",
                 jsonRpcPath: "/shared/jsonrpc",
               },
               secondary: {
                 enabled: true,
                 publicBaseUrl: "https://agents.example.com",
                 agentCardPath: "/secondary/agent-card.json",
-                restPath: "/secondary/rest",
                 jsonRpcPath: "/shared/rpc",
               },
             },
@@ -111,17 +103,48 @@ test("synthetic fallback accounts are disabled when not configured", () => {
   );
 });
 
-test("json-file task store requires a path to be considered configured", () => {
+for (const forbiddenKey of [
+  "restPath",
+  "capabilities",
+  "auth",
+  "taskStore",
+] as const) {
+  test(`parser rejects removed account key ${forbiddenKey}`, () => {
+    assert.throws(
+      () =>
+        parseA2AInboundChannelConfig({
+          channels: {
+            a2a: {
+              accounts: {
+                default: {
+                  enabled: true,
+                  publicBaseUrl: "https://agents.example.com",
+                  [forbiddenKey]:
+                    forbiddenKey === "restPath"
+                      ? "/legacy"
+                      : forbiddenKey === "capabilities"
+                        ? { streaming: true }
+                        : forbiddenKey === "auth"
+                          ? { mode: "header-token", token: "secret" }
+                          : { kind: "json-file", path: "/tmp/runtime" },
+                },
+              },
+            },
+          },
+        }),
+      new RegExp(`accounts\\.default\\.${forbiddenKey} is not supported`),
+    );
+  });
+}
+
+test("publicBaseUrl is the only account readiness prerequisite", () => {
   const parsed = parseA2AInboundChannelConfig({
     channels: {
       a2a: {
         accounts: {
           default: {
             enabled: true,
-            publicBaseUrl: "https://agents.example.com",
-            taskStore: {
-              kind: "json-file",
-            },
+            jsonRpcPath: "/rpc",
           },
         },
       },
@@ -133,6 +156,6 @@ test("json-file task store requires a path to be considered configured", () => {
   assert.equal(isA2AInboundAccountConfigured(account), false);
   assert.match(
     explainA2AInboundAccountUnconfigured(account),
-    /taskStore\.kind=json-file requires taskStore\.path/,
+    /publicBaseUrl is required/,
   );
 });

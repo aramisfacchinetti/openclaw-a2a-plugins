@@ -11,6 +11,7 @@ import { deriveFilesBasePath } from "../dist/file-delivery.js";
 import { A2AInboundPluginHost } from "../dist/plugin-host.js";
 import {
   createPluginRuntimeHarness,
+  type TestAccountOverrides,
   createTestAccount,
   createUserMessage,
   waitFor,
@@ -109,7 +110,7 @@ async function closeHttpServer(server: Server): Promise<void> {
   });
 }
 
-function createAccount(overrides: Partial<ReturnType<typeof createTestAccount>> = {}) {
+function createAccount(overrides: TestAccountOverrides = {}) {
   return createTestAccount({
     publicBaseUrl: "https://agents.example.com",
     ...overrides,
@@ -118,7 +119,7 @@ function createAccount(overrides: Partial<ReturnType<typeof createTestAccount>> 
 
 function createFileServer(params: {
   script: Parameters<typeof createPluginRuntimeHarness>[0];
-  accountOverrides?: Partial<ReturnType<typeof createTestAccount>>;
+  accountOverrides?: TestAccountOverrides;
   runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1];
   fileDelivery?: Parameters<typeof createA2AInboundServer>[0]["fileDelivery"];
 }): {
@@ -142,6 +143,10 @@ function createFileServer(params: {
       channelRuntime: pluginRuntime.channel,
       pluginRuntime,
       fileDelivery: params.fileDelivery,
+      internal: {
+        enableStreamingMethods: true,
+        taskStoreConfig: params.accountOverrides?.taskStore,
+      },
     }),
   };
 }
@@ -204,7 +209,7 @@ test("first GET materializes once, concurrent first fetches collapse, and later 
   let upstreamFetches = 0;
   source.on("https://agents.example.com/upstream/report.pdf", async (request) => {
     upstreamFetches += 1;
-    assert.equal(request.headers.get("authorization"), "secret");
+    assert.equal(request.headers.has("authorization"), false);
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     return createMockResponse(request.url, {
@@ -236,13 +241,6 @@ test("first GET materializes once, concurrent first fetches collapse, and later 
         stream: "lifecycle",
         data: { phase: "end" },
       });
-    },
-    accountOverrides: {
-      auth: {
-        mode: "header-token",
-        headerName: "authorization",
-        token: "secret",
-      },
     },
     fileDelivery: {
       fetchImpl: source.fetchImpl,
@@ -588,7 +586,7 @@ test("json-file mode survives restart while memory mode does not retain file des
   }
 });
 
-test("unknown ids return 404, blocked schemes and private targets return 502, and account auth still protects the files route", async () => {
+test("unknown ids return 404, and blocked schemes and private targets return 502", async () => {
   const source = createMockSourceFetcher();
   const blockedServer = createFileServer({
     script: async ({ params, emit }) => {
@@ -647,13 +645,7 @@ test("unknown ids return 404, blocked schemes and private targets return 502, an
     void privateTargetServer.server.handle(req, res);
   });
 
-  const authAccount = createAccount({
-    auth: {
-      mode: "header-token",
-      headerName: "authorization",
-      token: "secret",
-    },
-  });
+  const hostAccount = createAccount();
   const { pluginRuntime } = createPluginRuntimeHarness(async () => {});
   const host = new A2AInboundPluginHost(pluginRuntime);
   const abortController = new AbortController();
@@ -666,7 +658,7 @@ test("unknown ids return 404, blocked schemes and private targets return 502, an
   };
   const startPromise = host.startAccount({
     accountId: "default",
-    account: authAccount,
+    account: hostAccount,
     cfg: {},
     runtime: {} as ChannelGatewayContext["runtime"],
     abortSignal: abortController.signal,
@@ -699,19 +691,9 @@ test("unknown ids return 404, blocked schemes and private targets return 502, an
     });
 
     const unknown = await fetch(
-      `${hostBaseUrl}${deriveFilesBasePath(authAccount.jsonRpcPath)}/missing/missing/missing`,
+      `${hostBaseUrl}${deriveFilesBasePath(hostAccount.jsonRpcPath)}/missing/missing/missing`,
     );
-    assert.equal(unknown.status, 401);
-
-    const authorizedUnknown = await fetch(
-      `${hostBaseUrl}${deriveFilesBasePath(authAccount.jsonRpcPath)}/missing/missing/missing`,
-      {
-        headers: {
-          authorization: "secret",
-        },
-      },
-    );
-    assert.equal(authorizedUnknown.status, 404);
+    assert.equal(unknown.status, 404);
 
     const blocked = await fetchTaskFile(blockedBaseUrl, blockedUri);
     assert.equal(blocked.status, 502);
