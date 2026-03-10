@@ -616,7 +616,7 @@ export class A2AInboundRequestHandler {
 
       if (!binding) {
         throw A2AError.unsupportedOperation(
-          `Task ${task.id} was created before durable OpenClaw bindings were recorded and cannot be resumed.`,
+          `Task ${task.id} was created before OpenClaw bindings were recorded and cannot be resumed.`,
         );
       }
 
@@ -768,17 +768,6 @@ export class A2AInboundRequestHandler {
     taskId: string,
     context?: ServerCallContext,
   ): Promise<Task | undefined> {
-    const task = await this.taskRuntime.load(taskId, context);
-
-    if (!task || !isActiveExecutionTaskState(task.status.state)) {
-      return task;
-    }
-
-    return (
-      await this.taskRuntime.reconcileOrphanedTask(
-        taskId,
-        this.liveExecutions.has(taskId),
-      )
-    ) ?? task;
+    return this.taskRuntime.load(taskId, context);
   }
 }

@@ -4,11 +4,11 @@ Status: In Progress
 
 Date: 2026-03-09
 
-Last Updated: 2026-03-09
+Last Updated: 2026-03-10
 
 ## Summary
 
-This RFC now reflects the repository after the Phase 2 transport cleanup. The public HTTP/plugin surface is aligned with the intended minimal-core contract, but the repository is still only partially aligned with the full end state because broader runtime simplification has not landed yet.
+This RFC now reflects the repository after the Phase 3 runtime replacement. The public HTTP/plugin surface is aligned with the intended minimal-core contract, but the repository is still only partially aligned with the full end state because optional protocol methods and metadata cleanup have not landed yet.
 
 The current codebase has completed the public contract and transport cleanup:
 
@@ -21,9 +21,10 @@ The current codebase has completed the public contract and transport cleanup:
 - outbound file parts are no longer exposed through same-origin transport URLs
 - advertised agent-card defaults are fixed to `streaming = false` and `pushNotifications = false`
 
-The current codebase has not yet completed the deeper runtime simplification:
+The current codebase has completed the runtime simplification, but not the remaining protocol-adjacent cleanup:
 
-- durable task-store code still exists internally
+- task state is intentionally in-memory and process-local only
+- the server always constructs that in-memory runtime internally
 - replay/resubscribe still exist behind the internal streaming switch
 - OpenClaw vendor metadata is still emitted
 - OpenClaw metadata extensions still exist in tasks and events
@@ -87,17 +88,23 @@ Breaking changes are acceptable. The repo is still pre-1.0 and the project instr
 - File-only outbound replies now fail with A2A `-32005` instead of returning dead file links.
 - Production startup defaults to in-memory task storage because task-store config was removed from the public account contract.
 - Production startup does not enable streaming methods because the plugin path does not pass the internal streaming switch.
+- The task runtime is now always created through a zero-argument in-memory factory.
 
 ### Still present in the current codebase
 
-- Durable task-store code still exists in `src/task-store.ts`.
-- Internal/test-only server options can still enable:
-  - durable `json-file` task storage
-  - streaming request-handler methods
+- Internal/test-only server options can still enable streaming request-handler methods through `internal.enableStreamingMethods`.
 - Replay/resubscribe behavior still exists while streaming methods are enabled.
 - OpenClaw metadata extensions such as `metadata.openclaw.*` still exist in tasks and events.
 - OpenClaw reply vendor metadata is still emitted as A2A `data` parts.
-- Push notification config methods are still delegated through the underlying SDK request handler.
+- Push notification config methods are still delegated through the underlying SDK request handler even though agent cards advertise `pushNotifications = false`.
+
+### Phase 3 runtime note
+
+- Task state is intentionally non-durable.
+- Tasks, replay backlogs, bindings, and run metadata now exist only for the lifetime of the current server process.
+- Each materialized task is held only as its latest snapshot plus current sequence, committed status/artifact events since process start, pending pre-promotion bindings/run ids, and live subscribers.
+- Replay only covers committed events accumulated since the current process started.
+- Restarting the server drops prior task state and resubscribe backlog and subsequent reads return `task not found`.
 
 ### Practical consequence
 
@@ -148,6 +155,11 @@ The package documentation currently claims support for:
 
 That is the minimal-core method set and should remain the stable public contract.
 
+Implementation note:
+
+- `message/stream` and replay-style resubscribe behavior still exist only behind the internal streaming switch used by tests.
+- push-notification configuration methods are still delegated internally even though they are not part of the intended minimal-core contract.
+
 ### Default content modes
 
 Current defaults are:
@@ -193,11 +205,6 @@ Current public config rejects:
 
 The final target described by this RFC is still not reached. The main remaining gaps are:
 
-### Task-runtime simplification still pending
-
-- replace the durable-capable task-store implementation with a smaller in-memory-only runtime
-- remove durable replay, lease, orphan-recovery, and json-file storage paths from the package runtime
-
 ### Protocol-adjacent cleanup still pending
 
 - remove or hard-disable streaming request paths without internal backdoors
@@ -239,11 +246,16 @@ Completed work:
 
 ### Phase 3: Replace the task runtime
 
-Status: Not started
+Status: Complete
 
-Still targeted:
+Completed work:
 
-- replace the current durable-capable task store with a smaller in-memory-only runtime
+- replaced the durable-capable task store with a process-local in-memory runtime
+- removed `json-file` storage, lease heartbeats, orphan recovery, and startup sweep logic
+- removed the internal `taskStoreConfig` server hook
+- updated tests to assert process-lifetime task persistence and replay semantics
+- deleted durable-runtime coverage that only validated removed behavior
+- added restart-loss coverage so prior tasks now fail with `task not found` after server restart
 
 ### Phase 4: Remove optional protocol methods and metadata
 
@@ -280,10 +292,12 @@ Completed work:
 - route/plugin tests now reflect the two-route minimal surface with no describe RPC
 - default-mode tests now reflect text/JSON defaults
 - file-only and mixed-content regressions now assert no outbound `file` parts or generated `/files` URLs remain
+- durable-runtime tests were removed
+- lifecycle tests now cover same-process replay and restart-loss semantics for the in-memory runtime
 
 Still pending:
 
-- remove runtime tests that only exist for features the final RFC intends to delete
+- remove runtime tests that only exist for features the final RFC intends to delete, mainly around internal streaming/replay surfaces and OpenClaw metadata
 
 ## Acceptance Criteria
 
@@ -298,14 +312,14 @@ Still pending:
 - agent cards advertise JSON-RPC only
 - agent cards advertise `streaming = false`
 - agent cards advertise `pushNotifications = false`
+- no durable task-store internals remain
+- task state is intentionally process-local and disappears on restart
 - default modes no longer include `application/octet-stream`
 - outbound file-only replies fail instead of exposing dead links
 - no outbound task, message, or artifact contains a generated `/files` URL or A2A `file` part
 
 ### Criteria not yet satisfied
 
-- no durable task-store internals
-- no durable/runtime replay internals
 - no streaming/replay method surface
 - no push notification config method surface
 - no OpenClaw metadata extensions in A2A responses
@@ -315,7 +329,6 @@ Still pending:
 
 The next updates to this RFC should happen when one of the following lands:
 
-- durable task-store internals are deleted
 - streaming/replay/push config methods are removed
 - OpenClaw metadata extensions are removed from task/event payloads
 - the final inbound file-input policy is decided and enforced

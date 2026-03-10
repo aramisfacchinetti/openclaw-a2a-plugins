@@ -96,9 +96,11 @@ function createExecutorHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   options?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
-  const { pluginRuntime } = createPluginRuntimeHarness(script, options);
+  const { pluginRuntime } = options
+    ? createPluginRuntimeHarness(script, options)
+    : createPluginRuntimeHarness(script);
   const liveExecutions = new A2ALiveExecutionRegistry();
-  const taskRuntime = createTaskStore({ kind: "memory" });
+  const taskRuntime = createTaskStore();
 
   return {
     liveExecutions,
