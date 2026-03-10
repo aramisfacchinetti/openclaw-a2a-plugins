@@ -1,8 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Message, Task } from "@a2a-js/sdk";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
 import {
@@ -18,12 +15,18 @@ import {
   waitFor,
 } from "./runtime-harness.js";
 
+type BuildInboundRouteContextOptions = Parameters<typeof buildInboundRouteContext>[0];
+type LoadWebMedia = BuildInboundRouteContextOptions["loadWebMedia"];
+type SaveMediaBuffer = BuildInboundRouteContextOptions["saveMediaBuffer"];
+
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   accountOverrides: TestAccountOverrides = {},
   runtimeOverrides?: Parameters<typeof createPluginRuntimeHarness>[1],
 ) {
-  const { pluginRuntime } = createPluginRuntimeHarness(script, runtimeOverrides);
+  const { pluginRuntime } = runtimeOverrides
+    ? createPluginRuntimeHarness(script, runtimeOverrides)
+    : createPluginRuntimeHarness(script);
   return createA2AInboundServer({
     accountId: "default",
     account: createTestAccount(accountOverrides),
@@ -32,7 +35,6 @@ function createServerHarness(
     pluginRuntime,
     internal: {
       enableStreamingMethods: true,
-      taskStoreConfig: accountOverrides.taskStore,
     },
   });
 }
@@ -75,11 +77,11 @@ test("file.bytes parts stage media locally and preserve filename and mime hints"
       throw new Error("unused");
     },
     saveMediaBuffer: async (
-      buffer,
-      contentType,
-      _subdir,
-      maxBytes,
-      originalFilename,
+      buffer: Parameters<SaveMediaBuffer>[0],
+      contentType: Parameters<SaveMediaBuffer>[1],
+      _subdir: Parameters<SaveMediaBuffer>[2],
+      maxBytes: Parameters<SaveMediaBuffer>[3],
+      originalFilename: Parameters<SaveMediaBuffer>[4],
     ) => {
       savedCalls.push({
         buffer,
@@ -139,7 +141,7 @@ test("file.uri parts eagerly fetch and stage remote media", async () => {
     requestContext,
     accountId: "default",
     peerId: "peer:test",
-    loadWebMedia: async (uri) => {
+    loadWebMedia: async (uri: Parameters<LoadWebMedia>[0]) => {
       assert.equal(uri, "https://example.com/reports/weekly");
       return {
         buffer: Buffer.from("%PDF-1.7", "utf8"),
@@ -149,11 +151,11 @@ test("file.uri parts eagerly fetch and stage remote media", async () => {
       };
     },
     saveMediaBuffer: async (
-      buffer,
-      contentType,
-      _subdir,
-      _maxBytes,
-      originalFilename,
+      buffer: Parameters<SaveMediaBuffer>[0],
+      contentType: Parameters<SaveMediaBuffer>[1],
+      _subdir: Parameters<SaveMediaBuffer>[2],
+      _maxBytes: Parameters<SaveMediaBuffer>[3],
+      originalFilename: Parameters<SaveMediaBuffer>[4],
     ) => {
       assert.equal(buffer.toString("utf8"), "%PDF-1.7");
       saveCalls.push({
@@ -263,7 +265,13 @@ test("mixed text, data, and file parts keep text as the command body while bridg
     loadWebMedia: async () => {
       throw new Error("unused");
     },
-    saveMediaBuffer: async (buffer, contentType, _subdir, _maxBytes, originalFilename) => ({
+    saveMediaBuffer: async (
+      buffer: Parameters<SaveMediaBuffer>[0],
+      contentType: Parameters<SaveMediaBuffer>[1],
+      _subdir: Parameters<SaveMediaBuffer>[2],
+      _maxBytes: Parameters<SaveMediaBuffer>[3],
+      originalFilename: Parameters<SaveMediaBuffer>[4],
+    ) => ({
       id: "saved-3",
       path: `/tmp/staged/${originalFilename ?? "artifact.bin"}`,
       size: buffer.byteLength,
@@ -344,8 +352,7 @@ test("request handling rejects invalid base64 and unusable file payloads with in
   }
 });
 
-test("durable task history preserves the original mixed-part inbound message verbatim", async () => {
-  const rootPath = await mkdtemp(join(tmpdir(), "openclaw-a2a-history-mixed-"));
+test("in-process task history preserves the original mixed-part inbound message verbatim", async () => {
   let server: ReturnType<typeof createServerHarness> | undefined;
   let result: Message | Task | undefined;
   const inboundMessage = createUserMessage({
@@ -394,12 +401,6 @@ test("durable task history preserves the original mixed-part inbound message ver
           data: { phase: "end" },
         });
       },
-      {
-        taskStore: {
-          kind: "json-file",
-          path: rootPath,
-        },
-      },
     );
 
     result = await server.requestHandler.sendMessage({
@@ -409,14 +410,14 @@ test("durable task history preserves the original mixed-part inbound message ver
       },
     });
 
-    assert.equal(isTask(result), true);
     if (!isTask(result)) {
-      assert.fail("expected durable task result");
+      assert.fail("expected in-process task result");
     }
+    const taskResult = result;
 
     await waitFor(async () => {
       const snapshot = await server!.requestHandler.getTask({
-        id: result.id,
+        id: taskResult.id,
         historyLength: 10,
       });
 
@@ -424,24 +425,24 @@ test("durable task history preserves the original mixed-part inbound message ver
     });
 
     const persisted = await server.requestHandler.getTask({
-      id: result.id,
+      id: taskResult.id,
       historyLength: 10,
     });
+    const lastHistoryMessage = persisted.history?.at(-1);
+    const lastTextPart = lastHistoryMessage?.parts[0];
 
-    assert.deepEqual(persisted.history?.[0], JSON.parse(JSON.stringify(inboundMessage)) as Message);
-    assert.equal(persisted.history?.at(-1)?.role, "agent");
+    assert.deepEqual(persisted.history?.[0], inboundMessage);
+    assert.equal(lastHistoryMessage?.role, "agent");
     assert.equal(
-      persisted.history?.at(-1)?.parts[0] &&
-        "text" in persisted.history.at(-1)!.parts[0]
-        ? persisted.history.at(-1)!.parts[0].text
-        : undefined,
+      lastTextPart?.kind === "text" ? lastTextPart.text : undefined,
       "Done",
     );
   } finally {
     if (server && result && isTask(result)) {
+      const taskResult = result;
       await waitFor(async () => {
         const snapshot = await server!.requestHandler.getTask({
-          id: result.id,
+          id: taskResult.id,
           historyLength: 10,
         });
 
@@ -450,6 +451,5 @@ test("durable task history preserves the original mixed-part inbound message ver
     }
 
     server?.close();
-    await rm(rootPath, { recursive: true, force: true });
   }
 });

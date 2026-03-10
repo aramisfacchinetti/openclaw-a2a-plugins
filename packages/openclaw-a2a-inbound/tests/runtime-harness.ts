@@ -6,15 +6,15 @@ import {
   type AgentExecutionEvent,
 } from "@a2a-js/sdk/server";
 import type { Message } from "@a2a-js/sdk";
-import type {
-  PluginRuntime,
-  ResolvedAgentRoute,
-} from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "../src/config.js";
 
 type DispatchParams = Parameters<
   PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"]
 >[0];
+type ResolvedAgentRoute = ReturnType<
+  PluginRuntime["channel"]["routing"]["resolveAgentRoute"]
+>;
 
 type RuntimeScript = (ctx: {
   params: DispatchParams;
@@ -41,14 +41,8 @@ type RuntimeHarnessOptions = {
   ) => number | undefined;
 };
 
-export type TestTaskStoreConfig = {
-  kind: "memory" | "json-file";
-  path?: string;
-};
-
 export type TestAccountOverrides = Partial<A2AInboundAccountConfig> & {
   [key: string]: unknown;
-  taskStore?: TestTaskStoreConfig;
 };
 
 export function createPluginRuntimeHarness(script: RuntimeScript): {
@@ -255,11 +249,10 @@ export function createTestAccount(
   overrides: TestAccountOverrides = {},
 ): A2AInboundAccountConfig {
   const {
-    taskStore: _taskStore,
     auth: _auth,
     capabilities: _capabilities,
     restPath: _restPath,
-    ...accountOverrides
+  ...accountOverrides
   } = overrides as TestAccountOverrides & {
     auth?: unknown;
     capabilities?: unknown;
