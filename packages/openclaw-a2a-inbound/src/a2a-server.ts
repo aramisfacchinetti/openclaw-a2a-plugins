@@ -17,7 +17,7 @@ import { CHANNEL_ID, PLUGIN_VERSION } from "./constants.js";
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
-import { createTaskStore, type A2AInboundTaskStoreConfig } from "./task-store.js";
+import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
 type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
@@ -31,7 +31,6 @@ export interface A2AInboundServerOptions {
   log?: ChannelLogSink;
   internal?: {
     enableStreamingMethods?: boolean;
-    taskStoreConfig?: A2AInboundTaskStoreConfig;
   };
 }
 
@@ -128,9 +127,7 @@ function createExpressDispatcher(
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
-  const taskStore = createTaskStore(
-    options.internal?.taskStoreConfig ?? { kind: "memory" },
-  );
+  const taskStore = createTaskStore();
   const liveExecutions = new A2ALiveExecutionRegistry();
   const agentExecutor = createOpenClawA2AExecutor({
     accountId: options.accountId,

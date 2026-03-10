@@ -1,9 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   Message,
   Task,
@@ -20,6 +17,10 @@ import {
 } from "./runtime-harness.js";
 
 type StreamEvent = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message;
+type StreamParts = Message["parts"] | TaskArtifactUpdateEvent["artifact"]["parts"];
+type MessagePart = Message["parts"][number];
+type TaskArtifact = NonNullable<Task["artifacts"]>[number];
+type TaskHistoryMessage = NonNullable<Task["history"]>[number];
 
 function isTask(value: StreamEvent | Message | Task): value is Task {
   return value.kind === "task";
@@ -52,7 +53,7 @@ function getArtifactData(
 }
 
 function getPartFileUris(
-  parts: readonly (Message | TaskArtifactUpdateEvent["artifact"])["parts"],
+  parts: StreamParts,
 ): string[] {
   return parts.flatMap((part) =>
     part.kind === "file" && "uri" in part.file ? [part.file.uri] : [],
@@ -60,7 +61,7 @@ function getPartFileUris(
 }
 
 function getPartData(
-  parts: readonly (Message | TaskArtifactUpdateEvent["artifact"])["parts"],
+  parts: StreamParts,
 ): Record<string, unknown> | undefined {
   const dataPart = parts.find((part) => part.kind === "data");
   return dataPart?.kind === "data"
@@ -217,7 +218,6 @@ function createServerHarness(
     pluginRuntime,
     internal: {
       enableStreamingMethods: true,
-      taskStoreConfig: accountOverrides.taskStore,
     },
   });
 
@@ -333,7 +333,7 @@ test("sendMessage drops file parts from blocking replies under the default text/
   });
 
   assert.equal(result.kind, "message");
-  assert.deepEqual(result.parts.map((part) => part.kind), ["text"]);
+  assert.deepEqual(result.parts.map((part: MessagePart) => part.kind), ["text"]);
   assert.equal(
     result.parts[0] && "text" in result.parts[0]
       ? result.parts[0].text
@@ -462,7 +462,9 @@ test("nonblocking file-only replies fail the promoted task without file parts", 
   );
   assert.deepEqual(getPartFileUris(persisted.status.message?.parts ?? []), []);
   assert.equal(
-    persisted.artifacts?.some((artifact) => getPartFileUris(artifact.parts).length > 0) ?? false,
+    persisted.artifacts?.some(
+      (artifact: TaskArtifact) => getPartFileUris(artifact.parts).length > 0,
+    ) ?? false,
     false,
   );
 });
@@ -500,7 +502,7 @@ test("acceptedOutputModes text/plain strips vendor data and file parts when text
   });
 
   assert.equal(result.kind, "message");
-  assert.deepEqual(result.parts.map((part) => part.kind), ["text"]);
+  assert.deepEqual(result.parts.map((part: MessagePart) => part.kind), ["text"]);
   assert.equal(
     result.parts[0] && "text" in result.parts[0] ? result.parts[0].text : undefined,
     "Plain text survives",
@@ -540,7 +542,7 @@ test("acceptedOutputModes application/json emits only the vendor DataPart when v
   });
 
   assert.equal(result.kind, "message");
-  assert.deepEqual(result.parts.map((part) => part.kind), ["data"]);
+  assert.deepEqual(result.parts.map((part: MessagePart) => part.kind), ["data"]);
   assert.deepEqual(getPartData(result.parts), {
     openclaw: {
       reply: {
@@ -657,7 +659,9 @@ test("sendMessage returns an initial Task for a nonblocking terminal run", async
     "Nonblocking terminal reply",
   );
   assert.ok(
-    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"),
+    persisted.artifacts?.some(
+      (artifact: TaskArtifact) => artifact.artifactId === "assistant-output-0001",
+    ),
   );
 });
 
@@ -734,9 +738,13 @@ test("sendMessage returns a Task for promoted runs and getTask returns the persi
   });
 
   assert.equal(persisted.status.state, "completed");
-  assert.ok(persisted.history?.some((message) => message.role === "user"));
   assert.ok(
-    persisted.artifacts?.some((artifact) => artifact.artifactId === "assistant-output-0001"),
+    persisted.history?.some((message: TaskHistoryMessage) => message.role === "user"),
+  );
+  assert.ok(
+    persisted.artifacts?.some(
+      (artifact: TaskArtifact) => artifact.artifactId === "assistant-output-0001",
+    ),
   );
 });
 
@@ -1283,13 +1291,15 @@ test("terminal task status.message stays text-only under the default text/json m
   });
 
   assert.deepEqual(
-    persisted.status.message?.parts.map((part) => part.kind),
+    persisted.status.message?.parts.map((part: MessagePart) => part.kind),
     ["text"],
   );
   assert.deepEqual(getPartFileUris(persisted.status.message?.parts ?? []), []);
   assert.deepEqual(
     getPartFileUris(
-      persisted.artifacts?.find((artifact) => artifact.artifactId === "assistant-output-0001")
+      persisted.artifacts?.find(
+        (artifact: TaskArtifact) => artifact.artifactId === "assistant-output-0001",
+      )
         ?.parts ?? [],
     ),
     [],
@@ -1634,7 +1644,7 @@ test("cancelTask waits for the real terminal task after aborting a live promoted
   let cancelResolved = false;
   const cancelPromise = server.requestHandler
     .cancelTask({ id: result.id })
-    .then((task) => {
+    .then((task: Task) => {
       cancelResolved = true;
       return task;
     });
@@ -1665,8 +1675,6 @@ test("cancelTask waits for the real terminal task after aborting a live promoted
 
 test("resubscribe replays backlog from afterSequence and then tails the committed live completion", async () => {
   let resumeLiveRun: (() => void) | undefined;
-  const tempDir = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-"));
-  const taskStoreRoot = join(tempDir, "task-store");
   let liveServer: ReturnType<typeof createServerHarness> | undefined;
 
   try {
@@ -1725,12 +1733,6 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
           stream: "lifecycle",
           data: { phase: "end" },
         });
-      },
-      {
-        taskStore: {
-          kind: "json-file",
-          path: taskStoreRoot,
-        },
       },
     );
     const activeServer = liveServer;
@@ -1842,6 +1844,104 @@ test("resubscribe replays backlog from afterSequence and then tails the committe
     );
   } finally {
     liveServer?.close();
-    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("restarting the server loses prior task state and replay backlog", async () => {
+  const initialServer = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-restart-loss");
+    emit({
+      runId: "run-restart-loss",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Ephemeral reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-restart-loss",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  let taskId: string | undefined;
+
+  try {
+    const result = await initialServer.requestHandler.sendMessage({
+      message: createUserMessage({
+        messageId: "message-restart-loss",
+      }),
+      configuration: {
+        blocking: false,
+      },
+    });
+
+    assert.equal(isTask(result), true);
+    if (!isTask(result)) {
+      assert.fail("expected in-process task");
+    }
+    taskId = result.id;
+
+    await waitFor(async () => {
+      const persisted = await initialServer.requestHandler.getTask({
+        id: result.id,
+        historyLength: 10,
+      });
+
+      return persisted.status.state === "completed";
+    });
+  } finally {
+    initialServer.close();
+  }
+
+  if (!taskId) {
+    assert.fail("expected task id");
+  }
+
+  const restartedServer = createServerHarness(async () => {});
+
+  try {
+    await assert.rejects(
+      () =>
+        restartedServer.requestHandler.getTask({
+          id: taskId,
+          historyLength: 10,
+        }),
+      (error: unknown) => {
+        assert.equal(
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code: unknown }).code
+            : undefined,
+          -32001,
+        );
+        return true;
+      },
+    );
+
+    const replayed: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+    for await (const event of restartedServer.requestHandler.resubscribe({
+      id: taskId,
+      metadata: {
+        openclaw: {
+          afterSequence: 0,
+        },
+      },
+    })) {
+      replayed.push(event);
+    }
+
+    assert.fail(
+      `expected resubscribe to fail for missing task ${taskId}, got ${replayed.length} events`,
+    );
+  } catch (error) {
+    assert.equal(
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code: unknown }).code
+        : undefined,
+      -32001,
+    );
+  } finally {
+    restartedServer.close();
   }
 });
