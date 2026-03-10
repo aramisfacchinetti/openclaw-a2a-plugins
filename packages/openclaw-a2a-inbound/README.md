@@ -26,6 +26,7 @@ openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 - Does not expose:
   - file-delivery HTTP routes
   - outbound A2A file transport
+  - optional JSON-RPC methods such as `message/stream`, `tasks/resubscribe`, and task push-notification config methods
 - Default input modes: `["text/plain", "application/json"]`
 - Default output modes: `["text/plain", "application/json"]`
 - Documented supported A2A methods:
@@ -51,7 +52,11 @@ The channel account contract is:
 
 Legacy config fields such as `restPath`, `capabilities`, `auth`, and `taskStore` are rejected during config parsing.
 
-Outbound replies only surface representable text and OpenClaw vendor-data JSON parts. If a reply only contains media URLs after filtering, the request fails with A2A content-type-not-supported instead of exposing dead file links.
+Removed optional methods are rejected at the JSON-RPC boundary instead of being routed through internal backdoors.
+
+A2A tasks, events, messages, reply parts, and artifacts no longer emit `metadata.openclaw.*` or vendor `openclaw.reply` payloads.
+
+Outbound replies only surface representable text. If a reply only contains media URLs or vendor-only payload after filtering, the request fails with A2A content-type-not-supported instead of exposing dead file links or synthetic vendor JSON parts.
 
 ## Requirements
 

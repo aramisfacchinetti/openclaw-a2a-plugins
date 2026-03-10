@@ -33,9 +33,6 @@ function createServerHarness(
     cfg: {},
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
-    internal: {
-      enableStreamingMethods: true,
-    },
   });
 }
 

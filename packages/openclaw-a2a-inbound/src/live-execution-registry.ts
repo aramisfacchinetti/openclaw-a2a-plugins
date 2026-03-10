@@ -3,23 +3,12 @@ import {
   type ExecutionEventBusManager,
 } from "@a2a-js/sdk/server";
 
-export type A2AInitialResponseMode = "blocking" | "non_blocking" | "streaming";
-
-export type A2ALiveExecutionState =
-  | "pending_message"
-  | "active_task"
-  | "completed"
-  | "failed"
-  | "canceled";
+export type A2AInitialResponseMode = "blocking" | "non_blocking";
 
 export interface A2ALiveExecutionRecord {
   taskId: string;
   contextId: string;
   abortController: AbortController;
-  state: A2ALiveExecutionState;
-  sessionKey?: string;
-  runId?: string;
-  taskPublished: boolean;
   cancelRequested: boolean;
   cancel?: () => Promise<void>;
 }
@@ -33,6 +22,10 @@ export class A2ALiveExecutionRegistry {
   ) {}
 
   setRequestMode(requestId: string, mode: A2AInitialResponseMode): void {
+    if (mode !== "blocking" && mode !== "non_blocking") {
+      return;
+    }
+
     this.requestModes.set(requestId, mode);
   }
 
@@ -48,8 +41,6 @@ export class A2ALiveExecutionRegistry {
     taskId: string;
     contextId: string;
     abortController: AbortController;
-    sessionKey?: string;
-    runId?: string;
     cancel?: () => Promise<void>;
   }): A2ALiveExecutionRecord {
     const existing = this.executions.get(params.taskId);
@@ -57,10 +48,6 @@ export class A2ALiveExecutionRegistry {
     if (existing) {
       existing.contextId = params.contextId;
       existing.abortController = params.abortController;
-      existing.sessionKey = params.sessionKey ?? existing.sessionKey;
-      existing.runId = params.runId ?? existing.runId;
-      existing.state = "active_task";
-      existing.taskPublished = true;
       existing.cancel = params.cancel ?? existing.cancel;
       return existing;
     }
@@ -69,10 +56,6 @@ export class A2ALiveExecutionRegistry {
       taskId: params.taskId,
       contextId: params.contextId,
       abortController: params.abortController,
-      sessionKey: params.sessionKey,
-      runId: params.runId,
-      state: "active_task",
-      taskPublished: true,
       cancelRequested: false,
       cancel: params.cancel,
     };
@@ -89,29 +72,6 @@ export class A2ALiveExecutionRegistry {
     return this.executions.has(taskId);
   }
 
-  update(taskId: string, update: Partial<A2ALiveExecutionRecord>): void {
-    const record = this.executions.get(taskId);
-
-    if (!record) {
-      return;
-    }
-
-    Object.assign(record, update);
-  }
-
-  markTerminal(
-    taskId: string,
-    state: Extract<A2ALiveExecutionState, "completed" | "failed" | "canceled">,
-  ): void {
-    const record = this.executions.get(taskId);
-
-    if (!record) {
-      return;
-    }
-
-    record.state = state;
-  }
-
   requestCancellation(taskId: string): A2ALiveExecutionRecord | undefined {
     const record = this.executions.get(taskId);
 
@@ -125,6 +85,5 @@ export class A2ALiveExecutionRegistry {
 
   cleanup(taskId: string): void {
     this.executions.delete(taskId);
-    this.requestModes.delete(taskId);
   }
 }
