@@ -3,7 +3,6 @@ import { basename, extname } from "node:path";
 import { A2AError } from "@a2a-js/sdk/server";
 import type {
   Artifact,
-  DataPart,
   Message,
   Part,
   Task,
@@ -25,7 +24,6 @@ export type TaskLifecycleClass = "active" | "quiescent" | "terminal";
 export type ToolProgressPhase = "start" | "update" | "result";
 
 const TEXT_PLAIN_OUTPUT_MODE = "text/plain";
-const JSON_OUTPUT_MODE = "application/json";
 const OCTET_STREAM_OUTPUT_MODE = "application/octet-stream";
 const FILE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   ".csv": "text/csv",
@@ -46,24 +44,14 @@ const FILE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   ".webp": "image/webp",
 };
 
-export interface ReplyVendorMetadata {
-  channelData?: JsonRecord;
-  isError?: boolean;
-  audioAsVoice?: boolean;
-  replyToId?: string;
-  replyToTag?: string;
-  replyToCurrent?: boolean;
-}
-
 export interface NormalizedReplyPayload {
   text?: string;
   mediaUrls: string[];
-  vendorMetadata?: ReplyVendorMetadata;
+  hasVendorContent: boolean;
 }
 
 export interface BuiltReplyContent {
   parts: Part[];
-  metadata?: JsonRecord;
   availableOutputModes: string[];
   hasCandidates: boolean;
 }
@@ -171,129 +159,21 @@ function mergeMetadata(
       continue;
     }
 
-    for (const [key, value] of Object.entries(record)) {
-      if (
-        key === "openclaw" &&
-        isRecord(value) &&
-        isRecord(merged.openclaw)
-      ) {
-        merged.openclaw = {
-          ...(merged.openclaw as JsonRecord),
-          ...value,
-        };
-        continue;
-      }
-
-      merged[key] = value;
-    }
+    Object.assign(merged, record);
   }
 
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-function buildVendorMetadata(value: unknown): ReplyVendorMetadata | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  const metadata: ReplyVendorMetadata = {};
-  const replyToId = readTrimmedString(value.replyToId);
-  const replyToTag = readTrimmedString(value.replyToTag);
-
-  if ("channelData" in value) {
-    const channelData = sanitizeJsonRecord(value.channelData);
-
-    if (channelData) {
-      metadata.channelData = channelData;
-    }
-  }
-
-  if (typeof value.isError === "boolean") {
-    metadata.isError = value.isError;
-  }
-
-  if (typeof value.audioAsVoice === "boolean") {
-    metadata.audioAsVoice = value.audioAsVoice;
-  }
-
-  if (replyToId) {
-    metadata.replyToId = replyToId;
-  }
-
-  if (replyToTag) {
-    metadata.replyToTag = replyToTag;
-  }
-
-  if (typeof value.replyToCurrent === "boolean") {
-    metadata.replyToCurrent = value.replyToCurrent;
-  }
-
-  return Object.keys(metadata).length > 0 ? metadata : undefined;
-}
-
-function buildVendorReplyRecord(
-  payload: NormalizedReplyPayload,
-): JsonRecord | undefined {
-  if (!payload.vendorMetadata) {
-    return undefined;
-  }
-
-  const reply: JsonRecord = {};
-
-  if (payload.vendorMetadata.channelData) {
-    reply.channelData = structuredClone(payload.vendorMetadata.channelData);
-  }
-
-  if ("isError" in payload.vendorMetadata) {
-    reply.isError = payload.vendorMetadata.isError === true;
-  }
-
-  if ("audioAsVoice" in payload.vendorMetadata) {
-    reply.audioAsVoice = payload.vendorMetadata.audioAsVoice === true;
-  }
-
-  if (payload.vendorMetadata.replyToId) {
-    reply.replyToId = payload.vendorMetadata.replyToId;
-  }
-
-  if (payload.vendorMetadata.replyToTag) {
-    reply.replyToTag = payload.vendorMetadata.replyToTag;
-  }
-
-  if ("replyToCurrent" in payload.vendorMetadata) {
-    reply.replyToCurrent = payload.vendorMetadata.replyToCurrent === true;
-  }
-
-  return Object.keys(reply).length > 0 ? reply : undefined;
-}
-
-function buildReplyMetadata(
-  payload: NormalizedReplyPayload,
-): JsonRecord | undefined {
-  const reply = buildVendorReplyRecord(payload);
-
-  return reply
-    ? {
-        openclaw: {
-          reply,
-        },
-      }
-    : undefined;
-}
-
-function buildReplyPartMetadata(
-  payload: NormalizedReplyPayload,
-  extraOpenClaw?: JsonRecord,
-): JsonRecord | undefined {
-  const metadata = buildReplyMetadata(payload);
-
-  if (!extraOpenClaw) {
-    return metadata;
-  }
-
-  return mergeMetadata(metadata, {
-    openclaw: extraOpenClaw,
-  });
+function detectVendorReplyContent(value: JsonRecord): boolean {
+  return Boolean(
+    sanitizeJsonRecord(value.channelData) ||
+      typeof value.isError === "boolean" ||
+      typeof value.audioAsVoice === "boolean" ||
+      readTrimmedString(value.replyToId) ||
+      readTrimmedString(value.replyToTag) ||
+      typeof value.replyToCurrent === "boolean",
+  );
 }
 
 function normalizeMediaUrls(payload: JsonRecord): string[] {
@@ -381,6 +261,7 @@ export function normalizeReplyPayload(payload: unknown): NormalizedReplyPayload 
   if (!isRecord(payload)) {
     return {
       mediaUrls: [],
+      hasVendorContent: false,
     };
   }
 
@@ -394,32 +275,7 @@ export function normalizeReplyPayload(payload: unknown): NormalizedReplyPayload 
   return {
     ...(text && text.trim().length > 0 ? { text } : {}),
     mediaUrls: normalizeMediaUrls(payload),
-    ...(buildVendorMetadata(payload)
-      ? { vendorMetadata: buildVendorMetadata(payload) }
-      : {}),
-  };
-}
-
-export function hasReplyPayloadExtras(payload: NormalizedReplyPayload): boolean {
-  return payload.mediaUrls.length > 0 || typeof payload.vendorMetadata !== "undefined";
-}
-
-export function mergeReplyVendorMetadata(
-  current: ReplyVendorMetadata | undefined,
-  next: ReplyVendorMetadata | undefined,
-): ReplyVendorMetadata | undefined {
-  if (!current) {
-    return next ? structuredClone(next) : undefined;
-  }
-
-  if (!next) {
-    return current;
-  }
-
-  return {
-    ...current,
-    ...next,
-    ...(next.channelData ? { channelData: structuredClone(next.channelData) } : {}),
+    hasVendorContent: detectVendorReplyContent(payload),
   };
 }
 
@@ -432,7 +288,6 @@ export function buildReplyContent(params: {
   );
   const availableOutputModes = new Set<string>();
   const parts: Part[] = [];
-  const metadata = buildReplyMetadata(params.payload);
 
   if (params.payload.text) {
     availableOutputModes.add(TEXT_PLAIN_OUTPUT_MODE);
@@ -441,9 +296,6 @@ export function buildReplyContent(params: {
       const textPart: TextPart = {
         kind: "text",
         text: params.payload.text,
-        ...(buildReplyPartMetadata(params.payload)
-          ? { metadata: buildReplyPartMetadata(params.payload) }
-          : {}),
       };
       parts.push(textPart);
     }
@@ -458,30 +310,11 @@ export function buildReplyContent(params: {
     }
   }
 
-  if (params.payload.vendorMetadata) {
-    availableOutputModes.add(JSON_OUTPUT_MODE);
-
-    if (hasAllowedOutputMode(acceptedOutputModes, JSON_OUTPUT_MODE)) {
-      const dataPart: DataPart = {
-        kind: "data",
-        data: {
-          openclaw: {
-            reply: buildVendorReplyRecord(params.payload),
-          },
-        },
-        ...(buildReplyPartMetadata(params.payload, { schema: "reply-v1" })
-          ? { metadata: buildReplyPartMetadata(params.payload, { schema: "reply-v1" }) }
-          : {}),
-      };
-      parts.push(dataPart);
-    }
-  }
-
   return {
     parts,
-    metadata,
     availableOutputModes: [...availableOutputModes],
-    hasCandidates: availableOutputModes.size > 0,
+    hasCandidates:
+      availableOutputModes.size > 0 || params.payload.hasVendorContent,
   };
 }
 
@@ -573,7 +406,6 @@ export function createArtifactUpdate(params: {
   text?: string;
   data?: JsonRecord;
   metadata?: JsonRecord;
-  eventMetadata?: JsonRecord;
   append?: boolean;
   lastChunk?: boolean;
 }): TaskArtifactUpdateEvent {
@@ -599,7 +431,6 @@ export function createArtifactUpdate(params: {
     contextId: params.contextId,
     append: params.append,
     lastChunk: params.lastChunk,
-    metadata: params.eventMetadata,
     artifact: {
       artifactId: params.artifactId,
       name: params.name,
@@ -617,7 +448,6 @@ export function createReplyArtifactUpdate(params: {
   name: string;
   sequence: number;
   content: BuiltReplyContent;
-  eventMetadata?: JsonRecord;
   append?: boolean;
   lastChunk?: boolean;
 }): TaskArtifactUpdateEvent {
@@ -627,14 +457,10 @@ export function createReplyArtifactUpdate(params: {
     artifactId: params.artifactId,
     name: params.name,
     parts: params.content.parts,
-    metadata: mergeMetadata(
-      {
-        sequence: params.sequence,
-        source: params.name,
-      },
-      params.content.metadata,
-    ),
-    eventMetadata: params.eventMetadata,
+    metadata: mergeMetadata({
+      sequence: params.sequence,
+      source: params.name,
+    }),
     append: params.append,
     lastChunk: params.lastChunk,
   });
@@ -652,7 +478,6 @@ export function createToolProgressArtifactUpdate(params: {
   phase: ToolProgressPhase;
   payload: unknown;
   sequence: number;
-  eventMetadata?: JsonRecord;
   isError?: boolean;
 }): TaskArtifactUpdateEvent {
   const text =
@@ -678,7 +503,6 @@ export function createToolProgressArtifactUpdate(params: {
       toolCallId: params.toolCallId,
       sequence: params.sequence,
     },
-    eventMetadata: params.eventMetadata,
     lastChunk: params.phase === "result",
   });
 }

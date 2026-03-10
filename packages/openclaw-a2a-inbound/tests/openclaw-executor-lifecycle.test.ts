@@ -41,23 +41,35 @@ function isArtifactUpdate(event: unknown): event is TaskArtifactUpdateEvent {
   );
 }
 
-function getOpenClawMetadata(
-  value: { metadata?: Record<string, unknown> | undefined },
-): Record<string, unknown> | undefined {
-  const metadata = value.metadata;
-
-  if (
-    typeof metadata !== "object" ||
-    metadata === null ||
-    Array.isArray(metadata) ||
-    typeof metadata.openclaw !== "object" ||
-    metadata.openclaw === null ||
-    Array.isArray(metadata.openclaw)
-  ) {
-    return undefined;
+function assertNoOpenClawMetadata(value: unknown, path = "root"): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      assertNoOpenClawMetadata(entry, `${path}[${index}]`));
+    return;
   }
 
-  return metadata.openclaw as Record<string, unknown>;
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+
+  const record = value as Record<string, unknown>;
+  const metadata = record.metadata;
+
+  if (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata)
+  ) {
+    assert.equal(
+      "openclaw" in metadata,
+      false,
+      `unexpected metadata.openclaw at ${path}.metadata`,
+    );
+  }
+
+  for (const [key, entry] of Object.entries(record)) {
+    assertNoOpenClawMetadata(entry, `${path}.${key}`);
+  }
 }
 
 function getArtifactText(event: TaskArtifactUpdateEvent): string | undefined {
@@ -314,19 +326,24 @@ test("non_blocking mode publishes a Task before a simple terminal reply", async 
   assert.equal(getArtifactText(assistantUpdates[0]), "Nonblocking reply");
 });
 
-test("non_blocking mode learns runId from agent events instead of session or context ids", async () => {
+test("non_blocking mode publishes metadata-free task updates", async () => {
   const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
     emit({
-      runId: "run-event-owned",
+      runId: "run-metadata-free",
       stream: "lifecycle",
       data: { phase: "start" },
     });
     await params.dispatcherOptions.deliver(
-      { text: "Event-owned reply" },
+      {
+        text: "Event-owned reply",
+        channelData: {
+          source: "test",
+        },
+      },
       { kind: "final" },
     );
     emit({
-      runId: "run-event-owned",
+      runId: "run-metadata-free",
       stream: "lifecycle",
       data: { phase: "end" },
     });
@@ -340,28 +357,10 @@ test("non_blocking mode learns runId from agent events instead of session or con
   await executor.execute(requestContext, recorder.bus);
   await recorder.finished;
 
-  const statusEvents = recorder.events.filter(isStatusUpdate);
-  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
-  const workingStatus = statusEvents.find((event) => event.status.state === "working");
-  const finalStatus = statusEvents.at(-1);
-  const workingRunId = workingStatus
-    ? getOpenClawMetadata(workingStatus)?.runId
-    : undefined;
-  const finalRunId = finalStatus
-    ? getOpenClawMetadata(finalStatus)?.runId
-    : undefined;
-  const artifactRunId = assistantUpdates[0]
-    ? getOpenClawMetadata(assistantUpdates[0])?.runId
-    : undefined;
-
-  assert.equal(workingRunId, "run-event-owned");
-  assert.equal(finalRunId, "run-event-owned");
-  assert.equal(artifactRunId, "run-event-owned");
-  assert.notEqual(workingRunId, requestContext.contextId);
-  assert.notEqual(workingRunId, "session:test");
+  assertNoOpenClawMetadata(recorder.events);
 });
 
-test("promoted live executions record both sessionKey and runId", async () => {
+test("promoted live executions stay registered until completion and then clean up", async () => {
   let releaseRun: (() => void) | undefined;
 
   const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
@@ -393,64 +392,14 @@ test("promoted live executions record both sessionKey and runId", async () => {
 
   const executePromise = executor.execute(requestContext, recorder.bus);
 
-  await waitFor(() => {
-    const record = liveExecutions.get(requestContext.taskId);
-    return (
-      record?.sessionKey === "session:test" &&
-      record.runId === "run-live-bridge"
-    );
-  });
-
-  const liveRecord = liveExecutions.get(requestContext.taskId);
-  assert.equal(liveRecord?.sessionKey, "session:test");
-  assert.equal(liveRecord?.runId, "run-live-bridge");
+  await waitFor(() => liveExecutions.has(requestContext.taskId));
+  assert.equal(liveExecutions.has(requestContext.taskId), true);
 
   releaseRun?.();
   await executePromise;
   await recorder.finished;
-});
 
-test("streaming mode publishes task-first assistant progress and closes the artifact", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
-    params.replyOptions?.onAgentRunStart?.("run-streaming");
-    emit({
-      runId: "run-streaming",
-      stream: "lifecycle",
-      data: { phase: "start" },
-    });
-    emit({
-      runId: "run-streaming",
-      stream: "assistant",
-      data: { delta: "Streaming reply" },
-    });
-    await params.dispatcherOptions.deliver(
-      { text: "Streaming reply" },
-      { kind: "final" },
-    );
-    emit({
-      runId: "run-streaming",
-      stream: "lifecycle",
-      data: { phase: "end" },
-    });
-  });
-  const requestContext = createRequestContext();
-  liveExecutions.setRequestMode(requestContext.userMessage.messageId, "streaming");
-  const recorder = createEventBusRecorder();
-
-  await executor.execute(requestContext, recorder.bus);
-  await recorder.finished;
-
-  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
-  const closingUpdate = assistantUpdates.at(-1);
-
-  assert.equal(recorder.events[0]?.kind, "task");
-  assert.equal(recorder.events.some(isMessage), false);
-  assert.equal(assistantUpdates.length, 2);
-  assert.equal(getArtifactText(assistantUpdates[0]), "Streaming reply");
-  assert.ok(closingUpdate);
-  assert.equal(closingUpdate.lastChunk, true);
-  assert.equal(getArtifactText(closingUpdate), undefined);
-  assert.equal(closingUpdate.append, true);
+  assert.equal(liveExecutions.has(requestContext.taskId), false);
 });
 
 test("promoted run publishes task, working state, artifacts, and final completion", async () => {

@@ -78,7 +78,6 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       eventBus,
       this.options.liveExecutions,
       undefined,
-      (runId) => this.options.taskRuntime.captureRunId(requestContext.taskId, runId),
     );
     let unsubscribeAgentEvents: (() => boolean) | undefined;
 
