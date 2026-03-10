@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type {
+  AgentCard,
   Message,
   Task,
   TaskArtifactUpdateEvent,
@@ -595,6 +596,50 @@ test("agent card advertises MIME-based default output modes", async () => {
     "text/plain",
     "application/json",
   ]);
+});
+
+test("agent card declares the root JSON-RPC endpoint as the preferred transport", async () => {
+  const server = createServerHarness(async () => {});
+  const agentCard = await server.requestHandler.getAgentCard();
+  const expectedJsonRpcUrl = new URL(
+    server.account.jsonRpcPath,
+    server.account.publicBaseUrl,
+  ).toString();
+
+  assert.equal(agentCard.url, expectedJsonRpcUrl);
+  assert.equal(agentCard.preferredTransport, "JSONRPC");
+  assert.ok(
+    agentCard.additionalInterfaces === undefined ||
+      agentCard.additionalInterfaces.length === 0,
+  );
+});
+
+test("served agent card serializes a single canonical JSON-RPC interface", async () => {
+  const harness = createServerHarness(async () => {});
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const response = await fetch(`${baseUrl}${harness.account.agentCardPath}`);
+    const agentCard = (await response.json()) as AgentCard;
+    const expectedJsonRpcUrl = new URL(
+      harness.account.jsonRpcPath,
+      harness.account.publicBaseUrl,
+    ).toString();
+
+    assert.equal(response.status, 200);
+    assert.equal(agentCard.url, expectedJsonRpcUrl);
+    assert.equal(agentCard.preferredTransport, "JSONRPC");
+    assert.ok(
+      agentCard.additionalInterfaces === undefined ||
+        agentCard.additionalInterfaces.length === 0,
+    );
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+  }
 });
 
 test("sendMessage returns an initial Task for a nonblocking terminal run", async () => {
