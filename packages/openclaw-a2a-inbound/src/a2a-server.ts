@@ -62,6 +62,7 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     protocolVersion: account.protocolVersion,
     version: PLUGIN_VERSION,
     url: jsonRpcUrl,
+    preferredTransport: "JSONRPC",
     skills: account.skills.map((skill) => ({
       id: skill.id,
       name: skill.name,
@@ -75,12 +76,6 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
-    additionalInterfaces: [
-      {
-        url: jsonRpcUrl,
-        transport: "JSONRPC",
-      },
-    ],
   };
 }
 

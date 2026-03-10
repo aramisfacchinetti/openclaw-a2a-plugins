@@ -2,7 +2,7 @@
 
 Native OpenClaw inbound A2A channel plugin.
 
-This package serves an A2A agent card plus a JSON-RPC endpoint and routes supported inbound A2A requests into OpenClaw through the channel runtime.
+This package serves an A2A agent card plus a JSON-RPC endpoint and routes supported inbound A2A requests into OpenClaw through the channel runtime. The agent card advertises the main `url` as its preferred `JSONRPC` transport and does not list duplicate interfaces when only that one official transport is available.
 
 ## Installation
 
