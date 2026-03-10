@@ -1,15 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentCard,
-  DeleteTaskPushNotificationConfigParams,
-  GetTaskPushNotificationConfigParams,
-  ListTaskPushNotificationConfigParams,
   Message,
   MessageSendParams,
   Task,
   TaskArtifactUpdateEvent,
   TaskIdParams,
-  TaskPushNotificationConfig,
   TaskQueryParams,
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
@@ -26,7 +22,6 @@ import {
 import {
   createTaskSnapshot,
   createTaskStatusUpdate,
-  isActiveExecutionTaskState,
   isQuiescentTaskState,
   isTerminalTaskState,
   normalizeOutputModes,
@@ -57,37 +52,6 @@ function trimTaskHistory(task: Task, historyLength: number | undefined): Task {
   return nextTask;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseAfterSequence(metadata: unknown): number | undefined {
-  if (!isRecord(metadata)) {
-    return undefined;
-  }
-
-  const openclaw = metadata.openclaw;
-
-  if (!isRecord(openclaw) || !("afterSequence" in openclaw)) {
-    return undefined;
-  }
-
-  const afterSequence = openclaw.afterSequence;
-
-  if (
-    typeof afterSequence !== "number" ||
-    !Number.isFinite(afterSequence) ||
-    !Number.isInteger(afterSequence) ||
-    afterSequence < 0
-  ) {
-    throw A2AError.invalidParams(
-      "params.metadata.openclaw.afterSequence must be a non-negative integer.",
-    );
-  }
-
-  return afterSequence;
-}
-
 function shouldResolveFirstResult(event: StreamEvent): event is Message | Task {
   return event.kind === "message" || event.kind === "task";
 }
@@ -101,7 +65,6 @@ export class A2AInboundRequestHandler {
     private readonly base: DefaultRequestHandler,
     private readonly taskRuntime: A2ATaskRuntimeStore,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
-    private readonly streamingEnabled: boolean,
     private readonly agentExecutor: AgentExecutor,
     private readonly defaultOutputModes: readonly string[],
   ) {}
@@ -145,15 +108,13 @@ export class A2AInboundRequestHandler {
       const executionPromise = this.executeWithFallback(requestContext, eventBus);
 
       if (blocking) {
-        const result = await this.processBlockingExecution({
+        return await this.processBlockingExecution({
           eventQueue,
           latestUserMessage: prepared.message,
           taskId: requestContext.taskId,
           executionPromise,
           context,
         });
-
-        return result;
       }
 
       return await this.processNonBlockingExecution({
@@ -163,64 +124,6 @@ export class A2AInboundRequestHandler {
         executionPromise,
         context,
       });
-    } finally {
-      this.liveExecutions.clearRequestMode(requestId);
-    }
-  }
-
-  async *sendMessageStream(
-    params: MessageSendParams,
-    context?: ServerCallContext,
-  ): AsyncGenerator<
-    Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-    void,
-    undefined
-  > {
-    if (!this.streamingEnabled) {
-      throw A2AError.unsupportedOperation(
-        "Streaming is not enabled for this A2A inbound account.",
-      );
-    }
-
-    const prepared = this.prepareParams(params);
-    const resolvedOutputModes = this.resolveAcceptedOutputModes(prepared);
-    const requestId = prepared.message.messageId;
-
-    if (!requestId) {
-      throw A2AError.invalidParams("message.messageId is required for streaming.");
-    }
-
-    this.liveExecutions.setRequestMode(requestId, "streaming");
-
-    try {
-      const requestContext = await this.createRequestContext(
-        prepared.message,
-        context,
-        resolvedOutputModes,
-      );
-      const eventBus = new DefaultExecutionEventBus();
-      const eventQueue = new ExecutionEventQueue(eventBus);
-      const executionPromise = this.executeWithFallback(requestContext, eventBus);
-
-      let sawDurableEvent = false;
-
-      try {
-        for await (const event of eventQueue.events()) {
-          const committed = await this.commitExecutionEvent(event, prepared.message);
-
-          if (committed.kind !== "message") {
-            sawDurableEvent = true;
-          }
-
-          yield committed;
-        }
-
-        await executionPromise;
-      } finally {
-        if (!sawDurableEvent) {
-          this.taskRuntime.discardPending(requestContext.taskId);
-        }
-      }
     } finally {
       this.liveExecutions.clearRequestMode(requestId);
     }
@@ -302,97 +205,6 @@ export class A2AInboundRequestHandler {
       prepared.subscription,
       context,
     );
-  }
-
-  setTaskPushNotificationConfig(
-    params: TaskPushNotificationConfig,
-    context?: ServerCallContext,
-  ): Promise<TaskPushNotificationConfig> {
-    return this.base.setTaskPushNotificationConfig(params, context);
-  }
-
-  getTaskPushNotificationConfig(
-    params: TaskIdParams | GetTaskPushNotificationConfigParams,
-    context?: ServerCallContext,
-  ): Promise<TaskPushNotificationConfig> {
-    return this.base.getTaskPushNotificationConfig(params, context);
-  }
-
-  listTaskPushNotificationConfigs(
-    params: ListTaskPushNotificationConfigParams,
-    context?: ServerCallContext,
-  ): Promise<TaskPushNotificationConfig[]> {
-    return this.base.listTaskPushNotificationConfigs(params, context);
-  }
-
-  deleteTaskPushNotificationConfig(
-    params: DeleteTaskPushNotificationConfigParams,
-    context?: ServerCallContext,
-  ): Promise<void> {
-    return this.base.deleteTaskPushNotificationConfig(params, context);
-  }
-
-  async *resubscribe(
-    params: TaskIdParams,
-    context?: ServerCallContext,
-  ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
-    if (!this.streamingEnabled) {
-      throw A2AError.unsupportedOperation(
-        "Streaming is not enabled for this A2A inbound account.",
-      );
-    }
-
-    const initialTask = await this.loadTaskForRead(params.id, context);
-
-    if (!initialTask) {
-      throw A2AError.taskNotFound(params.id);
-    }
-
-    const afterSequence = parseAfterSequence(params.metadata);
-
-    if (typeof afterSequence === "number") {
-      const prepared = await this.taskRuntime.prepareReplayTail(
-        params.id,
-        afterSequence,
-      );
-
-      if (!prepared) {
-        throw A2AError.taskNotFound(params.id);
-      }
-
-      for (const record of prepared.events.filter(
-        (entry) => entry.sequence > afterSequence,
-      )) {
-        yield this.taskRuntime.replayRecord(record);
-      }
-
-      if (
-        !isActiveExecutionTaskState(prepared.task.status.state) ||
-        !prepared.subscription
-      ) {
-        return;
-      }
-
-      yield* this.consumeCommittedTail(prepared.subscription);
-      return;
-    }
-
-    const prepared = await this.taskRuntime.prepareLiveTail(params.id);
-
-    if (!prepared) {
-      throw A2AError.taskNotFound(params.id);
-    }
-
-    yield prepared.task;
-
-    if (
-      !isActiveExecutionTaskState(prepared.task.status.state) ||
-      !prepared.subscription
-    ) {
-      return;
-    }
-
-    yield* this.consumeCommittedTail(prepared.subscription);
   }
 
   private prepareParams(params: MessageSendParams): MessageSendParams {
@@ -697,15 +509,15 @@ export class A2AInboundRequestHandler {
   ): AsyncGenerator<TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
     try {
       while (true) {
-        const record = await subscription.next();
+        const event = await subscription.next();
 
-        if (!record) {
+        if (!event) {
           return;
         }
 
-        yield record.event;
+        yield event;
 
-        if (isFinalTaskEvent(record.event)) {
+        if (isFinalTaskEvent(event)) {
           return;
         }
       }

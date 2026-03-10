@@ -8,7 +8,7 @@ Last Updated: 2026-03-10
 
 ## Summary
 
-This RFC now reflects the repository after the Phase 3 runtime replacement. The public HTTP/plugin surface is aligned with the intended minimal-core contract, but the repository is still only partially aligned with the full end state because optional protocol methods and metadata cleanup have not landed yet.
+This RFC now reflects the repository after the Phase 4 protocol and metadata cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, and serialized A2A payloads are aligned with the intended minimal-core contract.
 
 The current codebase has completed the public contract and transport cleanup:
 
@@ -21,19 +21,20 @@ The current codebase has completed the public contract and transport cleanup:
 - outbound file parts are no longer exposed through same-origin transport URLs
 - advertised agent-card defaults are fixed to `streaming = false` and `pushNotifications = false`
 
-The current codebase has completed the runtime simplification, but not the remaining protocol-adjacent cleanup:
+The current codebase has completed the runtime and protocol cleanup:
 
 - task state is intentionally in-memory and process-local only
 - the server always constructs that in-memory runtime internally
-- replay/resubscribe still exist behind the internal streaming switch
-- OpenClaw vendor metadata is still emitted
-- OpenClaw metadata extensions still exist in tasks and events
-- push notification config methods have not been removed from the request handler surface
+- removed optional JSON-RPC methods are rejected at the protocol boundary
+- replay/resubscribe and backlog-only runtime paths are deleted
+- OpenClaw metadata extensions are no longer emitted in serialized A2A payloads
+- vendor reply payload decoration is removed
+- push notification config methods are no longer part of the effective handler surface
 
 This document now records both:
 
-1. the minimal-core contract that is already frozen
-2. the remaining gaps before the full RFC target is actually implemented
+1. the minimal-core contract that is already implemented
+2. the remaining open work before the RFC is fully complete
 
 ## Decision
 
@@ -84,36 +85,46 @@ Breaking changes are acceptable. The repo is still pre-1.0 and the project instr
 - The plugin no longer registers `/a2a/files`.
 - The plugin no longer registers `openclaw-a2a-inbound.describe`.
 - Outbound reply file parts are filtered instead of being rewritten to same-origin transport URLs.
-- Mixed outbound replies still preserve any representable text and vendor-data JSON parts after file filtering.
+- Mixed outbound replies preserve any representable text after filtering.
 - File-only outbound replies now fail with A2A `-32005` instead of returning dead file links.
 - Production startup defaults to in-memory task storage because task-store config was removed from the public account contract.
-- Production startup does not enable streaming methods because the plugin path does not pass the internal streaming switch.
 - The task runtime is now always created through a zero-argument in-memory factory.
+- The effective JSON-RPC surface only handles:
+  - `message/send`
+  - `tasks/get`
+  - `tasks/cancel`
+- Raw JSON-RPC calls for removed optional methods fail at the HTTP JSON-RPC boundary:
+  - `message/stream`
+  - `tasks/resubscribe`
+  - `tasks/pushNotificationConfig/set`
+  - `tasks/pushNotificationConfig/get`
+  - `tasks/pushNotificationConfig/list`
+  - `tasks/pushNotificationConfig/delete`
+- A2A tasks, events, messages, reply parts, and artifacts no longer emit `metadata.openclaw.*`.
+- Vendor reply metadata, vendor `data` parts, and the `reply-v1` schema marker are removed.
+- Vendor-only replies now fail with A2A `-32005`.
 
-### Still present in the current codebase
+### Remaining open work in the current codebase
 
-- Internal/test-only server options can still enable streaming request-handler methods through `internal.enableStreamingMethods`.
-- Replay/resubscribe behavior still exists while streaming methods are enabled.
-- OpenClaw metadata extensions such as `metadata.openclaw.*` still exist in tasks and events.
-- OpenClaw reply vendor metadata is still emitted as A2A `data` parts.
-- Push notification config methods are still delegated through the underlying SDK request handler even though agent cards advertise `pushNotifications = false`.
+- decide and enforce the final inbound file-input policy for the minimal-core package
 
 ### Phase 3 runtime note
 
 - Task state is intentionally non-durable.
-- Tasks, replay backlogs, bindings, and run metadata now exist only for the lifetime of the current server process.
-- Each materialized task is held only as its latest snapshot plus current sequence, committed status/artifact events since process start, pending pre-promotion bindings/run ids, and live subscribers.
-- Replay only covers committed events accumulated since the current process started.
-- Restarting the server drops prior task state and resubscribe backlog and subsequent reads return `task not found`.
+- Tasks and bindings now exist only for the lifetime of the current server process.
+- Each materialized task is held only as its latest snapshot plus the minimum live subscription state needed for correct cancellation and terminal-state observation.
+- Restarting the server drops prior task state and subsequent reads return `task not found`.
 
 ### Practical consequence
 
-The package is currently in a mixed state:
+The package is now effectively at the intended minimal-core protocol surface:
 
 - the public config and public transport/output contract are minimal-core
-- the internal runtime is still broader than the public contract
+- the runtime is process-local and reduced to the currently supported method set
+- removed optional methods are rejected instead of being silently reachable through internal switches
+- serialized A2A payloads no longer carry OpenClaw-specific metadata or vendor reply payloads
 
-That mixed state is intentional for now. Phases 1 and 2 froze and aligned the external contract before deleting the deeper runtime machinery.
+The only remaining incomplete part of the RFC is the final inbound file-input policy.
 
 ## Public Contract As Of Now
 
@@ -157,8 +168,8 @@ That is the minimal-core method set and should remain the stable public contract
 
 Implementation note:
 
-- `message/stream` and replay-style resubscribe behavior still exist only behind the internal streaming switch used by tests.
-- push-notification configuration methods are still delegated internally even though they are not part of the intended minimal-core contract.
+- removed optional methods are rejected at the JSON-RPC boundary instead of being routed internally
+- the remaining effective method surface is limited to `message/send`, `tasks/get`, and `tasks/cancel`
 
 ### Default content modes
 
@@ -172,8 +183,8 @@ Current defaults are:
 Important current implementation note:
 
 - clients may still negotiate `application/octet-stream`
-- the server will never emit a reachable outbound file URL or A2A `file` part after Phase 2
-- file-only replies under such negotiation now fail with A2A `-32005`
+- the server will never emit a reachable outbound file URL or A2A `file` part
+- file-only, media-only, and vendor-only replies that leave nothing representable now fail with A2A `-32005`
 
 ### Public config contract
 
@@ -203,14 +214,7 @@ Current public config rejects:
 
 ## Gaps Between Current State And Final RFC Target
 
-The final target described by this RFC is still not reached. The main remaining gaps are:
-
-### Protocol-adjacent cleanup still pending
-
-- remove or hard-disable streaming request paths without internal backdoors
-- remove replay/resubscribe behavior from the runtime
-- remove push notification config methods
-- remove OpenClaw metadata extensions from A2A responses
+The final target described by this RFC is nearly reached. The remaining gap is:
 
 ### Content handling cleanup still pending
 
@@ -253,20 +257,21 @@ Completed work:
 - replaced the durable-capable task store with a process-local in-memory runtime
 - removed `json-file` storage, lease heartbeats, orphan recovery, and startup sweep logic
 - removed the internal `taskStoreConfig` server hook
-- updated tests to assert process-lifetime task persistence and replay semantics
+- updated tests to assert process-lifetime task persistence for the reduced in-memory runtime
 - deleted durable-runtime coverage that only validated removed behavior
 - added restart-loss coverage so prior tasks now fail with `task not found` after server restart
 
 ### Phase 4: Remove optional protocol methods and metadata
 
-Status: Not started
+Status: Complete
 
-Still targeted:
+Completed work:
 
-- remove streaming paths
-- remove replay/resubscribe
-- remove push notification config methods
-- remove OpenClaw metadata extensions
+- removed the internal streaming-method test backdoor and all remaining streaming/replay paths
+- removed push notification config methods from the effective JSON-RPC surface
+- changed raw JSON-RPC calls for removed optional methods to fail at the protocol boundary
+- removed `metadata.openclaw.*` emission from tasks, events, messages, reply parts, and artifacts
+- removed vendor reply payload decoration and vendor-only reply success paths
 
 ### Phase 5: Finalize content handling
 
@@ -293,11 +298,7 @@ Completed work:
 - default-mode tests now reflect text/JSON defaults
 - file-only and mixed-content regressions now assert no outbound `file` parts or generated `/files` URLs remain
 - durable-runtime tests were removed
-- lifecycle tests now cover same-process replay and restart-loss semantics for the in-memory runtime
-
-Still pending:
-
-- remove runtime tests that only exist for features the final RFC intends to delete, mainly around internal streaming/replay surfaces and OpenClaw metadata
+- lifecycle tests now cover metadata-free blocking/non-blocking flows, raw JSON-RPC rejection for removed optional methods, quiescent/live cancellation, and restart-loss for the in-memory runtime
 
 ## Acceptance Criteria
 
@@ -317,20 +318,18 @@ Still pending:
 - default modes no longer include `application/octet-stream`
 - outbound file-only replies fail instead of exposing dead links
 - no outbound task, message, or artifact contains a generated `/files` URL or A2A `file` part
-
-### Criteria not yet satisfied
-
 - no streaming/replay method surface
 - no push notification config method surface
 - no OpenClaw metadata extensions in A2A responses
+
+### Criteria not yet satisfied
+
 - final inbound file-input policy is enforced
 
 ## Follow-up Work
 
 The next updates to this RFC should happen when one of the following lands:
 
-- streaming/replay/push config methods are removed
-- OpenClaw metadata extensions are removed from task/event payloads
 - the final inbound file-input policy is decided and enforced
 
-At that point this document can move from "mixed current state plus target direction" to a cleaner final-state RFC or an implementation-complete design note.
+At that point this document can move from an in-progress RFC with one remaining policy decision to a cleaner final-state RFC or an implementation-complete design note.

@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentCard } from "@a2a-js/sdk";
-import { DefaultRequestHandler } from "@a2a-js/sdk/server";
+import {
+  A2AError,
+  DefaultRequestHandler,
+  type A2ARequestHandler,
+} from "@a2a-js/sdk/server";
 import {
   UserBuilder,
   agentCardHandler,
@@ -29,9 +33,6 @@ export interface A2AInboundServerOptions {
   channelRuntime: ChannelRuntime;
   pluginRuntime: PluginRuntime;
   log?: ChannelLogSink;
-  internal?: {
-    enableStreamingMethods?: boolean;
-  };
 }
 
 export interface A2AInboundServer {
@@ -124,6 +125,78 @@ function createExpressDispatcher(
     });
 }
 
+const REMOVED_JSON_RPC_METHODS = new Set([
+  "message/stream",
+  "tasks/resubscribe",
+  "tasks/pushNotificationConfig/set",
+  "tasks/pushNotificationConfig/get",
+  "tasks/pushNotificationConfig/list",
+  "tasks/pushNotificationConfig/delete",
+]);
+
+function createMethodNotFoundResponse(method: string, id: unknown) {
+  return {
+    jsonrpc: "2.0" as const,
+    id:
+      typeof id === "string" ||
+      (typeof id === "number" && Number.isInteger(id)) ||
+      id === null
+        ? id
+        : null,
+    error: A2AError.methodNotFound(method).toJSONRPCError(),
+  };
+}
+
+function rejectRemovedJsonRpcMethods(): RequestHandler {
+  return (req, res, next) => {
+    const method =
+      typeof req.body === "object" &&
+      req.body !== null &&
+      !Array.isArray(req.body) &&
+      typeof req.body.method === "string"
+        ? req.body.method
+        : undefined;
+
+    if (!method || !REMOVED_JSON_RPC_METHODS.has(method)) {
+      next();
+      return;
+    }
+
+    res.status(200).json(createMethodNotFoundResponse(method, req.body.id));
+  };
+}
+
+function createProtocolBoundaryRequestHandler(
+  handler: A2AInboundRequestHandler,
+): A2ARequestHandler {
+  return {
+    getAgentCard: () => handler.getAgentCard(),
+    getAuthenticatedExtendedAgentCard: (context) =>
+      handler.getAuthenticatedExtendedAgentCard(context),
+    sendMessage: (params, context) => handler.sendMessage(params, context),
+    getTask: (params, context) => handler.getTask(params, context),
+    cancelTask: (params, context) => handler.cancelTask(params, context),
+    async *sendMessageStream() {
+      throw A2AError.methodNotFound("message/stream");
+    },
+    setTaskPushNotificationConfig: async () => {
+      throw A2AError.methodNotFound("tasks/pushNotificationConfig/set");
+    },
+    getTaskPushNotificationConfig: async () => {
+      throw A2AError.methodNotFound("tasks/pushNotificationConfig/get");
+    },
+    listTaskPushNotificationConfigs: async () => {
+      throw A2AError.methodNotFound("tasks/pushNotificationConfig/list");
+    },
+    deleteTaskPushNotificationConfig: async () => {
+      throw A2AError.methodNotFound("tasks/pushNotificationConfig/delete");
+    },
+    async *resubscribe() {
+      throw A2AError.methodNotFound("tasks/resubscribe");
+    },
+  };
+}
+
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
@@ -149,9 +222,11 @@ export function createA2AInboundServer(
     defaultRequestHandler,
     taskStore,
     liveExecutions,
-    options.internal?.enableStreamingMethods ?? false,
     agentExecutor,
     options.account.defaultOutputModes,
+  );
+  const protocolBoundaryHandler = createProtocolBoundaryRequestHandler(
+    requestHandler,
   );
 
   const app = express();
@@ -170,13 +245,14 @@ export function createA2AInboundServer(
   app.use(
     options.account.agentCardPath,
     agentCardHandler({
-      agentCardProvider: requestHandler,
+      agentCardProvider: protocolBoundaryHandler,
     }),
   );
   app.use(
     options.account.jsonRpcPath,
+    rejectRemovedJsonRpcMethods(),
     jsonRpcHandler({
-      requestHandler,
+      requestHandler: protocolBoundaryHandler,
       userBuilder: UserBuilder.noAuthentication,
     }),
   );

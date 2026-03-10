@@ -17,14 +17,10 @@ import {
   createTaskSnapshot,
   createTaskStatusUpdate,
   createToolProgressArtifactUpdate,
-  hasReplyPayloadExtras,
-  mergeReplyVendorMetadata,
   normalizeReplyPayload,
   summarizeBufferedReplies,
   type BuiltReplyContent,
-  type JsonRecord,
   type NormalizedReplyPayload,
-  type ReplyVendorMetadata,
   type ToolProgressPhase,
 } from "./response-mapping.js";
 
@@ -49,25 +45,23 @@ type AssistantStage = {
   streamedText?: string;
   finalText?: string;
   mediaUrls: string[];
-  vendorMetadata?: ReplyVendorMetadata;
+  hasVendorContent: boolean;
   finalSeen: boolean;
   completed: boolean;
   publishedArtifact: boolean;
   publishedText: string;
   publishedNonTextKey?: string;
   closedPublished: boolean;
-  eventMetadata?: JsonRecord;
 };
 
 type ToolStage = {
   kind: "tool";
   payload: NormalizedReplyPayload;
-  eventMetadata?: JsonRecord;
 };
 
 type StagedOutput = AssistantStage | ToolStage;
 
-function isRecord(value: unknown): value is JsonRecord {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -205,7 +199,7 @@ function hasAssistantStageActivity(stage: AssistantStage): boolean {
     typeof stage.streamedText === "string" ||
     typeof stage.finalText === "string" ||
     stage.mediaUrls.length > 0 ||
-    typeof stage.vendorMetadata !== "undefined" ||
+    stage.hasVendorContent ||
     stage.finalSeen
   );
 }
@@ -232,7 +226,6 @@ export class A2ATaskExecutionCoordinator {
   private inputRequiredPublished = false;
   private assistantFlushQueued = false;
   private assistantFlushScheduled = false;
-  private currentAgentEventMetadata?: JsonRecord;
   private expectedSessionKey?: string;
 
   constructor(
@@ -240,7 +233,6 @@ export class A2ATaskExecutionCoordinator {
     private readonly eventBus: ExecutionEventBus,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
     expectedSessionKey?: string,
-    private readonly onRunIdCaptured?: (runId: string) => void,
   ) {
     this.expectedSessionKey = expectedSessionKey;
     this.responseMode =
@@ -260,12 +252,6 @@ export class A2ATaskExecutionCoordinator {
 
   setExpectedSessionKey(sessionKey: string | undefined): void {
     this.expectedSessionKey = readTrimmedString(sessionKey);
-
-    if (this.promoted) {
-      this.liveExecutions.update(this.requestContext.taskId, {
-        sessionKey: this.expectedSessionKey,
-      });
-    }
   }
 
   prepareForExecution(): void {
@@ -274,10 +260,7 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
-    if (
-      this.responseMode === "streaming" ||
-      this.responseMode === "non_blocking"
-    ) {
+    if (this.responseMode === "non_blocking") {
       this.promoteToTask(
         `${this.responseMode} mode always starts as a task`,
       );
@@ -326,25 +309,20 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.captureRunId(eventRunId);
-    this.currentAgentEventMetadata = this.buildAgentEventMetadata(event);
     this.publishWorkingStatus();
 
-    try {
-      if (event.stream === "lifecycle") {
-        this.handleLifecycleEvent(event.data);
-        return;
-      }
+    if (event.stream === "lifecycle") {
+      this.handleLifecycleEvent(event.data);
+      return;
+    }
 
-      if (event.stream === "assistant") {
-        this.handleAssistantEvent(event.data);
-        return;
-      }
+    if (event.stream === "assistant") {
+      this.handleAssistantEvent(event.data);
+      return;
+    }
 
-      if (event.stream === "tool") {
-        this.handleToolEvent(event.data);
-      }
-    } finally {
-      this.currentAgentEventMetadata = undefined;
+    if (event.stream === "tool") {
+      this.handleToolEvent(event.data);
     }
   }
 
@@ -358,14 +336,10 @@ export class A2ATaskExecutionCoordinator {
         this.stagedOutputs.push({
           kind: "tool",
           payload: normalized,
-          eventMetadata: this.buildBaseEventMetadata(),
         });
         this.promoteToTask("tool result summaries require task artifacts");
       } else {
-        this.publishToolArtifact(
-          normalized,
-          this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
-        );
+        this.publishToolArtifact(normalized);
       }
 
       return;
@@ -388,11 +362,7 @@ export class A2ATaskExecutionCoordinator {
       assistantStage.mediaUrls,
       normalized.mediaUrls,
     );
-    assistantStage.vendorMetadata = mergeReplyVendorMetadata(
-      assistantStage.vendorMetadata,
-      normalized.vendorMetadata,
-    );
-    assistantStage.eventMetadata = this.buildBaseEventMetadata();
+    assistantStage.hasVendorContent ||= normalized.hasVendorContent;
 
     if (this.promoted) {
       this.publishAssistantStage(assistantStage, {
@@ -448,7 +418,6 @@ export class A2ATaskExecutionCoordinator {
           createAgentMessage({
             contextId: this.requestContext.contextId,
             parts: directContent.parts,
-            metadata: directContent.metadata,
           }),
         );
         this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
@@ -518,12 +487,6 @@ export class A2ATaskExecutionCoordinator {
 
     this.cancelRequested = true;
 
-    if (this.promoted) {
-      this.liveExecutions.update(this.requestContext.taskId, {
-        cancelRequested: true,
-      });
-    }
-
     if (!this.signal.aborted) {
       this.abortController.abort(
         new DOMException("A2A task canceled.", "AbortError"),
@@ -580,13 +543,6 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.runId = normalizedRunId;
-    this.onRunIdCaptured?.(normalizedRunId);
-
-    if (this.promoted) {
-      this.liveExecutions.update(this.requestContext.taskId, {
-        runId: normalizedRunId,
-      });
-    }
   }
 
   private handleLifecycleEvent(data: Record<string, unknown>): void {
@@ -640,8 +596,6 @@ export class A2ATaskExecutionCoordinator {
       assistantStage.mediaUrls,
       nextMediaUrls,
     );
-    assistantStage.eventMetadata =
-      this.currentAgentEventMetadata ?? assistantStage.eventMetadata;
 
     if (this.promoted) {
       this.queueAssistantArtifactFlush();
@@ -675,7 +629,6 @@ export class A2ATaskExecutionCoordinator {
         phase,
         payload: data,
         sequence: this.nextArtifactSequence(),
-        eventMetadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
         isError: phase === "result" && data.isError === true,
       }),
     );
@@ -699,11 +652,11 @@ export class A2ATaskExecutionCoordinator {
       index: this.assistantStages.length + 1,
       blockTexts: [],
       mediaUrls: [],
+      hasVendorContent: false,
       finalSeen: false,
       completed: false,
       publishedArtifact: false,
       publishedText: "",
-      eventMetadata: this.buildBaseEventMetadata(),
       closedPublished: false,
     };
 
@@ -771,7 +724,7 @@ export class A2ATaskExecutionCoordinator {
     return {
       ...(text ? { text } : {}),
       mediaUrls: stage.mediaUrls,
-      ...(stage.vendorMetadata ? { vendorMetadata: stage.vendorMetadata } : {}),
+      hasVendorContent: stage.hasVendorContent,
     };
   }
 
@@ -796,8 +749,6 @@ export class A2ATaskExecutionCoordinator {
       taskId: this.requestContext.taskId,
       contextId: this.requestContext.contextId,
       abortController: this.abortController,
-      sessionKey: this.expectedSessionKey,
-      runId: this.runId,
       cancel: async () => this.cancel(),
     });
 
@@ -810,7 +761,9 @@ export class A2ATaskExecutionCoordinator {
         artifacts: this.requestContext.task?.artifacts
           ? structuredClone(this.requestContext.task.artifacts)
           : undefined,
-        metadata: this.buildTaskMetadata(),
+        metadata: this.requestContext.task?.metadata
+          ? structuredClone(this.requestContext.task.metadata)
+          : undefined,
       }),
     );
     this.publishSubmittedStatus();
@@ -828,27 +781,6 @@ export class A2ATaskExecutionCoordinator {
     return [readOriginalUserMessage(this.requestContext)];
   }
 
-  private buildTaskMetadata(): JsonRecord | undefined {
-    const metadata = this.requestContext.task?.metadata
-      ? structuredClone(this.requestContext.task.metadata)
-      : {};
-
-    if (!this.runId) {
-      return Object.keys(metadata).length > 0 ? metadata : undefined;
-    }
-
-    metadata.openclaw = {
-      ...(typeof metadata.openclaw === "object" &&
-      metadata.openclaw !== null &&
-      !Array.isArray(metadata.openclaw)
-        ? (metadata.openclaw as JsonRecord)
-        : {}),
-      runId: this.runId,
-    };
-
-    return metadata;
-  }
-
   private publishSubmittedStatus(): void {
     if (this.submittedPublished || !this.taskPublished || this.finalPublished) {
       return;
@@ -860,7 +792,6 @@ export class A2ATaskExecutionCoordinator {
         taskId: this.requestContext.taskId,
         contextId: this.requestContext.contextId,
         state: "submitted",
-        metadata: this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -880,7 +811,6 @@ export class A2ATaskExecutionCoordinator {
         taskId: this.requestContext.taskId,
         contextId: this.requestContext.contextId,
         state: "working",
-        metadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -903,7 +833,6 @@ export class A2ATaskExecutionCoordinator {
         state: "input-required",
         final: false,
         messageText,
-        metadata: this.currentAgentEventMetadata ?? this.buildBaseEventMetadata(),
       }),
     );
     this.liveExecutions.cleanup(this.requestContext.taskId);
@@ -927,7 +856,6 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.finalPublished = true;
-    this.liveExecutions.markTerminal(this.requestContext.taskId, state);
     this.liveExecutions.cleanup(this.requestContext.taskId);
     this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
     this.eventBus.publish(
@@ -939,7 +867,6 @@ export class A2ATaskExecutionCoordinator {
         message: params.message,
         messageText:
           params.message ? undefined : params.messageText,
-        metadata: this.buildBaseEventMetadata(),
       }),
     );
   }
@@ -951,10 +878,7 @@ export class A2ATaskExecutionCoordinator {
 
     for (const output of this.stagedOutputs) {
       if (output.kind === "tool") {
-        this.publishToolArtifact(
-          output.payload,
-          output.eventMetadata ?? this.buildBaseEventMetadata(),
-        );
+        this.publishToolArtifact(output.payload);
         continue;
       }
 
@@ -1002,7 +926,6 @@ export class A2ATaskExecutionCoordinator {
             artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
-            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
             content: {
               ...content,
               parts: [],
@@ -1035,7 +958,6 @@ export class A2ATaskExecutionCoordinator {
             artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
-            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
             content: buildDeltaReplyContent(content, deltaText),
             append: true,
             lastChunk: params.lastChunk,
@@ -1050,7 +972,6 @@ export class A2ATaskExecutionCoordinator {
             artifactId,
             name: `assistant-output-${stage.index}`,
             sequence: this.nextArtifactSequence(),
-            eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
             content: {
               ...content,
               parts: [],
@@ -1069,7 +990,6 @@ export class A2ATaskExecutionCoordinator {
           artifactId,
           name: `assistant-output-${stage.index}`,
           sequence: this.nextArtifactSequence(),
-          eventMetadata: stage.eventMetadata ?? this.buildBaseEventMetadata(),
           content,
           lastChunk: params.lastChunk,
         }),
@@ -1085,7 +1005,6 @@ export class A2ATaskExecutionCoordinator {
 
   private publishToolArtifact(
     payload: NormalizedReplyPayload,
-    eventMetadata?: JsonRecord,
   ): void {
     const artifactId = `tool-result-${String(this.toolArtifactCount + 1).padStart(4, "0")}`;
     const content = buildReplyContent({
@@ -1113,7 +1032,6 @@ export class A2ATaskExecutionCoordinator {
         artifactId,
         name: `tool-result-${this.toolArtifactCount}`,
         sequence: this.nextArtifactSequence(),
-        eventMetadata: eventMetadata ?? this.buildBaseEventMetadata(),
         content,
       }),
     );
@@ -1133,7 +1051,6 @@ export class A2ATaskExecutionCoordinator {
         contextId: this.requestContext.contextId,
         taskId: this.requestContext.taskId,
         parts: content.parts,
-        metadata: content.metadata,
       });
     }
 
@@ -1215,35 +1132,5 @@ export class A2ATaskExecutionCoordinator {
       preferTerminalText: false,
       requireVisibleContent: false,
     });
-  }
-
-  private buildAgentEventMetadata(event: OpenClawExecutionEvent): JsonRecord | undefined {
-    const openclaw: JsonRecord = {};
-
-    if (this.runId ?? event.runId) {
-      openclaw.runId = this.runId ?? event.runId;
-    }
-
-    if (typeof event.seq === "number" && Number.isInteger(event.seq)) {
-      openclaw.agentEventSeq = event.seq;
-    }
-
-    if (typeof event.ts === "number" && Number.isFinite(event.ts)) {
-      openclaw.agentEventTs = event.ts;
-    }
-
-    return Object.keys(openclaw).length > 0 ? { openclaw } : undefined;
-  }
-
-  private buildBaseEventMetadata(): JsonRecord | undefined {
-    if (!this.runId) {
-      return undefined;
-    }
-
-    return {
-      openclaw: {
-        runId: this.runId,
-      },
-    };
   }
 }
