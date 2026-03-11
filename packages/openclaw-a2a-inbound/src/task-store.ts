@@ -49,6 +49,14 @@ export interface StoredTaskBinding {
 }
 
 interface StoredTaskRecord {
+  schemaVersion: 2;
+  task: Task;
+  binding?: StoredTaskBinding;
+  currentSequence: number;
+  journal: StoredCommittedJournalRecord[];
+}
+
+interface StoredTaskRecordV1 {
   schemaVersion: 1;
   task: Task;
   binding?: StoredTaskBinding;
@@ -65,6 +73,16 @@ interface TaskRecordBackend {
 export interface TaskJournalSubscriptionHandle {
   next(): Promise<JournalEvent | undefined>;
   close(): void;
+}
+
+export interface StoredCommittedJournalRecord {
+  sequence: number;
+  event: JournalEvent;
+}
+
+export interface PreparedTaskResubscription {
+  snapshot: Task;
+  subscription?: TaskJournalSubscriptionHandle;
 }
 
 type TaskRuntimeSubscriber = (event: JournalEvent) => void;
@@ -89,11 +107,22 @@ function cloneJournalEvent(event: JournalEvent): JournalEvent {
   return structuredClone(event);
 }
 
+function cloneStoredCommittedJournalRecord(
+  record: StoredCommittedJournalRecord,
+): StoredCommittedJournalRecord {
+  return {
+    sequence: record.sequence,
+    event: cloneJournalEvent(record.event),
+  };
+}
+
 function cloneTaskRecord(record: StoredTaskRecord): StoredTaskRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     task: cloneTask(record.task),
     ...(record.binding ? { binding: cloneTaskBinding(record.binding) } : {}),
+    currentSequence: record.currentSequence,
+    journal: record.journal.map(cloneStoredCommittedJournalRecord),
   };
 }
 
@@ -174,11 +203,15 @@ function mergeStatus(task: Task, event: TaskStatusUpdateEvent): Task {
 function createStoredTaskRecord(params: {
   task: Task;
   binding?: StoredTaskBinding;
+  currentSequence?: number;
+  journal?: readonly StoredCommittedJournalRecord[];
 }): StoredTaskRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     task: cloneTask(params.task),
     ...(params.binding ? { binding: cloneTaskBinding(params.binding) } : {}),
+    currentSequence: params.currentSequence ?? 0,
+    journal: (params.journal ?? []).map(cloneStoredCommittedJournalRecord),
   };
 }
 
@@ -188,8 +221,8 @@ function parseStoredTaskRecord(
 ): StoredTaskRecord {
   const parsed = JSON.parse(raw) as unknown;
 
-  if (!isRecord(parsed) || parsed.schemaVersion !== 1) {
-    throw new Error(`Task record ${source} is missing schemaVersion 1.`);
+  if (!isRecord(parsed)) {
+    throw new Error(`Task record ${source} is missing an object payload.`);
   }
 
   if (!isRecord(parsed.task) || parsed.task.kind !== "task") {
@@ -204,7 +237,88 @@ function parseStoredTaskRecord(
     throw new Error(`Task record ${source} contains an invalid binding.`);
   }
 
-  return cloneTaskRecord(parsed as unknown as StoredTaskRecord);
+  if (parsed.schemaVersion === 1) {
+    return createStoredTaskRecord({
+      task: parsed.task as unknown as Task,
+      binding:
+        typeof parsed.binding === "undefined"
+          ? undefined
+          : (parsed.binding as StoredTaskBinding),
+    });
+  }
+
+  if (parsed.schemaVersion !== 2) {
+    throw new Error(`Task record ${source} is missing schemaVersion 1 or 2.`);
+  }
+
+  if (
+    typeof parsed.currentSequence !== "number" ||
+    !Number.isInteger(parsed.currentSequence) ||
+    parsed.currentSequence < 0
+  ) {
+    throw new Error(`Task record ${source} contains an invalid currentSequence.`);
+  }
+
+  if (!Array.isArray(parsed.journal)) {
+    throw new Error(`Task record ${source} contains an invalid journal.`);
+  }
+
+  const journal: StoredCommittedJournalRecord[] = [];
+  let previousSequence = 0;
+
+  for (const entry of parsed.journal) {
+    if (!isRecord(entry)) {
+      throw new Error(`Task record ${source} contains an invalid journal entry.`);
+    }
+
+    if (
+      typeof entry.sequence !== "number" ||
+      !Number.isInteger(entry.sequence) ||
+      entry.sequence <= 0
+    ) {
+      throw new Error(`Task record ${source} contains an invalid journal sequence.`);
+    }
+
+    if (entry.sequence <= previousSequence) {
+      throw new Error(`Task record ${source} contains out-of-order journal entries.`);
+    }
+
+    if (!isRecord(entry.event)) {
+      throw new Error(`Task record ${source} contains an invalid journal event.`);
+    }
+
+    const eventKind = entry.event.kind;
+
+    if (
+      eventKind !== "status-update" &&
+      eventKind !== "artifact-update"
+    ) {
+      throw new Error(`Task record ${source} contains an invalid journal event kind.`);
+    }
+
+    journal.push({
+      sequence: entry.sequence,
+      event: cloneJournalEvent(entry.event as unknown as JournalEvent),
+    });
+    previousSequence = entry.sequence;
+  }
+
+  if (
+    journal.length > 0 &&
+    parsed.currentSequence < journal[journal.length - 1]!.sequence
+  ) {
+    throw new Error(`Task record ${source} currentSequence trails the journal.`);
+  }
+
+  return createStoredTaskRecord({
+    task: parsed.task as unknown as Task,
+    binding:
+      typeof parsed.binding === "undefined"
+        ? undefined
+        : (parsed.binding as StoredTaskBinding),
+    currentSequence: parsed.currentSequence,
+    journal,
+  });
 }
 
 class InMemoryTaskRecordBackend implements TaskRecordBackend {
@@ -452,6 +566,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
         createStoredTaskRecord({
           task,
           binding,
+          currentSequence: currentRecord?.currentSequence,
+          journal: currentRecord?.journal,
         }),
       );
       this.pendingBindings.delete(task.id);
@@ -484,6 +600,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
         createStoredTaskRecord({
           task: taskRecord.task,
           binding,
+          currentSequence: taskRecord.currentSequence,
+          journal: taskRecord.journal,
         }),
       );
       this.pendingBindings.delete(taskId);
@@ -526,6 +644,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
         createStoredTaskRecord({
           task: nextTask,
           binding: taskRecord.binding,
+          currentSequence: taskRecord.currentSequence,
+          journal: taskRecord.journal,
         }),
       );
 
@@ -558,6 +678,29 @@ export class A2ATaskRuntimeStore implements TaskStore {
     });
   }
 
+  async prepareResubscribe(
+    taskId: string,
+  ): Promise<PreparedTaskResubscription | undefined> {
+    return this.enqueueByTask(taskId, async () => {
+      const taskRecord = await this.backend.loadRecord(taskId);
+
+      if (!taskRecord) {
+        return undefined;
+      }
+
+      if (!isActiveExecutionTaskState(taskRecord.task.status.state)) {
+        return {
+          snapshot: cloneTask(taskRecord.task),
+        };
+      }
+
+      return {
+        snapshot: cloneTask(taskRecord.task),
+        subscription: this.createSubscription(taskId),
+      };
+    });
+  }
+
   private async commitTaskSnapshot(
     task: Task,
     latestUserMessage?: Message,
@@ -577,6 +720,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
         createStoredTaskRecord({
           task: nextTask,
           binding,
+          currentSequence: currentRecord?.currentSequence,
+          journal: currentRecord?.journal,
         }),
       );
       this.pendingBindings.delete(task.id);
@@ -595,6 +740,11 @@ export class A2ATaskRuntimeStore implements TaskStore {
       const binding =
         this.flushPendingBinding(event.taskId) ?? taskRecord.binding;
       const committedEvent = cloneJournalEvent(event);
+      const nextSequence = taskRecord.currentSequence + 1;
+      const journalRecord: StoredCommittedJournalRecord = {
+        sequence: nextSequence,
+        event: committedEvent,
+      };
       const nextTask =
         committedEvent.kind === "status-update"
           ? mergeStatus(taskRecord.task, committedEvent)
@@ -605,6 +755,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
         createStoredTaskRecord({
           task: nextTask,
           binding,
+          currentSequence: nextSequence,
+          journal: [...taskRecord.journal, journalRecord],
         }),
       );
       this.pendingBindings.delete(event.taskId);

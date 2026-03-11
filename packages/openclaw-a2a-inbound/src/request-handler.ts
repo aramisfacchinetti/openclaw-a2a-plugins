@@ -229,24 +229,21 @@ export class A2AInboundRequestHandler {
     params: TaskIdParams,
     context?: ServerCallContext,
   ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
-    const task = await this.loadTaskForRead(params.id, context);
+    const prepared = await this.taskRuntime.prepareResubscribe(params.id);
 
-    if (!task) {
+    if (!prepared) {
       throw A2AError.taskNotFound(params.id);
     }
 
-    yield task;
+    const subscription = prepared.subscription;
+    const shouldTail =
+      typeof subscription !== "undefined" &&
+      this.liveExecutions.has(params.id);
 
-    if (
-      !isActiveExecutionTaskState(task.status.state) ||
-      !this.liveExecutions.has(params.id)
-    ) {
-      return;
-    }
+    yield prepared.snapshot;
 
-    const subscription = await this.taskRuntime.subscribeToCommittedTail(params.id);
-
-    if (!subscription) {
+    if (!shouldTail) {
+      subscription?.close();
       return;
     }
 
