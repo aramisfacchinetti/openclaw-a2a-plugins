@@ -72,7 +72,7 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     })),
     capabilities: {
       pushNotifications: false,
-      streaming: false,
+      streaming: true,
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
@@ -120,8 +120,6 @@ function createExpressDispatcher(
 }
 
 const REMOVED_JSON_RPC_METHODS = new Set([
-  "message/stream",
-  "tasks/resubscribe",
   "tasks/pushNotificationConfig/set",
   "tasks/pushNotificationConfig/get",
   "tasks/pushNotificationConfig/list",
@@ -168,11 +166,10 @@ function createProtocolBoundaryRequestHandler(
     getAuthenticatedExtendedAgentCard: (context) =>
       handler.getAuthenticatedExtendedAgentCard(context),
     sendMessage: (params, context) => handler.sendMessage(params, context),
+    sendMessageStream: (params, context) =>
+      handler.sendMessageStream(params, context),
     getTask: (params, context) => handler.getTask(params, context),
     cancelTask: (params, context) => handler.cancelTask(params, context),
-    async *sendMessageStream() {
-      throw A2AError.methodNotFound("message/stream");
-    },
     setTaskPushNotificationConfig: async () => {
       throw A2AError.methodNotFound("tasks/pushNotificationConfig/set");
     },
@@ -185,16 +182,14 @@ function createProtocolBoundaryRequestHandler(
     deleteTaskPushNotificationConfig: async () => {
       throw A2AError.methodNotFound("tasks/pushNotificationConfig/delete");
     },
-    async *resubscribe() {
-      throw A2AError.methodNotFound("tasks/resubscribe");
-    },
+    resubscribe: (params, context) => handler.resubscribe(params, context),
   };
 }
 
 export function createA2AInboundServer(
   options: A2AInboundServerOptions,
 ): A2AInboundServer {
-  const taskStore = createTaskStore();
+  const taskStore = createTaskStore(options.account.taskStore);
   const liveExecutions = new A2ALiveExecutionRegistry();
   const agentExecutor = createOpenClawA2AExecutor({
     accountId: options.accountId,

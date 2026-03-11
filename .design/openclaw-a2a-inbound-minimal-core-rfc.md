@@ -1,4 +1,4 @@
-# RFC: Reduce `openclaw-a2a-inbound` To A Minimal Core A2A Surface
+# RFC: Restore `openclaw-a2a-inbound` To A Phase 1 Committed Runtime
 
 Status: Complete
 
@@ -8,194 +8,96 @@ Last Updated: 2026-03-11
 
 ## Summary
 
-This RFC now reflects the repository after the reduced-runtime cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, serialized A2A payloads, and test layering are aligned with the implemented minimal-core contract.
+This RFC now describes the restored phase 1 shape for `openclaw-a2a-inbound`.
 
-The current codebase has completed the public contract and transport cleanup:
+The package restores:
 
-- the public channel account contract is reduced to the minimal-core fields
-- removed config keys now fail fast during parsing
-- default input/output modes are narrowed to `text/plain` and `application/json`
-- REST transport is no longer part of the public contract or registered plugin routes
-- `/a2a/files` is removed
-- `openclaw-a2a-inbound.describe` is removed
-- outbound file parts are no longer exposed through same-origin transport URLs
-- advertised agent-card defaults are fixed to `streaming = false` and `pushNotifications = false`
-- inbound A2A file parts are rejected at the request boundary with `invalidParams`
-- inbound file fetch/staging/media-context plumbing is removed
+- `message/stream`
+- `tasks/resubscribe`
+- public `taskStore` account config
 
-The current codebase has completed the runtime and protocol cleanup:
+while keeping one committed task runtime as the only source of truth for:
 
-- task state is intentionally in-memory and process-local only
-- the server always constructs that in-memory runtime internally
-- removed optional JSON-RPC methods are rejected at the protocol boundary
-- replay/resubscribe and backlog-only runtime paths are deleted
-- OpenClaw metadata extensions are no longer emitted in serialized A2A payloads
-- vendor reply payload decoration is removed
-- push notification config methods are no longer part of the effective handler surface
+- `message/send`
+- `message/stream`
+- `tasks/get`
+- `tasks/cancel`
+- `tasks/resubscribe`
 
-This document records the implemented minimal-core contract in the current codebase.
+The implementation uses the official A2A SDK for transport, SSE framing, queues, event buses, and types. It does not use `DefaultRequestHandler` or `ResultManager` for task lifecycle semantics because their behavior does not match the committed runtime already implemented in this package.
 
 ## Decision
 
-The package should converge on a smaller A2A surface whose main job is:
+The package should stabilize on a phase 1 contract with:
 
-- serve a valid agent card
-- serve A2A JSON-RPC
-- implement `message/send`
-- implement `tasks/get`
-- implement `tasks/cancel`
+- JSON-RPC plus agent-card transport only
+- one committed task runtime
+- streaming enabled
+- push notifications disabled
+- public task-storage configuration
+- latest-snapshot persistence only
 
-Breaking changes are acceptable. The repo is still pre-1.0 and the project instructions explicitly do not require backward compatibility while iterating on structure.
+Breaking changes remain acceptable because the repository is still greenfield and the project instructions explicitly allow structural iteration without backward-compatibility constraints.
 
-## Current State Snapshot
+## Implemented Public Contract
 
-### Implemented in the current codebase
+### Supported transport and methods
 
-- Public account config is reduced to:
-  - `enabled`
-  - `label`
-  - `description`
-  - `publicBaseUrl`
-  - `defaultAgentId`
-  - `sessionStore`
-  - `protocolVersion`
-  - `agentCardPath`
-  - `jsonRpcPath`
-  - `maxBodyBytes`
-  - `defaultInputModes`
-  - `defaultOutputModes`
-  - `skills`
-- Parser rejects:
-  - `restPath`
-  - `capabilities`
-  - `auth`
-  - `taskStore`
-- Account readiness now depends only on `publicBaseUrl`.
-- Public docs and examples are rewritten around the reduced contract.
-- Plugin route registration no longer includes REST.
-- Agent cards no longer advertise REST interfaces.
-- Agent cards now advertise:
-  - `streaming = false`
-  - `pushNotifications = false`
-  - no `stateTransitionHistory`
-- Default modes are now:
-  - `["text/plain", "application/json"]` for input
-  - `["text/plain", "application/json"]` for output
-- The plugin no longer registers `/a2a/files`.
-- The plugin no longer registers `openclaw-a2a-inbound.describe`.
-- Outbound reply file parts are filtered instead of being rewritten to same-origin transport URLs.
-- Mixed outbound replies preserve any representable text after filtering.
-- File-only outbound replies now fail with A2A `-32005` instead of returning dead file links.
-- Production startup defaults to in-memory task storage because task-store config was removed from the public account contract.
-- The task runtime is now always created through a zero-argument in-memory factory.
-- The effective JSON-RPC surface only handles:
-  - `message/send`
-  - `tasks/get`
-  - `tasks/cancel`
-- Raw JSON-RPC calls for removed optional methods fail at the HTTP JSON-RPC boundary:
-  - `message/stream`
-  - `tasks/resubscribe`
-  - `tasks/pushNotificationConfig/set`
-  - `tasks/pushNotificationConfig/get`
-  - `tasks/pushNotificationConfig/list`
-  - `tasks/pushNotificationConfig/delete`
-- A2A tasks, events, messages, reply parts, and artifacts no longer emit `metadata.openclaw.*`.
-- Vendor reply metadata, vendor `data` parts, and the `reply-v1` schema marker are removed.
-- Vendor-only replies now fail with A2A `-32005`.
-- Inbound requests now accept only A2A `text` and `data` parts.
-- Any inbound A2A `file` part now fails at request preparation with A2A `invalidParams`.
-- Inbound requests no longer decode base64 file bytes, parse `file.uri`, fetch remote media, stage local media, or populate `MediaPath`/`MediaUrl`/`MediaType` fields in the OpenClaw inbound context.
-- `defaultInputModes` is schema- and parser-validated to `text/plain` and `application/json` only.
-
-### Phase 3 runtime note
-
-- Task state is intentionally non-durable.
-- Tasks and bindings now exist only for the lifetime of the current server process.
-- Each materialized task is held only as its latest snapshot plus the minimum live subscription state needed for correct cancellation and terminal-state observation.
-- Restarting the server drops prior task state and subsequent reads return `task not found`.
-
-### Practical consequence
-
-The package is now effectively at the intended minimal-core protocol surface:
-
-- the public config and public transport/output contract are minimal-core
-- the runtime is process-local and reduced to the currently supported method set
-- removed optional methods are rejected instead of being silently reachable through internal switches
-- serialized A2A payloads no longer carry OpenClaw-specific metadata or vendor reply payloads
-
-The minimal-core content contract is now fully enforced: inbound requests accept only text and structured data, and outbound responses surface only representable text/data.
-
-## Public Contract As Of Now
-
-### Transport
-
-Publicly documented and supported:
+Publicly exposed:
 
 - agent card endpoint
 - JSON-RPC endpoint
+- `message/send`
+- `message/stream`
+- `tasks/get`
+- `tasks/cancel`
+- `tasks/resubscribe`
 
-No longer part of the public contract:
+Still not part of the contract:
 
 - REST transport
-- REST config
-- auth config
-- task-store config
-- outbound file-delivery HTTP routes
+- `/a2a/files`
 - outbound file transport URLs
+- push notifications
 
-### Advertised capabilities
+The push-notification config methods remain rejected with JSON-RPC `methodNotFound`:
+
+- `tasks/pushNotificationConfig/set`
+- `tasks/pushNotificationConfig/get`
+- `tasks/pushNotificationConfig/list`
+- `tasks/pushNotificationConfig/delete`
+
+### Advertised agent-card capabilities
 
 The current agent card advertises:
 
-- `streaming = false`
+- `streaming = true`
 - `pushNotifications = false`
 
-The current agent card does not advertise:
+### Content contract
 
-- REST
-- `stateTransitionHistory`
+Defaults remain:
 
-### Documented supported methods
+- input: `["text/plain", "application/json"]`
+- output: `["text/plain", "application/json"]`
 
-The package documentation currently claims support for:
+Inbound requests accept only:
 
-- `message/send`
-- `tasks/get`
-- `tasks/cancel`
+- A2A `text`
+- A2A `data`
 
-That is the minimal-core method set and should remain the stable public contract.
+Inbound A2A `file` parts are rejected with `invalidParams`.
 
-Implementation note:
+Serialized A2A messages, tasks, and events do not emit:
 
-- removed optional methods are rejected at the JSON-RPC boundary instead of being routed internally
-- the remaining effective method surface is limited to `message/send`, `tasks/get`, and `tasks/cancel`
+- `metadata.openclaw.*`
+- vendor reply payload wrappers
+- synthetic outbound file links
 
-### Default content modes
+## Implemented Account Config
 
-Current defaults are:
+The public account contract now includes:
 
-- `text/plain`
-- `application/json`
-
-`application/octet-stream` is no longer advertised by default.
-
-Inbound content-policy note:
-
-- `defaultInputModes` only accepts `text/plain` and `application/json`
-- inbound A2A requests accept only `text` and `data` parts
-- any inbound `file` part is rejected with A2A `invalidParams`
-
-Important current implementation note:
-
-- clients may still negotiate `application/octet-stream` as an accepted output mode
-- the server will never emit a reachable outbound file URL or A2A `file` part
-- file-only, media-only, and vendor-only replies that leave nothing representable now fail with A2A `-32005`
-
-### Public config contract
-
-Current public config keeps:
-
-- `accounts`
 - `enabled`
 - `label`
 - `description`
@@ -208,125 +110,152 @@ Current public config keeps:
 - `maxBodyBytes`
 - `defaultInputModes`
 - `defaultOutputModes`
+- `taskStore`
 - `skills`
 
-Current public config rejects:
+The parser still rejects:
 
 - `restPath`
 - `capabilities`
 - `auth`
-- `taskStore`
 
-## Updated Phasing
+`taskStore` is restored and normalized as follows:
 
-### Phase 1: Freeze the external contract
+- missing `taskStore` becomes `{ kind: "memory" }`
+- `taskStore.kind = "memory"` uses process-local storage only
+- `taskStore.kind = "json-file"` requires a non-empty absolute `path`
 
-Status: Complete
+## Runtime Model
 
-Completed work:
+### Single committed path
 
-- reduced public account contract
-- removed legacy fields from schema and docs
-- added forbidden-key parser validation
-- narrowed default modes to text/JSON
-- simplified readiness checks to `publicBaseUrl`
-- removed REST from public exposure and agent-card advertising
+`A2AInboundRequestHandler` owns the task lifecycle for all task-bearing methods:
 
-### Phase 2: Remove remaining public/runtime mismatches
+- `sendMessage`
+- `sendMessageStream`
+- `getTask`
+- `cancelTask`
+- `resubscribe`
 
-Status: Complete
+`DefaultRequestHandler` is retained only as a thin delegate for:
 
-Completed work:
+- `getAgentCard`
+- `getAuthenticatedExtendedAgentCard`
 
-- removed REST route registration
-- removed plugin-host auth gating
-- removed `/a2a/files`
-- removed diagnostic gateway RPC registration
-- removed outbound file URL materialization and registration plumbing
-- changed outbound file-only replies to fail with A2A `-32005`
+### Shared execution bootstrap
 
-### Phase 3: Replace the task runtime
+`sendMessage` and `sendMessageStream` share one execution bootstrap that performs:
 
-Status: Complete
+- inbound message validation
+- accepted-output-mode normalization
+- request-mode registration
+- request-context creation
+- execution event bus creation
+- execution queue creation
+- executor dispatch with the existing fallback error publication behavior
 
-Completed work:
+### Response-mode behavior
 
-- replaced the durable-capable task store with a process-local in-memory runtime
-- removed `json-file` storage, lease heartbeats, orphan recovery, and startup sweep logic
-- removed the internal `taskStoreConfig` server hook
-- updated tests to assert process-lifetime task persistence for the reduced in-memory runtime
-- deleted durable-runtime coverage that only validated removed behavior
-- added restart-loss coverage so prior tasks now fail with `task not found` after server restart
+The request-mode enum is now:
 
-### Phase 4: Remove optional protocol methods and metadata
+- `blocking`
+- `non_blocking`
+- `streaming`
 
-Status: Complete
+Promotion rules are:
 
-Completed work:
+- `non_blocking` auto-promotes at startup
+- `blocking` and `streaming` may still return direct canonical `Message` results if promotion never becomes necessary
+- existing promotion triggers remain intact
 
-- removed the internal streaming-method test backdoor and all remaining streaming/replay paths
-- removed push notification config methods from the effective JSON-RPC surface
-- changed raw JSON-RPC calls for removed optional methods to fail at the protocol boundary
-- removed `metadata.openclaw.*` emission from tasks, events, messages, reply parts, and artifacts
-- removed vendor reply payload decoration and vendor-only reply success paths
+### Streaming behavior
 
-### Phase 5: Finalize content handling
+`message/stream` now streams committed output:
 
-Status: Complete
+- direct runs that never promote emit exactly one canonical final `Message`
+- promoted runs emit:
+  - the committed initial `Task` snapshot
+  - committed `status-update` events
+  - committed `artifact-update` events
+  - the committed final status update
 
-Completed work:
+No separate stream-only task representation exists.
 
-- removed outbound file transport
-- changed file-only outbound replies to fail instead of exposing dead links
-- locked the inbound contract to A2A `text` and `data` parts only
-- rejected inbound A2A `file` parts with A2A `invalidParams` before task creation or executor dispatch
-- removed inbound file normalization, remote fetch/staging, and media-context forwarding
-- restricted `defaultInputModes` to `text/plain` and `application/json` at schema and parser level
+### Follow-up behavior
 
-### Phase 6: Rewrite tests around the fully reduced runtime
+Follow-up requests keep the existing committed path:
 
-Status: Complete
+- load the committed task
+- validate `contextId` binding
+- require a stored binding
+- persist the incoming follow-up message before executor dispatch
 
-Completed work:
+## Storage Model
 
-- config normalization tests now enforce the reduced contract
-- schema tests now assert the removed fields are absent
-- route/plugin tests now reflect the two-route minimal surface with no describe RPC
-- default-mode tests now reflect text/JSON defaults
-- file-only and mixed-content regressions now assert no outbound `file` parts or generated `/files` URLs remain
-- durable-runtime tests were removed
-- lifecycle coverage is now split across task-store, request-handler, executor, and HTTP transport suites instead of one monolithic server test
-- the request-handler suite now owns direct vs promoted flows, latest-snapshot reads, follow-up validation, cancellation semantics, and metadata-free persisted payloads
-- the task-store suite now owns snapshot save/load/list behavior, binding flushes, history dedupe, committed live-tail subscriptions, and `close()` teardown
-- the HTTP suite now owns served agent-card assertions, JSON-RPC boundary behavior, removed-method rejection, inbound file rejection, outer `handle()` behavior, and restart-loss across server instances
-- shared test helpers and the runtime harness now match the reduced runtime seams instead of the removed file/media transport paths
+`A2ATaskRuntimeStore` remains the runtime wrapper responsible for:
+
+- per-task serialization queues
+- pending bindings
+- in-process live subscribers
+
+Durable storage is split behind two backends only:
+
+- memory backend
+- json-file backend
+
+Each task persists one phase 1 record containing:
+
+- the latest committed task snapshot
+- the stored binding
+
+The json-file backend uses:
+
+- `<root>/<encodeTaskStorageId(taskId)>.json` for each task record
+- `<root>/.writer.lock` for startup-time exclusive single-writer locking
+- same-directory temp-file-and-rename writes for every save
+
+## Live Tail, Resubscribe, And Cancel
+
+Snapshot loading and live-tail subscription are separate operations.
+
+`tasks/resubscribe` semantics:
+
+- load the latest committed task first
+- emit that snapshot immediately
+- attach a live tail only if:
+  - the task is still active
+  - `liveExecutions.has(taskId)` is true in the current process
+- terminal, quiescent, and restart-orphaned active tasks emit the snapshot and close
+- live tails stream only future committed `status-update` and `artifact-update` events
+
+`tasks/cancel` semantics:
+
+- terminal tasks pass through unchanged
+- quiescent tasks are canceled immediately through the committed runtime
+- active tasks only cancel live in-process executions
+- restart-orphaned active tasks return the existing unsupported-operation error instead of pretending a live tail exists
+
+## Deferred To Phase 2
+
+Phase 1 still does not implement:
+
+- durable committed-journal replay
+- backlog replay
+- lease heartbeats
+- orphan recovery
+- hidden replay toggles
+- a second stream-only task model
 
 ## Acceptance Criteria
 
-### Criteria already satisfied
+The current codebase satisfies the intended phase 1 criteria:
 
-- public config surface for REST/auth/task persistence is gone
-- removed config keys fail fast during parse
-- public docs describe the reduced contract
-- no REST route is registered
-- no file route
-- no plugin diagnostic RPC
-- agent cards advertise JSON-RPC only
-- agent cards advertise `streaming = false`
-- agent cards advertise `pushNotifications = false`
-- no durable task-store internals remain
-- task state is intentionally process-local and disappears on restart
-- default modes no longer include `application/octet-stream`
-- outbound file-only replies fail instead of exposing dead links
-- no outbound task, message, or artifact contains a generated `/files` URL or A2A `file` part
-- no streaming/replay method surface
-- no push notification config method surface
-- no OpenClaw metadata extensions in A2A responses
-- final inbound file-input policy is enforced
-- lifecycle coverage is re-layered across task-store, request-handler, executor, and HTTP transport suites
-
-## Follow-up Work
-
-The Phase 6 cleanup tracked by this RFC is complete.
-
-Future documentation cleanup is optional and can further condense this RFC into a shorter final-state design note without changing the implemented contract.
+- `message/stream` and `tasks/resubscribe` are restored through the SDK JSON-RPC/SSE transport
+- push notifications remain disabled and rejected
+- `taskStore` is restored as public config with memory/json-file backends
+- missing `taskStore` normalizes to memory
+- invalid `json-file.path` values fail during config parsing
+- the runtime keeps one committed task path
+- promoted streaming runs persist and stream committed state
+- direct streaming runs emit one canonical `Message` without materializing a task
+- restart-orphaned active tasks remain readable and snapshot-resubscribable but not durably live

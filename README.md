@@ -109,12 +109,13 @@ Use the package READMEs for full configuration details and examples:
 | Package | Status | Notes |
 | --- | --- | --- |
 | [`@aramisfa/openclaw-a2a-outbound`](./packages/openclaw-a2a-outbound) | Available now | Outbound OpenClaw plugin exposing one `remote_agent` tool for remote delegation and task follow-up. |
-| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Not published yet | Inbound OpenClaw channel plugin exposing an `a2a` agent-card plus JSON-RPC surface with the minimal-core `message/send`, `tasks/get`, and `tasks/cancel` contract. |
+| [`@aramisfa/openclaw-a2a-inbound`](./packages/openclaw-a2a-inbound) | Not published yet | Inbound OpenClaw channel plugin exposing an `a2a` agent-card plus JSON-RPC surface with the phase 1 committed-runtime `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and `tasks/resubscribe` contract. |
 
 ## Current Capabilities
 
 - `@aramisfa/openclaw-a2a-outbound` registers the `remote_agent` tool with `list_targets`, `send`, `watch`, `status`, and `cancel`.
 - `@aramisfa/openclaw-a2a-inbound` registers the `a2a` channel plus per-account agent-card and JSON-RPC routes.
+- `@aramisfa/openclaw-a2a-inbound` supports `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and `tasks/resubscribe` through one committed task runtime.
 - `@aramisfa/openclaw-a2a-inbound` accepts inbound A2A `text` and `data` parts only; inbound `file` parts are rejected with `invalidParams`.
 - The outbound package config lives under plugin id `openclaw-a2a-outbound`.
 - The inbound package config lives under `channels.a2a`, not `plugins.entries`.

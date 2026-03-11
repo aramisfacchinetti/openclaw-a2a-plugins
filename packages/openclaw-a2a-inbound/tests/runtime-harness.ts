@@ -277,6 +277,9 @@ export function createTestAccount(
       "text/plain",
       "application/json",
     ],
+    taskStore: {
+      kind: "memory",
+    },
     skills: [
       {
         id: "chat",
