@@ -115,6 +115,7 @@ Use the package READMEs for full configuration details and examples:
 
 - `@aramisfa/openclaw-a2a-outbound` registers the `remote_agent` tool with `list_targets`, `send`, `watch`, `status`, and `cancel`.
 - `@aramisfa/openclaw-a2a-inbound` registers the `a2a` channel plus per-account agent-card and JSON-RPC routes.
+- `@aramisfa/openclaw-a2a-inbound` accepts inbound A2A `text` and `data` parts only; inbound `file` parts are rejected with `invalidParams`.
 - The outbound package config lives under plugin id `openclaw-a2a-outbound`.
 - The inbound package config lives under `channels.a2a`, not `plugins.entries`.
 

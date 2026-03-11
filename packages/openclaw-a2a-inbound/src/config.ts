@@ -16,6 +16,7 @@ export const DEFAULT_INPUT_MODES = [
   "text/plain",
   "application/json",
 ] as const;
+export type A2AInboundInputMode = (typeof DEFAULT_INPUT_MODES)[number];
 
 export const DEFAULT_OUTPUT_MODES = [
   "text/plain",
@@ -42,7 +43,7 @@ export interface A2AInboundAccountConfig {
   agentCardPath: string;
   jsonRpcPath: string;
   maxBodyBytes: number;
-  defaultInputModes: string[];
+  defaultInputModes: A2AInboundInputMode[];
   defaultOutputModes: string[];
   skills: A2AInboundSkillConfig[];
 }
@@ -56,7 +57,7 @@ const DEFAULT_SKILLS: readonly A2AInboundSkillConfig[] = [
     id: "chat",
     name: "Chat",
     description:
-      "Routes inbound A2A requests with text, structured data, and files into the configured OpenClaw agent.",
+      "Routes inbound A2A requests with text and structured data into the configured OpenClaw agent. Inbound file parts are unsupported.",
     tags: ["chat", "openclaw"],
     examples: [
       "Summarize the latest incident and propose the next two steps.",
@@ -116,7 +117,10 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
           },
           defaultInputModes: {
             type: "array",
-            items: { type: "string" },
+            items: {
+              type: "string",
+              enum: [...DEFAULT_INPUT_MODES],
+            },
             default: [...DEFAULT_INPUT_MODES],
           },
           defaultOutputModes: {
@@ -262,6 +266,44 @@ function readStringArray(
   return deduped.size > 0 ? [...deduped] : [...fallback];
 }
 
+function parseDefaultInputModes(
+  accountId: string,
+  value: unknown,
+): A2AInboundInputMode[] {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_INPUT_MODES];
+  }
+
+  const supportedModes = new Set<A2AInboundInputMode>(DEFAULT_INPUT_MODES);
+  const modes: A2AInboundInputMode[] = [];
+  const seen = new Set<A2AInboundInputMode>();
+
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${accountId}.defaultInputModes must contain only supported string values: ${DEFAULT_INPUT_MODES.join(", ")}.`,
+      );
+    }
+
+    const trimmed = entry.trim();
+
+    if (!supportedModes.has(trimmed as A2AInboundInputMode)) {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${accountId}.defaultInputModes only supports ${DEFAULT_INPUT_MODES.join(", ")}; received "${trimmed}".`,
+      );
+    }
+
+    const mode = trimmed as A2AInboundInputMode;
+
+    if (!seen.has(mode)) {
+      seen.add(mode);
+      modes.push(mode);
+    }
+  }
+
+  return modes.length > 0 ? modes : [...DEFAULT_INPUT_MODES];
+}
+
 function parseSkills(value: unknown): A2AInboundSkillConfig[] {
   if (!Array.isArray(value)) {
     return DEFAULT_SKILLS.map((skill) => ({
@@ -352,7 +394,7 @@ function parseAccount(
     agentCardPath: normalizePath(record.agentCardPath, DEFAULT_AGENT_CARD_PATH),
     jsonRpcPath: normalizePath(record.jsonRpcPath, DEFAULT_JSON_RPC_PATH),
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
-    defaultInputModes: readStringArray(record.defaultInputModes, DEFAULT_INPUT_MODES),
+    defaultInputModes: parseDefaultInputModes(accountId, record.defaultInputModes),
     defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
     skills: parseSkills(record.skills),
   };

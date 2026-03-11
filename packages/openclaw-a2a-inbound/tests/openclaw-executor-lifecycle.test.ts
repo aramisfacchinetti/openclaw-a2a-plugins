@@ -255,7 +255,7 @@ test("data-only requests dispatch with a synthetic agent body and empty command 
   ]);
 });
 
-test("requests with no usable text, data, or file parts return the supported-parts failure", async () => {
+test("requests with no usable text or data parts return the supported-parts failure", async () => {
   let dispatcherInvoked = false;
 
   const { executor } = createExecutorHarness(async () => {
@@ -280,7 +280,7 @@ test("requests with no usable text, data, or file parts return the supported-par
   assert.equal(failurePart?.kind, "text");
   assert.equal(
     failurePart && "text" in failurePart ? failurePart.text : undefined,
-    "The inbound A2A request did not contain any supported text, data, or file parts.",
+    "The inbound A2A request did not contain any supported text or data parts.",
   );
 });
 

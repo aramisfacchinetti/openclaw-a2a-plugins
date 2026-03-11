@@ -18,6 +18,7 @@ import { createAgentTextMessage } from "./response-mapping.js";
 import {
   buildInboundRouteContext,
   resolveInboundPeerIdentity,
+  validateInboundMessageParts,
 } from "./session-routing.js";
 import type { A2ATaskRuntimeStore, StoredTaskBinding } from "./task-store.js";
 import {
@@ -69,6 +70,8 @@ export class OpenClawA2AExecutor implements AgentExecutor {
     requestContext: RequestContext,
     eventBus: ExecutionEventBus,
   ): Promise<void> {
+    validateInboundMessageParts(requestContext.userMessage);
+
     const boundPeer = requestContext.task
       ? undefined
       : resolveInboundPeerIdentity(requestContext);
@@ -127,16 +130,13 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         requestContext,
         accountId: this.options.accountId,
         peerId: binding.peer.id,
-        loadWebMedia: this.options.pluginRuntime.media.loadWebMedia,
-        saveMediaBuffer: this.options.channelRuntime.media.saveMediaBuffer,
-        maxMediaBytes: this.options.account.maxBodyBytes,
       });
 
       if (!inbound.hasUsableParts) {
         eventBus.publish(
           createAgentTextMessage({
             contextId: requestContext.contextId,
-            text: "The inbound A2A request did not contain any supported text, data, or file parts.",
+            text: "The inbound A2A request did not contain any supported text or data parts.",
           }),
         );
         eventBus.finished();
@@ -165,12 +165,6 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         CommandBody: inbound.commandBody,
         BodyForCommands: inbound.bodyForCommands,
         UntrustedContext: inbound.untrustedContext,
-        MediaPath: inbound.mediaPath,
-        MediaPaths: inbound.mediaPaths,
-        MediaUrl: inbound.mediaUrl,
-        MediaUrls: inbound.mediaUrls,
-        MediaType: inbound.mediaType,
-        MediaTypes: inbound.mediaTypes,
         From: inbound.from,
         To: inbound.to,
         SessionKey: binding.sessionKey,
