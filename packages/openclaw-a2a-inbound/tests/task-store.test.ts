@@ -1,20 +1,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TaskState } from "@a2a-js/sdk";
+import type {
+  Task,
+  TaskArtifactUpdateEvent,
+  TaskState,
+  TaskStatusUpdateEvent,
+} from "@a2a-js/sdk";
 import {
   createArtifactUpdate,
   createTaskSnapshot,
   createTaskStatusUpdate,
 } from "../dist/response-mapping.js";
+import { encodeTaskStorageId } from "../dist/storage-id.js";
 import {
   createTaskStore,
   type StoredTaskBinding,
 } from "../dist/task-store.js";
 import { createUserMessage } from "./runtime-harness.js";
-import { getPersistedArtifactText } from "./test-helpers.js";
+import {
+  assertNoOpenClawMetadata,
+  getPersistedArtifactText,
+} from "./test-helpers.js";
+
+interface PersistedTaskRecordData {
+  schemaVersion: number;
+  task: Task;
+  binding?: StoredTaskBinding;
+  currentSequence?: number;
+  journal?: Array<{
+    sequence: number;
+    event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
+  }>;
+}
 
 function createBinding(taskId: string): StoredTaskBinding {
   return {
@@ -54,6 +74,29 @@ function createSnapshot(params: {
       }),
     ],
   });
+}
+
+function readMemoryStoredRecord(
+  store: ReturnType<typeof createTaskStore>,
+  taskId: string,
+): PersistedTaskRecordData | undefined {
+  const backend = (
+    store as unknown as {
+      backend?: {
+        records?: Map<string, PersistedTaskRecordData>;
+      };
+    }
+  ).backend;
+  const record = backend?.records?.get(taskId);
+  return record ? structuredClone(record) : undefined;
+}
+
+async function readJsonStoredRecord(
+  root: string,
+  taskId: string,
+): Promise<PersistedTaskRecordData> {
+  const path = join(root, `${encodeTaskStorageId(taskId)}.json`);
+  return JSON.parse(await readFile(path, "utf8")) as PersistedTaskRecordData;
 }
 
 test("save, load, and listTaskIds expose the latest stored snapshots", async () => {
@@ -152,7 +195,7 @@ test("persistIncomingMessage appends new history entries without duplicating mes
   );
 });
 
-test("status and artifact journal commits mutate the stored task snapshot", async () => {
+test("committed journal events advance currentSequence, update the snapshot, and persist journal entries in order", async () => {
   const store = createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-1", state: "submitted" }));
@@ -184,10 +227,97 @@ test("status and artifact journal commits mutate the stored task snapshot", asyn
   );
 
   const persisted = await store.load("task-1");
+  const record = readMemoryStoredRecord(store, "task-1");
 
   assert.equal(persisted?.status.state, "working");
   assert.equal(persisted?.history?.at(-1)?.role, "agent");
   assert.equal(getPersistedArtifactText(persisted!, "assistant-output"), "Alpha Beta");
+  assert.equal(record?.schemaVersion, 2);
+  assert.equal(record?.currentSequence, 3);
+  assert.deepEqual(
+    record?.journal?.map((entry) => [entry.sequence, entry.event.kind]),
+    [
+      [1, "status-update"],
+      [2, "artifact-update"],
+      [3, "artifact-update"],
+    ],
+  );
+});
+
+test("save, writeBinding, and persistIncomingMessage preserve the existing journal and currentSequence", async () => {
+  const store = createTaskStore();
+  const binding = createBinding("task-1");
+  const followUp = createUserMessage({
+    messageId: "message:task-1:2",
+    contextId: "context:task-1",
+    taskId: "task-1",
+    parts: [{ kind: "text", text: "Second request" }],
+  });
+
+  await store.save(createSnapshot({ taskId: "task-1", state: "submitted" }));
+  await store.commitEvent(
+    createTaskStatusUpdate({
+      taskId: "task-1",
+      contextId: "context:task-1",
+      state: "working",
+      messageText: "Working",
+    }),
+  );
+  await store.writeBinding("task-1", binding);
+  await store.persistIncomingMessage("task-1", followUp);
+
+  const currentTask = await store.load("task-1");
+  assert.ok(currentTask);
+  await store.save(currentTask!);
+
+  const record = readMemoryStoredRecord(store, "task-1");
+
+  assert.equal(record?.currentSequence, 1);
+  assert.deepEqual(record?.journal?.map((entry) => entry.sequence), [1]);
+  assert.deepEqual(record?.binding, binding);
+  assert.equal(
+    currentTask?.history?.some((message) => message.messageId === followUp.messageId),
+    true,
+  );
+});
+
+test("prepareResubscribe returns the latest snapshot and only future tail events for active tasks", async () => {
+  const store = createTaskStore();
+
+  await store.save(createSnapshot({ taskId: "task-active", state: "submitted" }));
+  await store.commitEvent(
+    createTaskStatusUpdate({
+      taskId: "task-active",
+      contextId: "context:task-active",
+      state: "working",
+      messageText: "Already committed",
+    }),
+  );
+
+  const prepared = await store.prepareResubscribe("task-active");
+
+  assert.equal(prepared?.snapshot.status.state, "working");
+  assert.ok(prepared?.subscription);
+
+  const nextEventPromise = prepared!.subscription!.next();
+  const beforeCommit = await Promise.race([
+    nextEventPromise.then(() => "event"),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 25)),
+  ]);
+
+  assert.equal(beforeCommit, "timeout");
+
+  const committed = await store.commitEvent(
+    createArtifactUpdate({
+      taskId: "task-active",
+      contextId: "context:task-active",
+      artifactId: "assistant-output-0001",
+      text: "Tail event",
+    }),
+  );
+
+  assert.deepEqual(await nextEventPromise, committed);
+  prepared!.subscription!.close();
 });
 
 test("subscribeToCommittedTail subscribes only for active tasks and only yields committed tail events", async () => {
@@ -238,6 +368,19 @@ test("memory backend loses state across new runtime instances", async () => {
   const initial = createTaskStore({ kind: "memory" });
 
   await initial.save(createSnapshot({ taskId: "task-memory", state: "working" }));
+  await initial.commitEvent(
+    createArtifactUpdate({
+      taskId: "task-memory",
+      contextId: "context:task-memory",
+      artifactId: "assistant-output-0001",
+      text: "Persisted in memory",
+    }),
+  );
+
+  const record = readMemoryStoredRecord(initial, "task-memory");
+
+  assert.equal(record?.currentSequence, 1);
+  assert.equal(record?.journal?.length, 1);
   initial.close();
 
   const restarted = createTaskStore({ kind: "memory" });
@@ -250,7 +393,7 @@ test("memory backend loses state across new runtime instances", async () => {
   }
 });
 
-test("json-file backend preserves task snapshot, binding, history, and artifacts across runtime instances", async () => {
+test("json-file backend preserves snapshot, binding, journal, history, artifacts, and final state across runtime instances", async () => {
   const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-"));
   const original = createTaskStore({
     kind: "json-file",
@@ -297,9 +440,20 @@ test("json-file backend preserves task snapshot, binding, history, and artifacts
         text: "Alpha",
       }),
     );
+    await original.commitEvent(
+      createTaskStatusUpdate({
+        taskId: "task-json",
+        contextId: "context:task-json",
+        state: "completed",
+        final: true,
+        messageText: "Done",
+      }),
+    );
   } finally {
     original.close();
   }
+
+  const rawRecord = await readJsonStoredRecord(root, "task-json");
 
   const restarted = createTaskStore({
     kind: "json-file",
@@ -311,7 +465,19 @@ test("json-file backend preserves task snapshot, binding, history, and artifacts
     const binding = await restarted.loadBinding("task-json");
 
     assert.deepEqual(await restarted.listTaskIds(), ["task-json"]);
-    assert.equal(persisted?.status.state, "working");
+    assert.equal(rawRecord.schemaVersion, 2);
+    assert.equal(rawRecord.currentSequence, 3);
+    assert.deepEqual(
+      rawRecord.journal?.map((entry) => [entry.sequence, entry.event.kind]),
+      [
+        [1, "status-update"],
+        [2, "artifact-update"],
+        [3, "status-update"],
+      ],
+    );
+    assertNoOpenClawMetadata(rawRecord);
+    assert.deepEqual(persisted, rawRecord.task);
+    assert.equal(persisted?.status.state, "completed");
     assert.deepEqual(
       persisted?.history?.slice(0, 2).map((message) => message.messageId),
       ["message:task-json:1", "message:task-json:2"],
@@ -321,6 +487,65 @@ test("json-file backend preserves task snapshot, binding, history, and artifacts
     assert.deepEqual(binding, createBinding("task-json"));
   } finally {
     restarted.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("json-file backend lazily upgrades schema v1 records to schema v2 on the next write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-v1-"));
+  const taskId = "task-v1";
+  const filePath = join(root, `${encodeTaskStorageId(taskId)}.json`);
+  const followUp = createUserMessage({
+    messageId: "message:task-v1:2",
+    contextId: "context:task-v1",
+    taskId,
+    parts: [{ kind: "text", text: "Follow-up" }],
+  });
+
+  await writeFile(
+    filePath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        task: createSnapshot({ taskId, state: "working" }),
+        binding: createBinding(taskId),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const store = createTaskStore({
+    kind: "json-file",
+    path: root,
+  });
+
+  try {
+    const loaded = await store.load(taskId);
+    const binding = await store.loadBinding(taskId);
+    const beforeWrite = await readJsonStoredRecord(root, taskId);
+
+    assert.equal(loaded?.status.state, "working");
+    assert.deepEqual(binding, createBinding(taskId));
+    assert.equal(beforeWrite.schemaVersion, 1);
+    assert.equal("currentSequence" in beforeWrite, false);
+    assert.equal("journal" in beforeWrite, false);
+
+    await store.persistIncomingMessage(taskId, followUp);
+
+    const afterWrite = await readJsonStoredRecord(root, taskId);
+
+    assert.equal(afterWrite.schemaVersion, 2);
+    assert.equal(afterWrite.currentSequence, 0);
+    assert.deepEqual(afterWrite.journal, []);
+    assert.deepEqual(afterWrite.binding, createBinding(taskId));
+    assert.deepEqual(
+      afterWrite.task.history?.map((message) => message.messageId),
+      ["message:task-v1:1", "message:task-v1:2"],
+    );
+  } finally {
+    store.close();
     await rm(root, { recursive: true, force: true });
   }
 });
