@@ -28,11 +28,8 @@ type RuntimeScript = (ctx: {
 }) => Promise<void>;
 
 type RuntimeHarnessOptions = {
-  defaultEventSessionKey?: string;
   resolveAgentRoute?: () => ResolvedAgentRoute;
   resolveStorePath?: () => string;
-  loadWebMedia?: PluginRuntime["media"]["loadWebMedia"];
-  saveMediaBuffer?: PluginRuntime["channel"]["media"]["saveMediaBuffer"];
   recordInboundSession?: (
     params: Parameters<PluginRuntime["channel"]["session"]["recordInboundSession"]>[0],
   ) => Promise<void>;
@@ -83,10 +80,7 @@ export function createPluginRuntimeHarness(
       ...event,
       seq: ++seq,
       ts: Date.now(),
-      sessionKey:
-        event.sessionKey ??
-        options.defaultEventSessionKey ??
-        defaultRoute.sessionKey,
+      sessionKey: event.sessionKey ?? defaultRoute.sessionKey,
     };
 
     for (const listener of listeners) {
@@ -111,11 +105,9 @@ export function createPluginRuntimeHarness(
       formatNativeDependencyHint: () => "",
     },
     media: {
-      loadWebMedia:
-        options.loadWebMedia ??
-        (async () => {
-          throw new Error("unused");
-        }),
+      loadWebMedia: async () => {
+        throw new Error("unused");
+      },
       detectMime: () => undefined,
       mediaKindFromMime: () => undefined,
       isVoiceCompatibleAudio: () => false,
@@ -186,14 +178,20 @@ export function createPluginRuntimeHarness(
         fetchRemoteMedia: async () => {
           throw new Error("unused");
         },
-        saveMediaBuffer:
-          options.saveMediaBuffer ??
-          (async (buffer, contentType, _subdir, _maxBytes, originalFilename) => ({
-            id: `saved-${++savedMediaSeq}`,
-            path: `/tmp/${originalFilename ?? `media-${savedMediaSeq}.bin`}`,
-            size: buffer.byteLength,
-            contentType,
-          })),
+        saveMediaBuffer: async (
+          buffer: Parameters<PluginRuntime["channel"]["media"]["saveMediaBuffer"]>[0],
+          contentType: Parameters<PluginRuntime["channel"]["media"]["saveMediaBuffer"]>[1],
+          _subdir: Parameters<PluginRuntime["channel"]["media"]["saveMediaBuffer"]>[2],
+          _maxBytes: Parameters<PluginRuntime["channel"]["media"]["saveMediaBuffer"]>[3],
+          originalFilename: Parameters<
+            PluginRuntime["channel"]["media"]["saveMediaBuffer"]
+          >[4],
+        ) => ({
+          id: `saved-${++savedMediaSeq}`,
+          path: `/tmp/${originalFilename ?? `media-${savedMediaSeq}.bin`}`,
+          size: buffer.byteLength,
+          contentType,
+        }),
       },
       activity: {} as PluginRuntime["channel"]["activity"],
       session: {

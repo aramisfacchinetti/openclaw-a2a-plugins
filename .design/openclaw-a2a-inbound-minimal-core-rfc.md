@@ -1,6 +1,6 @@
 # RFC: Reduce `openclaw-a2a-inbound` To A Minimal Core A2A Surface
 
-Status: In Progress (Phases 1-5 complete; Phase 6 partial)
+Status: Complete
 
 Date: 2026-03-09
 
@@ -8,7 +8,7 @@ Last Updated: 2026-03-11
 
 ## Summary
 
-This RFC now reflects the repository after the Phase 5 content-handling cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, and serialized A2A payloads are aligned with the intended minimal-core contract. The remaining work is Phase 6 cleanup around the final reduced runtime and test/document shape.
+This RFC now reflects the repository after the reduced-runtime cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, serialized A2A payloads, and test layering are aligned with the implemented minimal-core contract.
 
 The current codebase has completed the public contract and transport cleanup:
 
@@ -33,7 +33,7 @@ The current codebase has completed the runtime and protocol cleanup:
 - vendor reply payload decoration is removed
 - push notification config methods are no longer part of the effective handler surface
 
-This document now records the minimal-core contract that is implemented in the current codebase.
+This document records the implemented minimal-core contract in the current codebase.
 
 ## Decision
 
@@ -285,7 +285,7 @@ Completed work:
 
 ### Phase 6: Rewrite tests around the fully reduced runtime
 
-Status: Partial
+Status: Complete
 
 Completed work:
 
@@ -295,7 +295,11 @@ Completed work:
 - default-mode tests now reflect text/JSON defaults
 - file-only and mixed-content regressions now assert no outbound `file` parts or generated `/files` URLs remain
 - durable-runtime tests were removed
-- lifecycle tests now cover metadata-free blocking/non-blocking flows, raw JSON-RPC rejection for removed optional methods, quiescent/live cancellation, and restart-loss for the in-memory runtime
+- lifecycle coverage is now split across task-store, request-handler, executor, and HTTP transport suites instead of one monolithic server test
+- the request-handler suite now owns direct vs promoted flows, latest-snapshot reads, follow-up validation, cancellation semantics, and metadata-free persisted payloads
+- the task-store suite now owns snapshot save/load/list behavior, binding flushes, history dedupe, committed live-tail subscriptions, and `close()` teardown
+- the HTTP suite now owns served agent-card assertions, JSON-RPC boundary behavior, removed-method rejection, inbound file rejection, outer `handle()` behavior, and restart-loss across server instances
+- shared test helpers and the runtime harness now match the reduced runtime seams instead of the removed file/media transport paths
 
 ## Acceptance Criteria
 
@@ -319,11 +323,10 @@ Completed work:
 - no push notification config method surface
 - no OpenClaw metadata extensions in A2A responses
 - final inbound file-input policy is enforced
+- lifecycle coverage is re-layered across task-store, request-handler, executor, and HTTP transport suites
 
 ## Follow-up Work
 
-The next updates to this RFC should happen when one of the following lands:
+The Phase 6 cleanup tracked by this RFC is complete.
 
-- the remaining Phase 6 test/document cleanup is finished
-
-At that point this document can move from an in-progress RFC to a cleaner final-state RFC or an implementation-complete design note.
+Future documentation cleanup is optional and can further condense this RFC into a shorter final-state design note without changing the implemented contract.
