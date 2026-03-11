@@ -22,6 +22,7 @@ import {
 import {
   createTaskSnapshot,
   createTaskStatusUpdate,
+  isActiveExecutionTaskState,
   isQuiescentTaskState,
   isTerminalTaskState,
   normalizeOutputModes,
@@ -32,13 +33,25 @@ import {
   readOriginalUserMessage,
 } from "./request-context.js";
 import { validateInboundMessageParts } from "./session-routing.js";
-import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
+import type {
+  A2AInitialResponseMode,
+  A2ALiveExecutionRegistry,
+} from "./live-execution-registry.js";
 import {
   A2ATaskRuntimeStore,
   type TaskJournalSubscriptionHandle,
 } from "./task-store.js";
 
 type StreamEvent = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message;
+
+type PreparedExecution = {
+  latestUserMessage: Message;
+  taskId: string;
+  eventQueue: ExecutionEventQueue;
+  executionPromise: Promise<void>;
+  context?: ServerCallContext;
+  cleanup: () => void;
+};
 
 function trimTaskHistory(task: Task, historyLength: number | undefined): Task {
   const nextTask = structuredClone(task) as Task;
@@ -83,49 +96,52 @@ export class A2AInboundRequestHandler {
     params: MessageSendParams,
     context?: ServerCallContext,
   ): Promise<Message | Task> {
-    const prepared = this.prepareParams(params);
-    const resolvedOutputModes = this.resolveAcceptedOutputModes(prepared);
-    const requestId = prepared.message.messageId;
-
-    if (!requestId) {
-      throw A2AError.invalidParams("message.messageId is required.");
-    }
-
-    const blocking = prepared.configuration?.blocking !== false;
-    this.liveExecutions.setRequestMode(
-      requestId,
+    const blocking = params.configuration?.blocking !== false;
+    const execution = await this.bootstrapExecution(
+      params,
       blocking ? "blocking" : "non_blocking",
+      context,
     );
 
     try {
-      const requestContext = await this.createRequestContext(
-        prepared.message,
-        context,
-        resolvedOutputModes,
-      );
-      const eventBus = new DefaultExecutionEventBus();
-      const eventQueue = new ExecutionEventQueue(eventBus);
-      const executionPromise = this.executeWithFallback(requestContext, eventBus);
-
       if (blocking) {
-        return await this.processBlockingExecution({
-          eventQueue,
-          latestUserMessage: prepared.message,
-          taskId: requestContext.taskId,
-          executionPromise,
-          context,
-        });
+        return await this.processBlockingExecution(execution);
       }
 
-      return await this.processNonBlockingExecution({
-        eventQueue,
-        latestUserMessage: prepared.message,
-        taskId: requestContext.taskId,
-        executionPromise,
-        context,
-      });
+      return await this.processNonBlockingExecution(execution);
     } finally {
-      this.liveExecutions.clearRequestMode(requestId);
+      execution.cleanup();
+    }
+  }
+
+  async *sendMessageStream(
+    params: MessageSendParams,
+    context?: ServerCallContext,
+  ): AsyncGenerator<StreamEvent, void, undefined> {
+    const execution = await this.bootstrapExecution(params, "streaming", context);
+    let sawDurableEvent = false;
+
+    try {
+      for await (const event of execution.eventQueue.events()) {
+        const committed = await this.commitExecutionEvent(
+          event,
+          execution.latestUserMessage,
+        );
+
+        if (committed.kind !== "message") {
+          sawDurableEvent = true;
+        }
+
+        yield committed;
+      }
+
+      await execution.executionPromise;
+    } finally {
+      if (!sawDurableEvent) {
+        this.taskRuntime.discardPending(execution.taskId);
+      }
+
+      execution.cleanup();
     }
   }
 
@@ -180,21 +196,23 @@ export class A2AInboundRequestHandler {
       );
     }
 
-    const prepared = await this.taskRuntime.prepareLiveTail(params.id);
+    const subscription = await this.taskRuntime.subscribeToCommittedTail(params.id);
 
-    if (!prepared) {
-      throw A2AError.taskNotFound(params.id);
-    }
+    if (!subscription) {
+      const latestTask = await this.loadTaskForRead(params.id, context);
 
-    if (isTerminalTaskState(prepared.task.status.state)) {
-      return prepared.task;
-    }
+      if (!latestTask) {
+        throw A2AError.taskNotFound(params.id);
+      }
 
-    if (isQuiescentTaskState(prepared.task.status.state)) {
-      return this.cancelQuiescentTask(prepared.task, context);
-    }
+      if (isTerminalTaskState(latestTask.status.state)) {
+        return latestTask;
+      }
 
-    if (!prepared.subscription) {
+      if (isQuiescentTaskState(latestTask.status.state)) {
+        return this.cancelQuiescentTask(latestTask, context);
+      }
+
       throw A2AError.taskNotCancelable(params.id);
     }
 
@@ -202,9 +220,37 @@ export class A2AInboundRequestHandler {
 
     return this.waitForCommittedTerminalTask(
       params.id,
-      prepared.subscription,
+      subscription,
       context,
     );
+  }
+
+  async *resubscribe(
+    params: TaskIdParams,
+    context?: ServerCallContext,
+  ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
+    const task = await this.loadTaskForRead(params.id, context);
+
+    if (!task) {
+      throw A2AError.taskNotFound(params.id);
+    }
+
+    yield task;
+
+    if (
+      !isActiveExecutionTaskState(task.status.state) ||
+      !this.liveExecutions.has(params.id)
+    ) {
+      return;
+    }
+
+    const subscription = await this.taskRuntime.subscribeToCommittedTail(params.id);
+
+    if (!subscription) {
+      return;
+    }
+
+    yield* this.consumeCommittedTail(subscription);
   }
 
   private prepareParams(params: MessageSendParams): MessageSendParams {
@@ -223,13 +269,47 @@ export class A2AInboundRequestHandler {
     return [...this.defaultOutputModes];
   }
 
-  private async processBlockingExecution(params: {
-    eventQueue: ExecutionEventQueue;
-    latestUserMessage: Message;
-    taskId: string;
-    executionPromise: Promise<void>;
-    context?: ServerCallContext;
-  }): Promise<Message | Task> {
+  private async bootstrapExecution(
+    params: MessageSendParams,
+    mode: A2AInitialResponseMode,
+    context?: ServerCallContext,
+  ): Promise<PreparedExecution> {
+    const prepared = this.prepareParams(params);
+    const requestId = prepared.message.messageId;
+
+    if (!requestId) {
+      throw A2AError.invalidParams("message.messageId is required.");
+    }
+
+    this.liveExecutions.setRequestMode(requestId, mode);
+
+    try {
+      const requestContext = await this.createRequestContext(
+        prepared.message,
+        context,
+        this.resolveAcceptedOutputModes(prepared),
+      );
+      const eventBus = new DefaultExecutionEventBus();
+
+      return {
+        latestUserMessage: prepared.message,
+        taskId: requestContext.taskId,
+        eventQueue: new ExecutionEventQueue(eventBus),
+        executionPromise: this.executeWithFallback(requestContext, eventBus),
+        context,
+        cleanup: () => {
+          this.liveExecutions.clearRequestMode(requestId);
+        },
+      };
+    } catch (error) {
+      this.liveExecutions.clearRequestMode(requestId);
+      throw error;
+    }
+  }
+
+  private async processBlockingExecution(
+    params: PreparedExecution,
+  ): Promise<Message | Task> {
     let finalMessage: Message | undefined;
     let sawDurableEvent = false;
 
@@ -269,13 +349,9 @@ export class A2AInboundRequestHandler {
     }
   }
 
-  private async processNonBlockingExecution(params: {
-    eventQueue: ExecutionEventQueue;
-    latestUserMessage: Message;
-    taskId: string;
-    executionPromise: Promise<void>;
-    context?: ServerCallContext;
-  }): Promise<Message | Task> {
+  private async processNonBlockingExecution(
+    params: PreparedExecution,
+  ): Promise<Message | Task> {
     return new Promise<Message | Task>((resolve, reject) => {
       let settled = false;
       let sawDurableEvent = false;

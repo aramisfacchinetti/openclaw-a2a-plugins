@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentCard, Message, Task } from "@a2a-js/sdk";
 import { A2AError } from "@a2a-js/sdk/server";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
@@ -10,13 +13,19 @@ import {
   createUserMessage,
   waitFor,
 } from "./runtime-harness.js";
-import { isTask } from "./test-helpers.js";
+import { isMessage, isTask } from "./test-helpers.js";
 
 function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
+  options: {
+    account?: Parameters<typeof createTestAccount>[0];
+    runtime?: Parameters<typeof createPluginRuntimeHarness>[1];
+  } = {},
 ) {
-  const account = createTestAccount();
-  const { pluginRuntime } = createPluginRuntimeHarness(script);
+  const account = createTestAccount(options.account);
+  const { pluginRuntime } = options.runtime
+    ? createPluginRuntimeHarness(script, options.runtime)
+    : createPluginRuntimeHarness(script);
   const server = createA2AInboundServer({
     accountId: "default",
     account,
@@ -77,6 +86,32 @@ async function postJsonRpc(
   });
 }
 
+function parseSseJsonRpcEvents(body: string): Array<{
+  jsonrpc: string;
+  id: number | string | null;
+  result?: unknown;
+  error?: unknown;
+}> {
+  return body
+    .trim()
+    .split("\n\n")
+    .filter((chunk) => chunk.trim().length > 0)
+    .map((chunk) => {
+      const data = chunk
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+
+      return JSON.parse(data) as {
+        jsonrpc: string;
+        id: number | string | null;
+        result?: unknown;
+        error?: unknown;
+      };
+    });
+}
+
 test("served agent card exposes the minimal JSON-RPC transport and capabilities", async () => {
   const harness = createServerHarness(async () => {});
   const routeServer = createServer((req, res) => {
@@ -96,7 +131,7 @@ test("served agent card exposes the minimal JSON-RPC transport and capabilities"
     assert.equal(agentCard.preferredTransport, "JSONRPC");
     assert.deepEqual(agentCard.capabilities, {
       pushNotifications: false,
-      streaming: false,
+      streaming: true,
     });
     assert.deepEqual(agentCard.defaultInputModes, [
       "text/plain",
@@ -166,7 +201,158 @@ test("HTTP JSON-RPC message/send returns a direct Message for terminal replies",
   }
 });
 
-test("raw JSON-RPC rejects removed optional methods at the boundary", async () => {
+test("raw JSON-RPC message/stream returns an SDK SSE stream instead of methodNotFound", async () => {
+  const harness = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-http-stream");
+    emit({
+      runId: "run-http-stream",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "HTTP streamed reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-http-stream",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const response = await postJsonRpc(baseUrl, "message/stream", {
+      message: createUserMessage({
+        messageId: "message:http-stream",
+      }),
+    });
+    const events = parseSseJsonRpcEvents(await response.text());
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/i);
+    assert.equal(events.length, 1);
+    assert.equal(isMessage(events[0]?.result), true);
+    if (!isMessage(events[0]?.result)) {
+      assert.fail("expected streamed message result");
+    }
+
+    assert.equal(
+      events[0].result.parts[0] && "text" in events[0].result.parts[0]
+        ? events[0].result.parts[0].text
+        : undefined,
+      "HTTP streamed reply",
+    );
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+  }
+});
+
+test("raw JSON-RPC tasks/resubscribe returns an SDK SSE stream instead of methodNotFound", async () => {
+  let releaseRun: (() => void) | undefined;
+  const harness = createServerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-http-resubscribe");
+    emit({
+      runId: "run-http-resubscribe",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Tool summary" },
+      { kind: "tool" },
+    );
+    await new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "HTTP resubscribe final" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-http-resubscribe",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const sendResponse = await postJsonRpc(baseUrl, "message/send", {
+      message: createUserMessage({
+        messageId: "message:http-resubscribe",
+      }),
+      configuration: {
+        blocking: false,
+      },
+    });
+    const sendPayload = (await sendResponse.json()) as {
+      result: Task;
+    };
+
+    assert.equal(isTask(sendPayload.result), true);
+    if (!isTask(sendPayload.result)) {
+      assert.fail("expected promoted task");
+    }
+
+    await waitFor(async () => {
+      const response = await postJsonRpc(baseUrl, "tasks/get", {
+        id: sendPayload.result.id,
+        historyLength: 10,
+      });
+      const payload = (await response.json()) as {
+        result: Task;
+      };
+
+      return (
+        payload.result.status.state === "working" &&
+        Boolean(
+          payload.result.artifacts?.some((artifact) =>
+            artifact.artifactId.startsWith("tool-result-"),
+          ),
+        )
+      );
+    });
+
+    const response = await postJsonRpc(baseUrl, "tasks/resubscribe", {
+      id: sendPayload.result.id,
+    });
+
+    releaseRun?.();
+
+    const events = parseSseJsonRpcEvents(await response.text());
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/i);
+    assert.equal(isTask(events[0]?.result), true);
+    if (!isTask(events[0]?.result)) {
+      assert.fail("expected initial resubscribe snapshot");
+    }
+
+    assert.equal(events[0].result.id, sendPayload.result.id);
+    assert.equal(
+      events.some(
+        (event) =>
+          typeof event.result === "object" &&
+          event.result !== null &&
+          "kind" in event.result &&
+          event.result.kind === "status-update",
+      ),
+      true,
+    );
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+  }
+});
+
+test("raw JSON-RPC still rejects removed push-notification methods at the boundary", async () => {
   let executed = false;
   const harness = createServerHarness(async () => {
     executed = true;
@@ -178,8 +364,6 @@ test("raw JSON-RPC rejects removed optional methods at the boundary", async () =
   try {
     const baseUrl = await listen(routeServer);
     const requests: Array<[string, Record<string, unknown>]> = [
-      ["message/stream", { message: createUserMessage() }],
-      ["tasks/resubscribe", { id: "task-removed" }],
       [
         "tasks/pushNotificationConfig/set",
         {
@@ -338,7 +522,7 @@ test("handle reports matched JSON-RPC requests as handled to an outer fallback s
   }
 });
 
-test("restarting the server loses prior process-local task state", async () => {
+test("restarting the server loses prior memory-backed task state", async () => {
   const initialHarness = createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-restart-loss");
     emit({
@@ -426,5 +610,122 @@ test("restarting the server loses prior process-local task state", async () => {
   } finally {
     await closeHttpServer(restartedRouteServer);
     restartedHarness.close();
+  }
+});
+
+test("restarting the server with json-file task storage preserves task state and closes orphaned resubscribe streams", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-http-"));
+  let taskId: string | undefined;
+  const initialHarness = createServerHarness(
+    async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-restart-json");
+      emit({
+        runId: "run-restart-json",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Tool summary" },
+        { kind: "tool" },
+      );
+      await new Promise<void>(() => {});
+    },
+    {
+      account: {
+        taskStore: {
+          kind: "json-file",
+          path: root,
+        },
+      },
+    },
+  );
+  const initialRouteServer = createServer((req, res) => {
+    void initialHarness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(initialRouteServer);
+    const sendResponse = await postJsonRpc(baseUrl, "message/send", {
+      message: createUserMessage({
+        messageId: "message-restart-json",
+      }),
+      configuration: {
+        blocking: false,
+      },
+    });
+    const sendPayload = (await sendResponse.json()) as {
+      result: Task;
+    };
+
+    assert.equal(isTask(sendPayload.result), true);
+    if (!isTask(sendPayload.result)) {
+      assert.fail("expected persisted task");
+    }
+
+    taskId = sendPayload.result.id;
+
+    await waitFor(async () => {
+      const response = await postJsonRpc(baseUrl, "tasks/get", {
+        id: taskId,
+        historyLength: 10,
+      });
+      const payload = (await response.json()) as {
+        result: Task;
+      };
+
+      return payload.result.status.state === "working";
+    });
+  } finally {
+    await closeHttpServer(initialRouteServer);
+    initialHarness.close();
+  }
+
+  if (!taskId) {
+    assert.fail("expected task id");
+  }
+
+  const restartedHarness = createServerHarness(
+    async () => {},
+    {
+      account: {
+        taskStore: {
+          kind: "json-file",
+          path: root,
+        },
+      },
+    },
+  );
+  const restartedRouteServer = createServer((req, res) => {
+    void restartedHarness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(restartedRouteServer);
+    const taskResponse = await postJsonRpc(baseUrl, "tasks/get", {
+      id: taskId,
+      historyLength: 10,
+    });
+    const taskPayload = (await taskResponse.json()) as {
+      result: Task;
+    };
+    const resubscribeResponse = await postJsonRpc(baseUrl, "tasks/resubscribe", {
+      id: taskId,
+    });
+    const resubscribeEvents = parseSseJsonRpcEvents(await resubscribeResponse.text());
+
+    assert.equal(taskResponse.status, 200);
+    assert.equal(taskPayload.result.status.state, "working");
+    assert.equal(resubscribeEvents.length, 1);
+    assert.equal(isTask(resubscribeEvents[0]?.result), true);
+    if (!isTask(resubscribeEvents[0]?.result)) {
+      assert.fail("expected persisted snapshot");
+    }
+
+    assert.equal(resubscribeEvents[0].result.id, taskId);
+    assert.equal(resubscribeEvents[0].result.status.state, "working");
+  } finally {
+    await closeHttpServer(restartedRouteServer);
+    restartedHarness.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

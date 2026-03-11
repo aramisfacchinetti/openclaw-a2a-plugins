@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type {
   ChannelConfigSchema,
   OpenClawPluginConfigSchema,
@@ -31,6 +32,10 @@ export interface A2AInboundSkillConfig {
   examples: string[];
 }
 
+export type A2AInboundTaskStoreConfig =
+  | { kind: "memory" }
+  | { kind: "json-file"; path: string };
+
 export interface A2AInboundAccountConfig {
   accountId: string;
   enabled: boolean;
@@ -45,6 +50,7 @@ export interface A2AInboundAccountConfig {
   maxBodyBytes: number;
   defaultInputModes: A2AInboundInputMode[];
   defaultOutputModes: string[];
+  taskStore: A2AInboundTaskStoreConfig;
   skills: A2AInboundSkillConfig[];
 }
 
@@ -128,6 +134,39 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
             items: { type: "string" },
             default: [...DEFAULT_OUTPUT_MODES],
           },
+          taskStore: {
+            oneOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["kind"],
+                properties: {
+                  kind: {
+                    type: "string",
+                    const: "memory",
+                  },
+                },
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["kind", "path"],
+                properties: {
+                  kind: {
+                    type: "string",
+                    const: "json-file",
+                  },
+                  path: {
+                    type: "string",
+                    minLength: 1,
+                  },
+                },
+              },
+            ],
+            default: {
+              kind: "memory",
+            },
+          },
           skills: {
             type: "array",
             items: {
@@ -180,6 +219,17 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
   "accounts.*.jsonRpcPath": {
     label: "JSON-RPC Path",
     help: "HTTP path serving the A2A JSON-RPC transport.",
+    advanced: true,
+  },
+  "accounts.*.taskStore.kind": {
+    label: "Task Store",
+    help: "Persist tasks in memory only or in a single-writer JSON file directory.",
+    advanced: true,
+  },
+  "accounts.*.taskStore.path": {
+    label: "Task Store Path",
+    help: "Absolute directory path used when task storage is set to json-file.",
+    placeholder: "/var/lib/openclaw/a2a-tasks",
     advanced: true,
   },
 } satisfies NonNullable<ChannelConfigSchema["uiHints"]>;
@@ -344,11 +394,50 @@ function parseSkills(value: unknown): A2AInboundSkillConfig[] {
       }));
 }
 
+function parseTaskStore(
+  accountId: string,
+  value: unknown,
+): A2AInboundTaskStoreConfig {
+  if (typeof value === "undefined") {
+    return { kind: "memory" };
+  }
+
+  if (!isRecord(value)) {
+    throw new Error(
+      `channels.${CHANNEL_ID}.accounts.${accountId}.taskStore must be an object when provided.`,
+    );
+  }
+
+  const kind = readOptionalString(value.kind);
+
+  if (kind === "memory") {
+    return { kind: "memory" };
+  }
+
+  if (kind === "json-file") {
+    const path = readOptionalString(value.path);
+
+    if (!path || !isAbsolute(path)) {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${accountId}.taskStore.path must be a non-empty absolute path when taskStore.kind is "json-file".`,
+      );
+    }
+
+    return {
+      kind: "json-file",
+      path,
+    };
+  }
+
+  throw new Error(
+    `channels.${CHANNEL_ID}.accounts.${accountId}.taskStore.kind must be either "memory" or "json-file".`,
+  );
+}
+
 const FORBIDDEN_ACCOUNT_KEYS = [
   "restPath",
   "capabilities",
   "auth",
-  "taskStore",
 ] as const;
 
 function assertNoForbiddenAccountKeys(
@@ -396,6 +485,7 @@ function parseAccount(
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
     defaultInputModes: parseDefaultInputModes(accountId, record.defaultInputModes),
     defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
+    taskStore: parseTaskStore(accountId, record.taskStore),
     skills: parseSkills(record.skills),
   };
 }
