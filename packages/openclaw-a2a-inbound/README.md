@@ -4,6 +4,8 @@ Native OpenClaw inbound A2A channel plugin.
 
 This package serves an A2A agent card plus a JSON-RPC endpoint and routes inbound A2A requests into OpenClaw through one committed task runtime. The runtime is the single source of truth for `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and `tasks/resubscribe`.
 
+Phase 2 keeps the public A2A contract unchanged while persisting an internal durable committed journal beside the latest committed task snapshot.
+
 ## Installation
 
 ```bash
@@ -16,7 +18,7 @@ Pin the exact published version if you want reproducible installs:
 openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 ```
 
-## Phase 1 Contract
+## Current Contract
 
 - Plugin/package id: `openclaw-a2a-inbound`
 - Registers one OpenClaw channel: `a2a`
@@ -57,7 +59,7 @@ Serialized A2A payloads do not emit `metadata.openclaw.*` or vendor `openclaw.re
 
 ## Task Storage
 
-Each account can select one phase 1 task store:
+Each account can select one task store:
 
 - `memory`
 - `json-file`
@@ -70,15 +72,22 @@ If `taskStore` is omitted, it defaults to:
 
 `json-file.path` must be a non-empty absolute path.
 
-Phase 1 persistence stores one durable record per task containing:
+Phase 2 persistence stores one durable schema v2 record per task containing:
 
 - the latest committed task snapshot
 - the stored OpenClaw binding
+- `currentSequence`
+- the ordered committed journal of `status-update` and `artifact-update` events
 
-Phase 1 does not add:
+The initial `Task` snapshot is not journaled. The durable journal is internal-only in this phase and is used only to preserve committed history for future replay work.
 
-- committed journal replay
-- backlog replay
+Existing schema v1 snapshot-only json-file records load through a lazy one-way upgrade in memory and persist as schema v2 on the next write.
+
+Phase 2 still does not expose:
+
+- public committed journal replay
+- public backlog replay
+- replay cursors or replay markers
 - lease heartbeats
 - orphan recovery
 - hidden replay toggles
@@ -134,6 +143,7 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 - `tasks/resubscribe`
   - emits the latest committed task snapshot first
   - attaches a live tail only when the task is still active and the execution is live in the current process
+  - does not replay stored journal backlog in this phase
   - terminal, quiescent, and restart-orphaned active tasks emit the snapshot and close
 
 `tasks/cancel` keeps the same committed semantics:
