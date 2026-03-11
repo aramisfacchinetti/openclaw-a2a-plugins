@@ -108,12 +108,11 @@ function createExpressDispatcher(
       };
 
       try {
-        const maybePromise = handler(req as never, res as never, next);
+        handler(req as never, res as never, next);
 
-        Promise.resolve(maybePromise).then(
-          () => finish(res.writableEnded),
-          reject,
-        );
+        if (res.headersSent || res.writableEnded) {
+          finish(true);
+        }
       } catch (error) {
         reject(error);
       }
