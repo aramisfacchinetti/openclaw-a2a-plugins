@@ -38,6 +38,7 @@ test("parser normalizes paths, defaults, and account labels", () => {
   assert.equal(account.jsonRpcPath, "/rpc");
   assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.deepEqual(account.defaultOutputModes, [...DEFAULT_OUTPUT_MODES]);
+  assert.deepEqual(account.taskStore, { kind: "memory" });
   assert.equal(isA2AInboundAccountConfigured(account), true);
 });
 
@@ -106,7 +107,6 @@ for (const forbiddenKey of [
   "restPath",
   "capabilities",
   "auth",
-  "taskStore",
 ] as const) {
   test(`parser rejects removed account key ${forbiddenKey}`, () => {
     assert.throws(
@@ -123,9 +123,7 @@ for (const forbiddenKey of [
                       ? "/legacy"
                       : forbiddenKey === "capabilities"
                         ? { streaming: true }
-                        : forbiddenKey === "auth"
-                          ? { mode: "header-token", token: "secret" }
-                          : { kind: "json-file", path: "/tmp/runtime" },
+                        : { mode: "header-token", token: "secret" },
                 },
               },
             },
@@ -183,6 +181,62 @@ test("defaultInputModes rejects application/octet-stream and other unsupported v
     );
   }
 });
+
+test("taskStore accepts memory and absolute json-file paths", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          memory: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+          },
+          durable: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            agentCardPath: "/durable/agent-card.json",
+            jsonRpcPath: "/durable/jsonrpc",
+            taskStore: {
+              kind: "json-file",
+              path: "/tmp/openclaw-a2a-tasks",
+            },
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.accounts.memory?.taskStore, { kind: "memory" });
+  assert.deepEqual(parsed.accounts.durable?.taskStore, {
+    kind: "json-file",
+    path: "/tmp/openclaw-a2a-tasks",
+  });
+});
+
+for (const invalidPath of ["", "   ", "relative/path"]) {
+  test(`taskStore rejects invalid json-file.path ${JSON.stringify(invalidPath)}`, () => {
+    assert.throws(
+      () =>
+        parseA2AInboundChannelConfig({
+          channels: {
+            a2a: {
+              accounts: {
+                default: {
+                  enabled: true,
+                  publicBaseUrl: "https://agents.example.com",
+                  taskStore: {
+                    kind: "json-file",
+                    path: invalidPath,
+                  },
+                },
+              },
+            },
+          },
+        }),
+      /taskStore\.path must be a non-empty absolute path/,
+    );
+  });
+}
 
 test("defaultInputModes accepts only supported text/json values", () => {
   const parsed = parseA2AInboundChannelConfig({

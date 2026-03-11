@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { TaskState } from "@a2a-js/sdk";
 import {
   createArtifactUpdate,
@@ -187,7 +190,7 @@ test("status and artifact journal commits mutate the stored task snapshot", asyn
   assert.equal(getPersistedArtifactText(persisted!, "assistant-output"), "Alpha Beta");
 });
 
-test("prepareLiveTail subscribes only for active tasks and only yields committed tail events", async () => {
+test("subscribeToCommittedTail subscribes only for active tasks and only yields committed tail events", async () => {
   const store = createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-active", state: "submitted" }));
@@ -202,16 +205,15 @@ test("prepareLiveTail subscribes only for active tasks and only yields committed
   await store.save(createSnapshot({ taskId: "task-quiescent", state: "input-required" }));
   await store.save(createSnapshot({ taskId: "task-terminal", state: "completed" }));
 
-  const active = await store.prepareLiveTail("task-active");
-  const quiescent = await store.prepareLiveTail("task-quiescent");
-  const terminal = await store.prepareLiveTail("task-terminal");
+  const active = await store.subscribeToCommittedTail("task-active");
+  const quiescent = await store.subscribeToCommittedTail("task-quiescent");
+  const terminal = await store.subscribeToCommittedTail("task-terminal");
 
-  assert.equal(active?.task.status.state, "working");
-  assert.ok(active?.subscription);
-  assert.equal(quiescent?.subscription, undefined);
-  assert.equal(terminal?.subscription, undefined);
+  assert.ok(active);
+  assert.equal(quiescent, undefined);
+  assert.equal(terminal, undefined);
 
-  const nextEventPromise = active!.subscription!.next();
+  const nextEventPromise = active!.next();
   const beforeCommit = await Promise.race([
     nextEventPromise.then(() => "event"),
     new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 25)),
@@ -229,7 +231,98 @@ test("prepareLiveTail subscribes only for active tasks and only yields committed
   );
 
   assert.deepEqual(await nextEventPromise, committed);
-  active!.subscription!.close();
+  active!.close();
+});
+
+test("memory backend loses state across new runtime instances", async () => {
+  const initial = createTaskStore({ kind: "memory" });
+
+  await initial.save(createSnapshot({ taskId: "task-memory", state: "working" }));
+  initial.close();
+
+  const restarted = createTaskStore({ kind: "memory" });
+
+  try {
+    assert.equal(await restarted.load("task-memory"), undefined);
+    assert.deepEqual(await restarted.listTaskIds(), []);
+  } finally {
+    restarted.close();
+  }
+});
+
+test("json-file backend preserves task snapshot, binding, history, and artifacts across runtime instances", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-"));
+  const original = createTaskStore({
+    kind: "json-file",
+    path: root,
+  });
+  const followUp = createUserMessage({
+    messageId: "message:task-json:2",
+    contextId: "context:task-json",
+    taskId: "task-json",
+    parts: [{ kind: "text", text: "Second request" }],
+  });
+
+  try {
+    original.primeBinding("task-json", createBinding("task-json"));
+    await original.save(
+      createTaskSnapshot({
+        taskId: "task-json",
+        contextId: "context:task-json",
+        state: "submitted",
+        history: [
+          createUserMessage({
+            messageId: "message:task-json:1",
+            contextId: "context:task-json",
+            taskId: "task-json",
+            parts: [{ kind: "text", text: "First request" }],
+          }),
+        ],
+      }),
+    );
+    await original.persistIncomingMessage("task-json", followUp);
+    await original.commitEvent(
+      createTaskStatusUpdate({
+        taskId: "task-json",
+        contextId: "context:task-json",
+        state: "working",
+        messageText: "Working",
+      }),
+    );
+    await original.commitEvent(
+      createArtifactUpdate({
+        taskId: "task-json",
+        contextId: "context:task-json",
+        artifactId: "assistant-output-0001",
+        text: "Alpha",
+      }),
+    );
+  } finally {
+    original.close();
+  }
+
+  const restarted = createTaskStore({
+    kind: "json-file",
+    path: root,
+  });
+
+  try {
+    const persisted = await restarted.load("task-json");
+    const binding = await restarted.loadBinding("task-json");
+
+    assert.deepEqual(await restarted.listTaskIds(), ["task-json"]);
+    assert.equal(persisted?.status.state, "working");
+    assert.deepEqual(
+      persisted?.history?.slice(0, 2).map((message) => message.messageId),
+      ["message:task-json:1", "message:task-json:2"],
+    );
+    assert.equal(persisted?.history?.at(-1)?.role, "agent");
+    assert.equal(getPersistedArtifactText(persisted!, "assistant-output"), "Alpha");
+    assert.deepEqual(binding, createBinding("task-json"));
+  } finally {
+    restarted.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("close clears tasks, bindings, pending bindings, and open subscriptions", async () => {
@@ -239,8 +332,8 @@ test("close clears tasks, bindings, pending bindings, and open subscriptions", a
   await store.writeBinding("task-1", createBinding("task-1"));
   store.primeBinding("task-pending", createBinding("task-pending"));
 
-  const prepared = await store.prepareLiveTail("task-1");
-  const pendingNext = prepared!.subscription!.next();
+  const subscription = await store.subscribeToCommittedTail("task-1");
+  const pendingNext = subscription!.next();
 
   store.close();
 

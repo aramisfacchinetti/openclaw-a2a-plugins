@@ -29,7 +29,12 @@ import {
 import {
   assertNoOpenClawMetadata,
   getPersistedArtifactData,
+  getPersistedArtifactText,
   getStatusMessageText,
+  getStatusSequence,
+  isArtifactUpdate,
+  isMessage,
+  isStatusUpdate,
   isTask,
 } from "./test-helpers.js";
 
@@ -45,7 +50,7 @@ function createAgentCard(): AgentCard {
     preferredTransport: "JSONRPC",
     capabilities: {
       pushNotifications: false,
-      streaming: false,
+      streaming: true,
     },
     defaultInputModes: [...account.defaultInputModes],
     defaultOutputModes: [...account.defaultOutputModes],
@@ -142,6 +147,18 @@ async function collectCommittedTail(
   }
 }
 
+async function collectStreamEvents<T>(
+  stream: AsyncGenerator<T, void, undefined>,
+): Promise<T[]> {
+  const events: T[] = [];
+
+  for await (const event of stream) {
+    events.push(event);
+  }
+
+  return events;
+}
+
 test("blocking sendMessage returns a direct Message for terminal replies", async () => {
   const harness = createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct");
@@ -209,6 +226,123 @@ test("blocking sendMessage returns a Task once reply activity promotes the run",
   assert.ok(
     result.artifacts?.some((artifact) => artifact.artifactId.startsWith("tool-result-")),
   );
+});
+
+test("sendMessageStream returns only one canonical Message for direct streaming replies", async () => {
+  const harness = createHandlerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-direct");
+    emit({
+      runId: "run-stream-direct",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Direct stream reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-direct",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const events = await collectStreamEvents(
+    harness.requestHandler.sendMessageStream({
+      message: createUserMessage({
+        messageId: "message:stream-direct",
+      }),
+    }),
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(isMessage(events[0]), true);
+  if (!isMessage(events[0])) {
+    assert.fail("expected direct message");
+  }
+
+  assert.equal(events[0].parts[0]?.kind, "text");
+  assert.equal(
+    events[0].parts[0] && "text" in events[0].parts[0]
+      ? events[0].parts[0].text
+      : undefined,
+    "Direct stream reply",
+  );
+  assert.deepEqual(await harness.taskRuntime.listTaskIds(), []);
+});
+
+test("sendMessageStream yields committed task events for promoted runs and tasks/get matches the final task", async () => {
+  const harness = createHandlerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-stream-promoted");
+    emit({
+      runId: "run-stream-promoted",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Tool summary" },
+      { kind: "tool" },
+    );
+    await params.dispatcherOptions.deliver(
+      { text: "Promoted final answer" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-stream-promoted",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const events = await collectStreamEvents(
+    harness.requestHandler.sendMessageStream({
+      message: createUserMessage({
+        messageId: "message:stream-promoted",
+        contextId: "context:stream-promoted",
+      }),
+    }),
+  );
+
+  assert.equal(isTask(events[0]), true);
+  if (!isTask(events[0])) {
+    assert.fail("expected initial committed task snapshot");
+  }
+
+  const finalStatus = events.at(-1);
+
+  assert.equal(isStatusUpdate(finalStatus), true);
+  if (!isStatusUpdate(finalStatus)) {
+    assert.fail("expected final committed status update");
+  }
+
+  assert.deepEqual(getStatusSequence(events), [
+    ["submitted", false],
+    ["working", false],
+    ["completed", true],
+  ]);
+  assert.ok(
+    events.some(
+      (event) =>
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId.startsWith("tool-result-"),
+    ),
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId.startsWith("assistant-output-"),
+    ),
+  );
+
+  const persisted = await harness.requestHandler.getTask({
+    id: events[0].id,
+    historyLength: 10,
+  });
+
+  assert.equal(persisted.status.state, "completed");
+  assert.equal(getStatusMessageText(persisted), "Promoted final answer");
+  assert.equal(getPersistedArtifactText(persisted, "assistant-output"), "Promoted final answer");
 });
 
 test("getTask reads the latest snapshot and trims returned history", async () => {
@@ -559,6 +693,177 @@ test("cancelTask rejects non-live active tasks", async () => {
   );
 });
 
+test("resubscribe emits the latest snapshot immediately and only tails future committed events for live active tasks", async () => {
+  let releaseRun: (() => void) | undefined;
+  const harness = createHandlerHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-resubscribe-live");
+    emit({
+      runId: "run-resubscribe-live",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Tool summary" },
+      { kind: "tool" },
+    );
+    await new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Resubscribed final answer" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-resubscribe-live",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+
+  const result = await harness.requestHandler.sendMessage({
+    message: createUserMessage({
+      messageId: "message:resubscribe-live",
+      contextId: "context:resubscribe-live",
+    }),
+    configuration: {
+      blocking: false,
+    },
+  });
+
+  assert.equal(isTask(result), true);
+  if (!isTask(result)) {
+    assert.fail("expected live task");
+  }
+
+  await waitFor(async () => {
+    const persisted = await harness.requestHandler.getTask({
+      id: result.id,
+      historyLength: 10,
+    });
+
+    return (
+      persisted.status.state === "working" &&
+      Boolean(
+        persisted.artifacts?.some((artifact) =>
+          artifact.artifactId.startsWith("tool-result-"),
+        ),
+      )
+    );
+  });
+
+  const stream = harness.requestHandler.resubscribe({ id: result.id });
+  const first = await stream.next();
+
+  assert.equal(first.done, false);
+  assert.equal(isTask(first.value), true);
+  if (!isTask(first.value)) {
+    assert.fail("expected latest committed snapshot");
+  }
+
+  assert.equal(first.value.status.state, "working");
+  assert.ok(
+    first.value.artifacts?.some((artifact) =>
+      artifact.artifactId.startsWith("tool-result-"),
+    ),
+  );
+
+  releaseRun?.();
+
+  const tailEvents: Array<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+
+  for await (const event of stream) {
+    tailEvents.push(event);
+  }
+
+  assert.equal(
+    tailEvents.some(
+      (event) =>
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId.startsWith("tool-result-"),
+    ),
+    false,
+  );
+  assert.equal(
+    tailEvents.some(
+      (event) =>
+        isArtifactUpdate(event) &&
+        event.artifact.artifactId.startsWith("assistant-output-"),
+    ),
+    true,
+  );
+  assert.deepEqual(getStatusSequence(tailEvents), [["completed", true]]);
+});
+
+for (const taskCase of [
+  {
+    label: "quiescent",
+    task: createTaskSnapshot({
+      taskId: "task-resubscribe-quiescent",
+      contextId: "context-resubscribe-quiescent",
+      state: "input-required",
+      history: [
+        createUserMessage({
+          messageId: "message:task-resubscribe-quiescent",
+          taskId: "task-resubscribe-quiescent",
+          contextId: "context-resubscribe-quiescent",
+        }),
+      ],
+    }),
+  },
+  {
+    label: "terminal",
+    task: createTaskSnapshot({
+      taskId: "task-resubscribe-terminal",
+      contextId: "context-resubscribe-terminal",
+      state: "completed",
+      history: [
+        createUserMessage({
+          messageId: "message:task-resubscribe-terminal",
+          taskId: "task-resubscribe-terminal",
+          contextId: "context-resubscribe-terminal",
+        }),
+      ],
+      messageText: "Done",
+    }),
+  },
+  {
+    label: "restart-orphaned active",
+    task: createTaskSnapshot({
+      taskId: "task-resubscribe-orphaned",
+      contextId: "context-resubscribe-orphaned",
+      state: "working",
+      history: [
+        createUserMessage({
+          messageId: "message:task-resubscribe-orphaned",
+          taskId: "task-resubscribe-orphaned",
+          contextId: "context-resubscribe-orphaned",
+        }),
+      ],
+    }),
+  },
+] as const) {
+  test(`resubscribe returns only the snapshot for ${taskCase.label} tasks`, async () => {
+    const harness = createHandlerHarness(async () => {
+      throw new Error("executor should not run");
+    });
+
+    await harness.taskRuntime.save(taskCase.task);
+
+    const events = await collectStreamEvents(
+      harness.requestHandler.resubscribe({ id: taskCase.task.id }),
+    );
+
+    assert.equal(events.length, 1);
+    assert.equal(isTask(events[0]), true);
+    if (!isTask(events[0])) {
+      assert.fail("expected single snapshot");
+    }
+
+    assert.equal(events[0].id, taskCase.task.id);
+    assert.equal(events[0].status.state, taskCase.task.status.state);
+  });
+}
+
 test("nonblocking tasks and committed tail events stay free of metadata.openclaw", async () => {
   let releaseRun: (() => void) | undefined;
   const harness = createHandlerHarness(async ({ params, emit }) => {
@@ -610,13 +915,13 @@ test("nonblocking tasks and committed tail events stay free of metadata.openclaw
     assert.fail("expected metadata-free task");
   }
 
-  const prepared = await harness.taskRuntime.prepareLiveTail(result.id);
+  const subscription = await harness.taskRuntime.subscribeToCommittedTail(result.id);
 
-  assert.ok(prepared?.subscription);
+  assert.ok(subscription);
 
   releaseRun?.();
 
-  const tailEvents = await collectCommittedTail(prepared!.subscription!);
+  const tailEvents = await collectCommittedTail(subscription!);
   const persisted = await harness.requestHandler.getTask({
     id: result.id,
     historyLength: 10,

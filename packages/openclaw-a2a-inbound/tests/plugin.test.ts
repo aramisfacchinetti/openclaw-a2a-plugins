@@ -84,7 +84,7 @@ function getInternalCollections(api: OpenClawPluginApi): {
   };
 }
 
-test("plugin registers one channel and only the minimal-core HTTP routes", () => {
+test("plugin registers one channel and the phase 1 HTTP routes", () => {
   const api = createApi({
     channels: {
       a2a: {

@@ -3,7 +3,10 @@ import {
   type ExecutionEventBusManager,
 } from "@a2a-js/sdk/server";
 
-export type A2AInitialResponseMode = "blocking" | "non_blocking";
+export type A2AInitialResponseMode =
+  | "blocking"
+  | "non_blocking"
+  | "streaming";
 
 export interface A2ALiveExecutionRecord {
   taskId: string;
@@ -22,7 +25,11 @@ export class A2ALiveExecutionRegistry {
   ) {}
 
   setRequestMode(requestId: string, mode: A2AInitialResponseMode): void {
-    if (mode !== "blocking" && mode !== "non_blocking") {
+    if (
+      mode !== "blocking" &&
+      mode !== "non_blocking" &&
+      mode !== "streaming"
+    ) {
       return;
     }
 

@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { closeSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import type {
   Message,
   Task,
@@ -5,7 +9,9 @@ import type {
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
+import type { A2AInboundTaskStoreConfig } from "./config.js";
 import { isActiveExecutionTaskState } from "./response-mapping.js";
+import { decodeTaskStorageId, encodeTaskStorageId } from "./storage-id.js";
 
 type JournalEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
 type StoredTaskBindingMatchedBy =
@@ -42,6 +48,20 @@ export interface StoredTaskBinding {
   updatedAt: string;
 }
 
+interface StoredTaskRecord {
+  schemaVersion: 1;
+  task: Task;
+  binding?: StoredTaskBinding;
+}
+
+interface TaskRecordBackend {
+  readonly kind: A2AInboundTaskStoreConfig["kind"];
+  loadRecord(taskId: string): Promise<StoredTaskRecord | undefined>;
+  saveRecord(taskId: string, record: StoredTaskRecord): Promise<void>;
+  listTaskIds(): Promise<string[]>;
+  close(): void;
+}
+
 export interface TaskJournalSubscriptionHandle {
   next(): Promise<JournalEvent | undefined>;
   close(): void;
@@ -49,15 +69,9 @@ export interface TaskJournalSubscriptionHandle {
 
 type TaskRuntimeSubscriber = (event: JournalEvent) => void;
 
-type PreparedLiveTail = {
-  subscription?: TaskJournalSubscriptionHandle;
-  task: Task;
-};
-
-type InMemoryTaskRecord = {
-  task: Task;
-  binding?: StoredTaskBinding;
-};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function cloneTask(task: Task): Task {
   return structuredClone(task);
@@ -73,6 +87,14 @@ function cloneTaskBinding(binding: StoredTaskBinding): StoredTaskBinding {
 
 function cloneJournalEvent(event: JournalEvent): JournalEvent {
   return structuredClone(event);
+}
+
+function cloneTaskRecord(record: StoredTaskRecord): StoredTaskRecord {
+  return {
+    schemaVersion: 1,
+    task: cloneTask(record.task),
+    ...(record.binding ? { binding: cloneTaskBinding(record.binding) } : {}),
+  };
 }
 
 function ensureHistoryContainsMessage(task: Task, message: Message): Task {
@@ -149,6 +171,190 @@ function mergeStatus(task: Task, event: TaskStatusUpdateEvent): Task {
   return nextTask;
 }
 
+function createStoredTaskRecord(params: {
+  task: Task;
+  binding?: StoredTaskBinding;
+}): StoredTaskRecord {
+  return {
+    schemaVersion: 1,
+    task: cloneTask(params.task),
+    ...(params.binding ? { binding: cloneTaskBinding(params.binding) } : {}),
+  };
+}
+
+function parseStoredTaskRecord(
+  raw: string,
+  source: string,
+): StoredTaskRecord {
+  const parsed = JSON.parse(raw) as unknown;
+
+  if (!isRecord(parsed) || parsed.schemaVersion !== 1) {
+    throw new Error(`Task record ${source} is missing schemaVersion 1.`);
+  }
+
+  if (!isRecord(parsed.task) || parsed.task.kind !== "task") {
+    throw new Error(`Task record ${source} is missing a valid task snapshot.`);
+  }
+
+  if (
+    "binding" in parsed &&
+    typeof parsed.binding !== "undefined" &&
+    !isRecord(parsed.binding)
+  ) {
+    throw new Error(`Task record ${source} contains an invalid binding.`);
+  }
+
+  return cloneTaskRecord(parsed as unknown as StoredTaskRecord);
+}
+
+class InMemoryTaskRecordBackend implements TaskRecordBackend {
+  readonly kind = "memory" as const;
+
+  private readonly records = new Map<string, StoredTaskRecord>();
+
+  async loadRecord(taskId: string): Promise<StoredTaskRecord | undefined> {
+    const record = this.records.get(taskId);
+    return record ? cloneTaskRecord(record) : undefined;
+  }
+
+  async saveRecord(taskId: string, record: StoredTaskRecord): Promise<void> {
+    this.records.set(taskId, cloneTaskRecord(record));
+  }
+
+  async listTaskIds(): Promise<string[]> {
+    return [...this.records.keys()].sort();
+  }
+
+  close(): void {
+    this.records.clear();
+  }
+}
+
+class JsonFileTaskRecordBackend implements TaskRecordBackend {
+  readonly kind = "json-file" as const;
+
+  private readonly writerLockPath: string;
+  private readonly writerLockFd: number;
+
+  constructor(private readonly root: string) {
+    mkdirSync(root, { recursive: true });
+    this.writerLockPath = join(root, ".writer.lock");
+
+    try {
+      this.writerLockFd = openSync(this.writerLockPath, "wx");
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "EEXIST"
+      ) {
+        throw new Error(
+          `Task store path "${root}" is already locked by another writer.`,
+        );
+      }
+
+      throw error;
+    }
+
+    writeFileSync(
+      this.writerLockFd,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      }),
+    );
+  }
+
+  async loadRecord(taskId: string): Promise<StoredTaskRecord | undefined> {
+    const path = this.recordPath(taskId);
+
+    try {
+      const raw = await readFile(path, "utf8");
+      return parseStoredTaskRecord(raw, path);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "ENOENT"
+      ) {
+        return undefined;
+      }
+
+      throw error;
+    }
+  }
+
+  async saveRecord(taskId: string, record: StoredTaskRecord): Promise<void> {
+    const path = this.recordPath(taskId);
+    const tempPath = join(
+      this.root,
+      `.${basename(path)}.${randomUUID()}.tmp`,
+    );
+
+    try {
+      await writeFile(
+        tempPath,
+        `${JSON.stringify(cloneTaskRecord(record), null, 2)}\n`,
+        "utf8",
+      );
+      await rename(tempPath, path);
+    } catch (error) {
+      await unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async listTaskIds(): Promise<string[]> {
+    const entries = await readdir(this.root, { withFileTypes: true });
+    const taskIds: string[] = [];
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const taskId = decodeTaskStorageId(entry.name.slice(0, -".json".length));
+
+      if (taskId) {
+        taskIds.push(taskId);
+      }
+    }
+
+    taskIds.sort();
+    return taskIds;
+  }
+
+  close(): void {
+    try {
+      closeSync(this.writerLockFd);
+    } catch {
+      // Ignore close failures during shutdown.
+    }
+
+    try {
+      unlinkSync(this.writerLockPath);
+    } catch {
+      // Ignore unlink failures during shutdown.
+    }
+  }
+
+  private recordPath(taskId: string): string {
+    return join(this.root, `${encodeTaskStorageId(taskId)}.json`);
+  }
+}
+
+function createTaskRecordBackend(
+  config: A2AInboundTaskStoreConfig,
+): TaskRecordBackend {
+  if (config.kind === "json-file") {
+    return new JsonFileTaskRecordBackend(config.path);
+  }
+
+  return new InMemoryTaskRecordBackend();
+}
+
 class TaskJournalSubscription implements TaskJournalSubscriptionHandle {
   private readonly events: JournalEvent[] = [];
   private readonly waiters = new Set<(event: JournalEvent | undefined) => void>();
@@ -206,13 +412,16 @@ class TaskJournalSubscription implements TaskJournalSubscriptionHandle {
 }
 
 export class A2ATaskRuntimeStore implements TaskStore {
-  readonly kind = "memory" as const;
+  readonly kind: A2AInboundTaskStoreConfig["kind"];
 
-  private readonly tasks = new Map<string, InMemoryTaskRecord>();
   private readonly taskQueues = new Map<string, Promise<void>>();
   private readonly subscribers = new Map<string, Set<TaskRuntimeSubscriber>>();
   private readonly subscriptions = new Set<TaskJournalSubscription>();
   private readonly pendingBindings = new Map<string, StoredTaskBinding>();
+
+  constructor(private readonly backend: TaskRecordBackend) {
+    this.kind = backend.kind;
+  }
 
   close(): void {
     for (const subscription of this.subscriptions) {
@@ -222,53 +431,61 @@ export class A2ATaskRuntimeStore implements TaskStore {
     this.subscriptions.clear();
     this.subscribers.clear();
     this.pendingBindings.clear();
-    this.tasks.clear();
+    this.backend.close();
   }
 
   async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const record = this.tasks.get(taskId);
+      const record = await this.backend.loadRecord(taskId);
       return record ? cloneTask(record.task) : undefined;
     });
   }
 
   async save(task: Task, _context?: ServerCallContext): Promise<void> {
     await this.enqueueByTask(task.id, async () => {
-      const currentRecord = this.tasks.get(task.id);
-      const binding = await this.flushPendingBinding(task.id) ?? currentRecord?.binding;
+      const currentRecord = await this.backend.loadRecord(task.id);
+      const binding =
+        this.flushPendingBinding(task.id) ?? currentRecord?.binding;
 
-      this.tasks.set(task.id, {
-        task: cloneTask(task),
-        ...(binding ? { binding: cloneTaskBinding(binding) } : {}),
-      });
+      await this.backend.saveRecord(
+        task.id,
+        createStoredTaskRecord({
+          task,
+          binding,
+        }),
+      );
       this.pendingBindings.delete(task.id);
     });
   }
 
   async listTaskIds(): Promise<string[]> {
-    return [...this.tasks.keys()];
+    await Promise.all(this.taskQueues.values());
+    return this.backend.listTaskIds();
   }
 
   async readBinding(taskId: string): Promise<StoredTaskBinding | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const binding = this.tasks.get(taskId)?.binding;
+      const binding = (await this.backend.loadRecord(taskId))?.binding;
       return binding ? cloneTaskBinding(binding) : undefined;
     });
   }
 
   async writeBinding(taskId: string, binding: StoredTaskBinding): Promise<void> {
     await this.enqueueByTask(taskId, async () => {
-      const taskRecord = this.tasks.get(taskId);
+      const taskRecord = await this.backend.loadRecord(taskId);
 
       if (!taskRecord) {
         this.pendingBindings.set(taskId, cloneTaskBinding(binding));
         return;
       }
 
-      this.tasks.set(taskId, {
-        task: cloneTask(taskRecord.task),
-        binding: cloneTaskBinding(binding),
-      });
+      await this.backend.saveRecord(
+        taskId,
+        createStoredTaskRecord({
+          task: taskRecord.task,
+          binding,
+        }),
+      );
       this.pendingBindings.delete(taskId);
     });
   }
@@ -281,7 +498,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
         return cloneTaskBinding(pending);
       }
 
-      const binding = this.tasks.get(taskId)?.binding;
+      const binding = (await this.backend.loadRecord(taskId))?.binding;
       return binding ? cloneTaskBinding(binding) : undefined;
     });
   }
@@ -296,7 +513,7 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async persistIncomingMessage(taskId: string, message: Message): Promise<Task | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const taskRecord = this.tasks.get(taskId);
+      const taskRecord = await this.backend.loadRecord(taskId);
 
       if (!taskRecord) {
         return undefined;
@@ -304,10 +521,13 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
       const nextTask = ensureHistoryContainsMessage(taskRecord.task, message);
 
-      this.tasks.set(taskId, {
-        task: cloneTask(nextTask),
-        ...(taskRecord.binding ? { binding: cloneTaskBinding(taskRecord.binding) } : {}),
-      });
+      await this.backend.saveRecord(
+        taskId,
+        createStoredTaskRecord({
+          task: nextTask,
+          binding: taskRecord.binding,
+        }),
+      );
 
       return cloneTask(nextTask);
     });
@@ -324,22 +544,17 @@ export class A2ATaskRuntimeStore implements TaskStore {
     return this.commitJournalEvent(event);
   }
 
-  async prepareLiveTail(taskId: string): Promise<PreparedLiveTail | undefined> {
+  async subscribeToCommittedTail(
+    taskId: string,
+  ): Promise<TaskJournalSubscriptionHandle | undefined> {
     return this.enqueueByTask(taskId, async () => {
-      const taskRecord = this.tasks.get(taskId);
+      const taskRecord = await this.backend.loadRecord(taskId);
 
-      if (!taskRecord) {
+      if (!taskRecord || !isActiveExecutionTaskState(taskRecord.task.status.state)) {
         return undefined;
       }
 
-      const subscription = isActiveExecutionTaskState(taskRecord.task.status.state)
-        ? this.createSubscription(taskId)
-        : undefined;
-
-      return {
-        task: cloneTask(taskRecord.task),
-        subscription,
-      };
+      return this.createSubscription(taskId);
     });
   }
 
@@ -348,18 +563,22 @@ export class A2ATaskRuntimeStore implements TaskStore {
     latestUserMessage?: Message,
   ): Promise<Task> {
     return this.enqueueByTask(task.id, async () => {
-      const currentRecord = this.tasks.get(task.id);
-      const binding = await this.flushPendingBinding(task.id) ?? currentRecord?.binding;
+      const currentRecord = await this.backend.loadRecord(task.id);
+      const binding =
+        this.flushPendingBinding(task.id) ?? currentRecord?.binding;
       let nextTask = cloneTask(task);
 
       if (latestUserMessage) {
         nextTask = ensureHistoryContainsMessage(nextTask, latestUserMessage);
       }
 
-      this.tasks.set(task.id, {
-        task: cloneTask(nextTask),
-        ...(binding ? { binding: cloneTaskBinding(binding) } : {}),
-      });
+      await this.backend.saveRecord(
+        task.id,
+        createStoredTaskRecord({
+          task: nextTask,
+          binding,
+        }),
+      );
       this.pendingBindings.delete(task.id);
       return cloneTask(nextTask);
     });
@@ -367,32 +586,36 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   private async commitJournalEvent(event: JournalEvent): Promise<JournalEvent> {
     return this.enqueueByTask(event.taskId, async () => {
-      const taskRecord = this.tasks.get(event.taskId);
+      const taskRecord = await this.backend.loadRecord(event.taskId);
 
       if (!taskRecord) {
         throw new Error(`Cannot commit journal event for unknown task ${event.taskId}.`);
       }
 
-      const binding = await this.flushPendingBinding(event.taskId) ?? taskRecord.binding;
+      const binding =
+        this.flushPendingBinding(event.taskId) ?? taskRecord.binding;
       const committedEvent = cloneJournalEvent(event);
       const nextTask =
         committedEvent.kind === "status-update"
           ? mergeStatus(taskRecord.task, committedEvent)
           : mergeArtifact(taskRecord.task, committedEvent);
 
-      this.tasks.set(event.taskId, {
-        task: cloneTask(nextTask),
-        ...(binding ? { binding: cloneTaskBinding(binding) } : {}),
-      });
+      await this.backend.saveRecord(
+        event.taskId,
+        createStoredTaskRecord({
+          task: nextTask,
+          binding,
+        }),
+      );
       this.pendingBindings.delete(event.taskId);
       this.notifySubscribers(event.taskId, committedEvent);
       return cloneJournalEvent(committedEvent);
     });
   }
 
-  private async flushPendingBinding(
+  private flushPendingBinding(
     taskId: string,
-  ): Promise<StoredTaskBinding | undefined> {
+  ): StoredTaskBinding | undefined {
     const binding = this.pendingBindings.get(taskId);
     return binding ? cloneTaskBinding(binding) : undefined;
   }
@@ -454,6 +677,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
   }
 }
 
-export function createTaskStore(): A2ATaskRuntimeStore {
-  return new A2ATaskRuntimeStore();
+export function createTaskStore(
+  config: A2AInboundTaskStoreConfig = { kind: "memory" },
+): A2ATaskRuntimeStore {
+  return new A2ATaskRuntimeStore(createTaskRecordBackend(config));
 }

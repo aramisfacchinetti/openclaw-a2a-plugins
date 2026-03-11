@@ -35,17 +35,18 @@ test("plugin configSchema export reuses the canonical plugin JSON schema", () =>
   );
 });
 
-test("channel schema removes legacy fields and keeps text/json defaults", () => {
+test("channel schema keeps the restored phase 1 taskStore contract and text/json defaults", () => {
   const rootProperties = asRecord(A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA.properties);
   const accountsSchema = asRecord(rootProperties.accounts);
   const accountSchema = asRecord(accountsSchema.additionalProperties);
   const accountProperties = asRecord(accountSchema.properties);
   const defaultInputModes = asRecord(accountProperties.defaultInputModes);
+  const taskStore = asRecord(accountProperties.taskStore);
 
   assert.equal("restPath" in accountProperties, false);
   assert.equal("capabilities" in accountProperties, false);
   assert.equal("auth" in accountProperties, false);
-  assert.equal("taskStore" in accountProperties, false);
+  assert.equal("taskStore" in accountProperties, true);
   assert.deepEqual(defaultInputModes.default, [
     "text/plain",
     "application/json",
@@ -58,10 +59,15 @@ test("channel schema removes legacy fields and keeps text/json defaults", () => 
     "text/plain",
     "application/json",
   ]);
+  assert.deepEqual(taskStore.default, {
+    kind: "memory",
+  });
+  assert.equal(Array.isArray(taskStore.oneOf), true);
 });
 
-test("channel ui hints remove legacy fields", () => {
+test("channel ui hints expose restored taskStore fields and remove legacy ones", () => {
   assert.equal("accounts.*.restPath" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, false);
   assert.equal("accounts.*.auth.mode" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, false);
-  assert.equal("accounts.*.taskStore.kind" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, false);
+  assert.equal("accounts.*.taskStore.kind" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, true);
+  assert.equal("accounts.*.taskStore.path" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, true);
 });

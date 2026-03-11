@@ -498,7 +498,7 @@ export class A2ATaskExecutionCoordinator {
 
   private canReturnDirectMessage(): boolean {
     if (
-      this.responseMode !== "blocking" ||
+      this.responseMode === "non_blocking" ||
       this.requestContext.task ||
       this.promoted ||
       this.cancelRequested ||
