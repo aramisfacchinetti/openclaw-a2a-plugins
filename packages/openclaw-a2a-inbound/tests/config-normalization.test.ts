@@ -158,3 +158,49 @@ test("publicBaseUrl is the only account readiness prerequisite", () => {
     /publicBaseUrl is required/,
   );
 });
+
+test("defaultInputModes rejects application/octet-stream and other unsupported values", () => {
+  for (const unsupportedMode of [
+    "application/octet-stream",
+    "image/png",
+  ]) {
+    assert.throws(
+      () =>
+        parseA2AInboundChannelConfig({
+          channels: {
+            a2a: {
+              accounts: {
+                default: {
+                  enabled: true,
+                  publicBaseUrl: "https://agents.example.com",
+                  defaultInputModes: ["text/plain", unsupportedMode],
+                },
+              },
+            },
+          },
+        }),
+      new RegExp(`defaultInputModes only supports .*${unsupportedMode.replace("/", "\\/")}`),
+    );
+  }
+});
+
+test("defaultInputModes accepts only supported text/json values", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          default: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            defaultInputModes: ["application/json", "text/plain", "application/json"],
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.accounts.default?.defaultInputModes, [
+    "application/json",
+    "text/plain",
+  ]);
+});

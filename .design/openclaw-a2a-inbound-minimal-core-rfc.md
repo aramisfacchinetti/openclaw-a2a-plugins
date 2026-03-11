@@ -1,14 +1,14 @@
 # RFC: Reduce `openclaw-a2a-inbound` To A Minimal Core A2A Surface
 
-Status: In Progress
+Status: In Progress (Phases 1-5 complete; Phase 6 partial)
 
 Date: 2026-03-09
 
-Last Updated: 2026-03-10
+Last Updated: 2026-03-11
 
 ## Summary
 
-This RFC now reflects the repository after the Phase 4 protocol and metadata cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, and serialized A2A payloads are aligned with the intended minimal-core contract.
+This RFC now reflects the repository after the Phase 5 content-handling cleanup. The public HTTP/plugin surface, the effective JSON-RPC method surface, and serialized A2A payloads are aligned with the intended minimal-core contract. The remaining work is Phase 6 cleanup around the final reduced runtime and test/document shape.
 
 The current codebase has completed the public contract and transport cleanup:
 
@@ -20,6 +20,8 @@ The current codebase has completed the public contract and transport cleanup:
 - `openclaw-a2a-inbound.describe` is removed
 - outbound file parts are no longer exposed through same-origin transport URLs
 - advertised agent-card defaults are fixed to `streaming = false` and `pushNotifications = false`
+- inbound A2A file parts are rejected at the request boundary with `invalidParams`
+- inbound file fetch/staging/media-context plumbing is removed
 
 The current codebase has completed the runtime and protocol cleanup:
 
@@ -31,10 +33,7 @@ The current codebase has completed the runtime and protocol cleanup:
 - vendor reply payload decoration is removed
 - push notification config methods are no longer part of the effective handler surface
 
-This document now records both:
-
-1. the minimal-core contract that is already implemented
-2. the remaining open work before the RFC is fully complete
+This document now records the minimal-core contract that is implemented in the current codebase.
 
 ## Decision
 
@@ -103,10 +102,10 @@ Breaking changes are acceptable. The repo is still pre-1.0 and the project instr
 - A2A tasks, events, messages, reply parts, and artifacts no longer emit `metadata.openclaw.*`.
 - Vendor reply metadata, vendor `data` parts, and the `reply-v1` schema marker are removed.
 - Vendor-only replies now fail with A2A `-32005`.
-
-### Remaining open work in the current codebase
-
-- decide and enforce the final inbound file-input policy for the minimal-core package
+- Inbound requests now accept only A2A `text` and `data` parts.
+- Any inbound A2A `file` part now fails at request preparation with A2A `invalidParams`.
+- Inbound requests no longer decode base64 file bytes, parse `file.uri`, fetch remote media, stage local media, or populate `MediaPath`/`MediaUrl`/`MediaType` fields in the OpenClaw inbound context.
+- `defaultInputModes` is schema- and parser-validated to `text/plain` and `application/json` only.
 
 ### Phase 3 runtime note
 
@@ -124,7 +123,7 @@ The package is now effectively at the intended minimal-core protocol surface:
 - removed optional methods are rejected instead of being silently reachable through internal switches
 - serialized A2A payloads no longer carry OpenClaw-specific metadata or vendor reply payloads
 
-The only remaining incomplete part of the RFC is the final inbound file-input policy.
+The minimal-core content contract is now fully enforced: inbound requests accept only text and structured data, and outbound responses surface only representable text/data.
 
 ## Public Contract As Of Now
 
@@ -180,9 +179,15 @@ Current defaults are:
 
 `application/octet-stream` is no longer advertised by default.
 
+Inbound content-policy note:
+
+- `defaultInputModes` only accepts `text/plain` and `application/json`
+- inbound A2A requests accept only `text` and `data` parts
+- any inbound `file` part is rejected with A2A `invalidParams`
+
 Important current implementation note:
 
-- clients may still negotiate `application/octet-stream`
+- clients may still negotiate `application/octet-stream` as an accepted output mode
 - the server will never emit a reachable outbound file URL or A2A `file` part
 - file-only, media-only, and vendor-only replies that leave nothing representable now fail with A2A `-32005`
 
@@ -211,14 +216,6 @@ Current public config rejects:
 - `capabilities`
 - `auth`
 - `taskStore`
-
-## Gaps Between Current State And Final RFC Target
-
-The final target described by this RFC is nearly reached. The remaining gap is:
-
-### Content handling cleanup still pending
-
-- decide whether inbound file inputs should remain accepted in the final minimal-core package
 
 ## Updated Phasing
 
@@ -275,16 +272,16 @@ Completed work:
 
 ### Phase 5: Finalize content handling
 
-Status: Partial
+Status: Complete
 
 Completed work:
 
 - removed outbound file transport
 - changed file-only outbound replies to fail instead of exposing dead links
-
-Still targeted:
-
-- decide and enforce the final inbound file-input policy for minimal core
+- locked the inbound contract to A2A `text` and `data` parts only
+- rejected inbound A2A `file` parts with A2A `invalidParams` before task creation or executor dispatch
+- removed inbound file normalization, remote fetch/staging, and media-context forwarding
+- restricted `defaultInputModes` to `text/plain` and `application/json` at schema and parser level
 
 ### Phase 6: Rewrite tests around the fully reduced runtime
 
@@ -321,15 +318,12 @@ Completed work:
 - no streaming/replay method surface
 - no push notification config method surface
 - no OpenClaw metadata extensions in A2A responses
-
-### Criteria not yet satisfied
-
 - final inbound file-input policy is enforced
 
 ## Follow-up Work
 
 The next updates to this RFC should happen when one of the following lands:
 
-- the final inbound file-input policy is decided and enforced
+- the remaining Phase 6 test/document cleanup is finished
 
-At that point this document can move from an in-progress RFC with one remaining policy decision to a cleaner final-state RFC or an implementation-complete design note.
+At that point this document can move from an in-progress RFC to a cleaner final-state RFC or an implementation-complete design note.

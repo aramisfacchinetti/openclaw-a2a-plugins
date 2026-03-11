@@ -40,12 +40,17 @@ test("channel schema removes legacy fields and keeps text/json defaults", () => 
   const accountsSchema = asRecord(rootProperties.accounts);
   const accountSchema = asRecord(accountsSchema.additionalProperties);
   const accountProperties = asRecord(accountSchema.properties);
+  const defaultInputModes = asRecord(accountProperties.defaultInputModes);
 
   assert.equal("restPath" in accountProperties, false);
   assert.equal("capabilities" in accountProperties, false);
   assert.equal("auth" in accountProperties, false);
   assert.equal("taskStore" in accountProperties, false);
-  assert.deepEqual(asRecord(accountProperties.defaultInputModes).default, [
+  assert.deepEqual(defaultInputModes.default, [
+    "text/plain",
+    "application/json",
+  ]);
+  assert.deepEqual(asRecord(defaultInputModes.items).enum, [
     "text/plain",
     "application/json",
   ]);
