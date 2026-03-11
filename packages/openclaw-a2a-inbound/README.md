@@ -29,6 +29,7 @@ openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
   - optional JSON-RPC methods such as `message/stream`, `tasks/resubscribe`, and task push-notification config methods
 - Default input modes: `["text/plain", "application/json"]`
 - Default output modes: `["text/plain", "application/json"]`
+- Inbound request parts: `text` and `data` only. Any inbound A2A `file` part is rejected with `invalidParams`.
 - Documented supported A2A methods:
   - `message/send`
   - `tasks/get`
@@ -51,6 +52,8 @@ The channel account contract is:
 - `skills`
 
 Legacy config fields such as `restPath`, `capabilities`, `auth`, and `taskStore` are rejected during config parsing.
+
+`defaultInputModes` is intentionally restricted to `text/plain` and `application/json`. Unsupported values such as `application/octet-stream` are rejected during config parsing instead of being silently advertised in the agent card.
 
 Removed optional methods are rejected at the JSON-RPC boundary instead of being routed through internal backdoors.
 

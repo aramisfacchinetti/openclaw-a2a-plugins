@@ -8,6 +8,7 @@ import type {
   TaskArtifactUpdateEvent,
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
+import { A2AError } from "@a2a-js/sdk/server";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
 import {
   createPluginRuntimeHarness,
@@ -356,6 +357,50 @@ test("former /files paths now fall through to the server 404 route", async () =>
         },
       },
     });
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+  }
+});
+
+
+test("jsonrpc rejects inbound file parts with invalidParams before execution", async () => {
+  let executed = false;
+  const harness = createServerHarness(async () => {
+    executed = true;
+  });
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const response = await postJsonRpc(baseUrl, "message/send", {
+      message: createUserMessage({
+        parts: [
+          {
+            kind: "file",
+            file: {
+              uri: "https://example.com/report.pdf",
+              mimeType: "application/pdf",
+              name: "report.pdf",
+            },
+          },
+        ],
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      jsonrpc: "2.0",
+      id: 1,
+      error: {
+        code: A2AError.invalidParams("unsupported").toJSONRPCError().code,
+        message:
+          "message.parts[0].kind=file is not supported; inbound A2A requests only accept text and data parts.",
+      },
+    });
+    assert.equal(executed, false);
   } finally {
     await closeHttpServer(routeServer);
     harness.close();
