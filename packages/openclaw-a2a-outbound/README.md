@@ -108,6 +108,35 @@ Supported `send` modes:
 
 When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`.
 
+## Reading Output Continuations
+
+This package returns continuation metadata under `summary.continuation`.
+
+- `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, and `can_watch` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
+- `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`.
+- Do not poll from conversation continuity.
+- The old flat `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch` fields are removed.
+
+Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
+
+```ts
+const task = result.summary.continuation?.task
+const conversation = result.summary.continuation?.conversation
+
+if (task) {
+  const followUp = task.task_handle
+    ? { action: "status", task_handle: task.task_handle }
+    : { action: "status", target_alias: "support", task_id: task.task_id }
+} else if (conversation) {
+  const followUp = {
+    action: "send",
+    target_alias: "support",
+    context_id: conversation.context_id,
+    parts: [{ kind: "text", text: "Start a related task in the same conversation." }],
+  }
+}
+```
+
 ## Examples
 
 ### Discover Available Targets
@@ -237,11 +266,21 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
-    "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
-    "task_id": "task-456",
-    "context_id": "ctx-456",
-    "status": "completed",
-    "can_watch": true
+    "continuation": {
+      "task": {
+        "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+        "task_id": "task-456",
+        "status": "completed",
+        "can_send": true,
+        "can_status": true,
+        "can_cancel": true,
+        "can_watch": true
+      },
+      "conversation": {
+        "context_id": "ctx-456",
+        "can_send": true
+      }
+    }
   },
   "raw": {
     "events": [
@@ -276,9 +315,24 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
 }
 ```
 
+```ts
+const task = result.summary.continuation?.task
+const conversation = result.summary.continuation?.conversation
+
+if (!task) {
+  throw new Error("expected a trackable delegated task")
+}
+
+if (task.can_watch) {
+  // `watch` is valid here.
+}
+
+const followUpContext = conversation?.context_id
+```
+
 ### Continue An Existing Remote Task With `task_handle`
 
-Use `send` again when a delegated task reaches `input-required` or asks for approval:
+Use `summary.continuation.task.task_handle` from the prior result when a delegated task reaches `input-required` or asks for approval:
 
 ```json
 {
@@ -295,7 +349,7 @@ Use `send` again when a delegated task reaches `input-required` or asks for appr
 
 ### Continue An Existing Remote Task With `task_id`
 
-If the handle is unavailable, `send.task_id` plus target routing continues the task:
+If `summary.continuation.task.task_handle` is unavailable, use `summary.continuation.task.task_id` plus target routing:
 
 ```json
 {
@@ -314,7 +368,7 @@ If the handle is unavailable, `send.task_id` plus target routing continues the t
 
 ### Start A New Task In An Existing Conversation
 
-Use `context_id` without `task_id` when the peer supports conversation continuity independent of a specific task:
+Use `summary.continuation.conversation.context_id` when the prior result has conversation continuity without task continuity:
 
 ```json
 {
@@ -329,6 +383,48 @@ Use `context_id` without `task_id` when the peer supports conversation continuit
   ]
 }
 ```
+
+```json
+{
+  "ok": true,
+  "operation": "remote_agent",
+  "action": "send",
+  "summary": {
+    "target_alias": "support",
+    "target_url": "https://support.example/",
+    "message_text": "Conversation continued. Start the next task when ready.",
+    "continuation": {
+      "conversation": {
+        "context_id": "ctx-456",
+        "can_send": true
+      }
+    }
+  },
+  "raw": {
+    "kind": "message"
+  }
+}
+```
+
+```ts
+const task = result.summary.continuation?.task
+const conversation = result.summary.continuation?.conversation
+
+if (task) {
+  throw new Error("expected a context-only continuation")
+}
+
+if (conversation) {
+  const followUp = {
+    action: "send",
+    target_alias: "support",
+    context_id: conversation.context_id,
+    parts: [{ kind: "text", text: "Start the next task in this conversation." }],
+  }
+}
+```
+
+Do not poll from conversation continuity.
 
 ### Check Task Status With `task_handle`
 
@@ -348,11 +444,21 @@ Use `context_id` without `task_id` when the peer supports conversation continuit
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
-    "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
-    "task_id": "task-456",
-    "context_id": "ctx-456",
-    "status": "completed",
-    "can_watch": true
+    "continuation": {
+      "task": {
+        "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+        "task_id": "task-456",
+        "status": "completed",
+        "can_send": true,
+        "can_status": true,
+        "can_cancel": true,
+        "can_watch": true
+      },
+      "conversation": {
+        "context_id": "ctx-456",
+        "can_send": true
+      }
+    }
   },
   "raw": {
     "kind": "task",
@@ -364,7 +470,24 @@ Use `context_id` without `task_id` when the peer supports conversation continuit
 }
 ```
 
-When a handle is expired or unavailable, retry with `target_alias` + `task_id`:
+```ts
+const task = result.summary.continuation?.task
+const conversation = result.summary.continuation?.conversation
+
+if (!task) {
+  throw new Error("status requires summary.continuation.task")
+}
+
+const nextStatus = task.task_handle
+  ? { action: "status", task_handle: task.task_handle }
+  : { action: "status", target_alias: "support", task_id: task.task_id }
+
+const nextSend = conversation
+  ? { action: "send", target_alias: "support", context_id: conversation.context_id }
+  : undefined
+```
+
+When `summary.continuation.task.task_handle` is expired or unavailable, retry with `target_alias` + `summary.continuation.task.task_id`:
 
 ```json
 {
@@ -374,7 +497,7 @@ When a handle is expired or unavailable, retry with `target_alias` + `task_id`:
 }
 ```
 
-`watch` and `cancel` use the same follow-up targeting rules:
+`watch` and `cancel` use the same follow-up targeting rules, and both require `summary.continuation.task` from a prior result:
 
 ```json
 { "action": "watch", "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0" }
