@@ -248,6 +248,7 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "action",
       "target_alias",
       "target_url",
+      "task_handle",
       "parts",
       "message_id",
       "task_id",
@@ -567,8 +568,9 @@ function validateSendInput(
 
   const hasExplicitTarget =
     input.target_alias !== undefined || input.target_url !== undefined;
+  const hasTaskHandle = input.task_handle !== undefined;
 
-  if (!hasExplicitTarget && !summary.hasDefaultTarget) {
+  if (!hasTaskHandle && !hasExplicitTarget && !summary.hasDefaultTarget) {
     errors.push(
       makeError(
         "",

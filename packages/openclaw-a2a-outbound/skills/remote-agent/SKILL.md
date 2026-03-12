@@ -8,7 +8,7 @@ metadata: {"openclaw": {"requires": {"config": ["plugins.entries.openclaw-a2a-ou
 
 If the plugin is not installed or configured yet, use the `a2a-delegation-setup` skill first.
 
-Use the `remote_agent` tool to delegate work to external A2A-compatible agents and manage delegated tasks.
+Use the `remote_agent` tool to delegate work to external A2A-compatible agents and manage delegated tasks. `send` is the only action to start a new remote turn or continue an existing one.
 
 ## When to delegate
 
@@ -40,7 +40,11 @@ Discover configured targets.
 
 ### send
 
-Send a request to a remote agent.
+Send a request to a remote agent. Use it for:
+
+- a brand-new remote task
+- a follow-up turn on an existing remote task
+- a new task inside an existing remote conversation
 
 ```json
 {
@@ -58,9 +62,25 @@ Send a request to a remote agent.
 
 - `parts` (required): non-empty array of `text`, `file`, or `data` parts.
 - `target_alias`: configured target name. Omit when a default target exists.
+- `task_handle`: preferred continuation key for `send`, `watch`, `status`, and `cancel`.
 - `task_id`: optional continuation id for `send`; for follow-up actions it identifies the remote task when no `task_handle` is available.
+- `context_id`: optional conversation continuation id for `send`. Use it with `task_id`, or by itself to start a new task in the same conversation.
 - `follow_updates`: when `true`, streams updates and returns the full event log.
 - `blocking`: only for non-stream `send`; do not combine it with `follow_updates=true`.
+
+Preferred continuation forms:
+
+```json
+{ "action": "send", "task_handle": "rah_abc123", "parts": [{ "kind": "text", "text": "Approved. Continue." }] }
+```
+
+```json
+{ "action": "send", "target_alias": "my-agent", "task_id": "task-123", "parts": [{ "kind": "text", "text": "Continue the task." }] }
+```
+
+```json
+{ "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "parts": [{ "kind": "text", "text": "Start a new task in the same conversation." }] }
+```
 
 ### status
 
@@ -88,7 +108,7 @@ Cancel a running task.
 
 ## Task handles
 
-After a successful `send`, the result includes a `task_handle` (prefixed `rah_`). Always prefer `task_handle` over `target_alias + task_id` for follow-up actions — the handle encodes the target and task identity in one opaque token. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a follow-up handle.
+After a successful `send`, the result usually includes a `task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. Always prefer `task_handle` over `target_alias + task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `task_handle`.
 
 ## watch vs status
 

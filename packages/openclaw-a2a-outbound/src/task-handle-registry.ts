@@ -9,6 +9,7 @@ export interface TaskHandleRecord {
   taskHandle: string;
   target: ResolvedTarget;
   taskId: string;
+  contextId?: string;
   createdAt: number;
   lastAccessedAt: number;
   expiresAt: number;
@@ -43,6 +44,7 @@ function cloneRecord(record: TaskHandleRecord): TaskHandleRecord {
     taskHandle: record.taskHandle,
     target: cloneTarget(record.target),
     taskId: record.taskId,
+    ...(record.contextId !== undefined ? { contextId: record.contextId } : {}),
     createdAt: record.createdAt,
     lastAccessedAt: record.lastAccessedAt,
     expiresAt: record.expiresAt,
@@ -102,7 +104,9 @@ export class TaskHandleRegistry {
     this.now = options.now ?? Date.now;
   }
 
-  create(input: Pick<TaskHandleRecord, "target" | "taskId">): TaskHandleRecord {
+  create(
+    input: Pick<TaskHandleRecord, "target" | "taskId" | "contextId">,
+  ): TaskHandleRecord {
     const now = this.now();
     this.pruneExpired(now);
 
@@ -110,6 +114,7 @@ export class TaskHandleRegistry {
       taskHandle: `rah_${randomUUID()}`,
       target: cloneTarget(input.target),
       taskId: input.taskId,
+      ...(input.contextId !== undefined ? { contextId: input.contextId } : {}),
       createdAt: now,
       lastAccessedAt: now,
       expiresAt: now + this.ttlMs,
@@ -136,7 +141,7 @@ export class TaskHandleRegistry {
 
   refresh(
     taskHandle: string,
-    input: Partial<Pick<TaskHandleRecord, "target" | "taskId">> = {},
+    input: Partial<Pick<TaskHandleRecord, "target" | "taskId" | "contextId">> = {},
   ): TaskHandleRecord {
     const now = this.now();
     const entry = this.requireLiveEntry(taskHandle, now);
@@ -144,6 +149,11 @@ export class TaskHandleRegistry {
       taskHandle: entry.taskHandle,
       target: cloneTarget(input.target ?? entry.target),
       taskId: input.taskId ?? entry.taskId,
+      ...(input.contextId !== undefined
+        ? { contextId: input.contextId }
+        : entry.contextId !== undefined
+          ? { contextId: entry.contextId }
+          : {}),
       createdAt: entry.createdAt,
       lastAccessedAt: now,
       expiresAt: now + this.ttlMs,
