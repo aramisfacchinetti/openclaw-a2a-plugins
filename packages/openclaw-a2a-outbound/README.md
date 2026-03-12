@@ -65,7 +65,7 @@ The plugin installs through the OpenClaw CLI, but the tool stays disabled until 
 }
 ```
 
-Call `list_targets` first to discover configured aliases and refreshed target-card metadata. Prefer `target_alias` over `target_url`; use `target_url` only when policy allows direct URL routing.
+Call `list_targets` first to discover configured aliases and refreshed peer-card metadata. Prefer `target_alias` over `target_url`; use `target_url` only when policy allows direct URL routing.
 
 ## Unified Tool Contract
 
@@ -92,11 +92,13 @@ Snake_case tool fields are translated internally to the A2A SDK camelCase reques
 
 ## Actions
 
-- `list_targets`: discover configured targets, aliases, examples, and hydrated card metadata.
+- `list_targets`: discover configured targets, aliases, examples, and hydrated peer-card metadata.
 - `send`: send one or more message parts to a remote agent, either as a new turn or as a follow-up turn on an existing task/conversation.
 - `watch`: resubscribe to a running delegated task and stream updates.
 - `status`: fetch the latest task snapshot.
 - `cancel`: request cancellation for a delegated task.
+
+Failed `send` and `sendStream` calls include `error.details.capability_diagnostics` so remote validation or content-type rejections can be compared against the stored peer card without blocking permissive runtime sends.
 
 Supported `send` modes:
 
@@ -129,16 +131,37 @@ When a delegated task pauses in `input-required` or an approval workflow, resume
         "examples": ["Summarize this incident and propose next steps."],
         "target_name": "Support Agent",
         "description": "Primary support lane",
-        "streaming_supported": true,
-        "skills": [
-          {
-            "id": "triage",
-            "name": "Incident Triage",
-            "description": "Summarize incidents and propose next actions.",
-            "tags": ["support"],
-            "examples": ["Summarize this incident and propose next steps."]
-          }
-        ]
+        "peer_card": {
+          "preferred_transport": "JSONRPC",
+          "additional_interfaces": [
+            {
+              "transport": "JSONRPC",
+              "url": "https://support.example/a2a/jsonrpc"
+            },
+            {
+              "transport": "HTTP+JSON",
+              "url": "https://support.example/a2a/rest"
+            }
+          ],
+          "capabilities": {
+            "streaming": true,
+            "push_notifications": true,
+            "state_transition_history": true
+          },
+          "default_input_modes": ["text/plain"],
+          "default_output_modes": ["text/plain"],
+          "skills": [
+            {
+              "id": "triage",
+              "name": "Incident Triage",
+              "description": "Summarize incidents and propose next actions.",
+              "tags": ["support"],
+              "examples": ["Summarize this incident and propose next steps."],
+              "input_modes": ["application/json"],
+              "output_modes": ["application/pdf"]
+            }
+          ]
+        }
       }
     ]
   },
@@ -146,7 +169,10 @@ When a delegated task pauses in `input-required` or an approval workflow, resume
     {
       "default": true,
       "tags": ["support"],
-      "examples": ["Summarize this incident and propose next steps."]
+      "examples": ["Summarize this incident and propose next steps."],
+      "card": {
+        "preferredTransport": "JSONRPC"
+      }
     }
   ]
 }

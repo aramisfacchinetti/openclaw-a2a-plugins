@@ -10,20 +10,45 @@ import {
 import type { A2ATargetInput } from "./schemas.js";
 import type { ResolvedTarget, SDKClientPool } from "./sdk-client-pool.js";
 
-export interface TargetCatalogSkillSummary {
+type AgentCardAdditionalInterface = NonNullable<
+  AgentCard["additionalInterfaces"]
+>[number];
+type AgentCardCapabilityExtension = NonNullable<
+  NonNullable<AgentCard["capabilities"]>["extensions"]
+>[number];
+type AgentCardSkill = NonNullable<AgentCard["skills"]>[number];
+
+export interface TargetCardAdditionalInterfaceSnapshot {
+  transport: AgentCardAdditionalInterface["transport"];
+  url: AgentCardAdditionalInterface["url"];
+}
+
+export interface TargetCardCapabilitiesSnapshot {
+  streaming?: boolean;
+  pushNotifications?: boolean;
+  stateTransitionHistory?: boolean;
+  extensions?: AgentCardCapabilityExtension[];
+}
+
+export interface TargetCardSkillSnapshot {
   id: string;
   name: string;
   description: string;
   tags: string[];
   examples: string[];
+  inputModes?: string[];
+  outputModes?: string[];
 }
 
-export interface TargetCardCacheEntry {
+export interface TargetCardSnapshot {
   displayName?: string;
   description?: string;
-  skillSummaries: TargetCatalogSkillSummary[];
-  streamingSupported?: boolean;
   preferredTransport?: string;
+  additionalInterfaces: TargetCardAdditionalInterfaceSnapshot[];
+  capabilities: TargetCardCapabilitiesSnapshot;
+  defaultInputModes: string[];
+  defaultOutputModes: string[];
+  skills: TargetCardSkillSnapshot[];
   lastRefreshedAt?: string;
   lastRefreshError?: ToolError;
 }
@@ -34,7 +59,7 @@ export interface TargetCatalogEntry {
   default: boolean;
   tags: string[];
   examples: string[];
-  card: TargetCardCacheEntry;
+  card: TargetCardSnapshot;
 }
 
 export interface TargetCatalogOptions {
@@ -65,57 +90,214 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
-function cloneSkillSummary(
-  summary: TargetCatalogSkillSummary,
-): TargetCatalogSkillSummary {
+function cloneStringArray(values: readonly string[]): string[] {
+  return [...values];
+}
+
+function normalizeStringArray(values: readonly unknown[] | undefined): string[] {
+  if (!values) {
+    return [];
+  }
+
+  const normalized = new Set<string>();
+
+  for (const value of values) {
+    if (!isNonEmptyString(value)) {
+      continue;
+    }
+
+    normalized.add(value.trim());
+  }
+
+  return [...normalized];
+}
+
+function cloneCapabilityExtension(
+  extension: AgentCardCapabilityExtension,
+): AgentCardCapabilityExtension {
+  return structuredClone(extension);
+}
+
+function cloneAdditionalInterfaceSnapshot(
+  snapshot: TargetCardAdditionalInterfaceSnapshot,
+): TargetCardAdditionalInterfaceSnapshot {
   return {
-    id: summary.id,
-    name: summary.name,
-    description: summary.description,
-    tags: [...summary.tags],
-    examples: [...summary.examples],
+    transport: snapshot.transport,
+    url: snapshot.url,
   };
 }
 
-function cloneCardCacheEntry(entry: TargetCardCacheEntry): TargetCardCacheEntry {
+function cloneCapabilitiesSnapshot(
+  snapshot: TargetCardCapabilitiesSnapshot,
+): TargetCardCapabilitiesSnapshot {
   return {
-    ...(entry.displayName !== undefined
-      ? { displayName: entry.displayName }
+    ...(typeof snapshot.streaming === "boolean"
+      ? { streaming: snapshot.streaming }
       : {}),
-    ...(entry.description !== undefined
-      ? { description: entry.description }
+    ...(typeof snapshot.pushNotifications === "boolean"
+      ? { pushNotifications: snapshot.pushNotifications }
       : {}),
-    skillSummaries: entry.skillSummaries.map(cloneSkillSummary),
-    ...(typeof entry.streamingSupported === "boolean"
-      ? { streamingSupported: entry.streamingSupported }
+    ...(typeof snapshot.stateTransitionHistory === "boolean"
+      ? { stateTransitionHistory: snapshot.stateTransitionHistory }
       : {}),
-    ...(entry.preferredTransport !== undefined
-      ? { preferredTransport: entry.preferredTransport }
-      : {}),
-    ...(entry.lastRefreshedAt !== undefined
-      ? { lastRefreshedAt: entry.lastRefreshedAt }
-      : {}),
-    ...(entry.lastRefreshError !== undefined
-      ? { lastRefreshError: entry.lastRefreshError }
+    ...(snapshot.extensions !== undefined
+      ? {
+          extensions: snapshot.extensions.map(cloneCapabilityExtension),
+        }
       : {}),
   };
 }
 
-function emptyCardCacheEntry(): TargetCardCacheEntry {
+function cloneSkillSnapshot(
+  snapshot: TargetCardSkillSnapshot,
+): TargetCardSkillSnapshot {
   return {
-    skillSummaries: [],
+    id: snapshot.id,
+    name: snapshot.name,
+    description: snapshot.description,
+    tags: cloneStringArray(snapshot.tags),
+    examples: cloneStringArray(snapshot.examples),
+    ...(snapshot.inputModes !== undefined
+      ? { inputModes: cloneStringArray(snapshot.inputModes) }
+      : {}),
+    ...(snapshot.outputModes !== undefined
+      ? { outputModes: cloneStringArray(snapshot.outputModes) }
+      : {}),
   };
 }
 
-function summarizeSkill(
-  skill: AgentCard["skills"][number],
-): TargetCatalogSkillSummary {
+function cloneToolError(error: ToolError): ToolError {
+  return structuredClone(error);
+}
+
+function cloneCardSnapshot(snapshot: TargetCardSnapshot): TargetCardSnapshot {
+  return {
+    ...(snapshot.displayName !== undefined
+      ? { displayName: snapshot.displayName }
+      : {}),
+    ...(snapshot.description !== undefined
+      ? { description: snapshot.description }
+      : {}),
+    ...(snapshot.preferredTransport !== undefined
+      ? { preferredTransport: snapshot.preferredTransport }
+      : {}),
+    additionalInterfaces: snapshot.additionalInterfaces.map(
+      cloneAdditionalInterfaceSnapshot,
+    ),
+    capabilities: cloneCapabilitiesSnapshot(snapshot.capabilities),
+    defaultInputModes: cloneStringArray(snapshot.defaultInputModes),
+    defaultOutputModes: cloneStringArray(snapshot.defaultOutputModes),
+    skills: snapshot.skills.map(cloneSkillSnapshot),
+    ...(snapshot.lastRefreshedAt !== undefined
+      ? { lastRefreshedAt: snapshot.lastRefreshedAt }
+      : {}),
+    ...(snapshot.lastRefreshError !== undefined
+      ? { lastRefreshError: cloneToolError(snapshot.lastRefreshError) }
+      : {}),
+  };
+}
+
+function emptyCardSnapshot(): TargetCardSnapshot {
+  return {
+    additionalInterfaces: [],
+    capabilities: {},
+    defaultInputModes: [],
+    defaultOutputModes: [],
+    skills: [],
+  };
+}
+
+function normalizeAdditionalInterfaces(
+  card: AgentCard,
+): TargetCardAdditionalInterfaceSnapshot[] {
+  if (!Array.isArray(card.additionalInterfaces)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const snapshots: TargetCardAdditionalInterfaceSnapshot[] = [];
+
+  for (const entry of card.additionalInterfaces) {
+    if (!isNonEmptyString(entry.transport) || !isNonEmptyString(entry.url)) {
+      continue;
+    }
+
+    const transport = entry.transport.trim() as AgentCardAdditionalInterface["transport"];
+    const url = entry.url.trim();
+    const key = `${transport}\u0000${url}`;
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    snapshots.push({ transport, url });
+  }
+
+  return snapshots;
+}
+
+function normalizeCapabilities(card: AgentCard): TargetCardCapabilitiesSnapshot {
+  const capabilities: TargetCardCapabilitiesSnapshot = {};
+
+  if (typeof card.capabilities?.streaming === "boolean") {
+    capabilities.streaming = card.capabilities.streaming;
+  }
+
+  if (typeof card.capabilities?.pushNotifications === "boolean") {
+    capabilities.pushNotifications = card.capabilities.pushNotifications;
+  }
+
+  if (typeof card.capabilities?.stateTransitionHistory === "boolean") {
+    capabilities.stateTransitionHistory = card.capabilities.stateTransitionHistory;
+  }
+
+  if (
+    Array.isArray(card.capabilities?.extensions) &&
+    card.capabilities.extensions.length > 0
+  ) {
+    capabilities.extensions = card.capabilities.extensions.map(
+      cloneCapabilityExtension,
+    );
+  }
+
+  return capabilities;
+}
+
+function normalizeSkill(skill: AgentCardSkill): TargetCardSkillSnapshot {
+  const inputModes = normalizeStringArray(skill.inputModes);
+  const outputModes = normalizeStringArray(skill.outputModes);
+
   return {
     id: skill.id,
     name: skill.name,
-    description: skill.description,
-    tags: [...skill.tags],
-    examples: [...(skill.examples ?? [])],
+    description:
+      isNonEmptyString(skill.description) ? skill.description.trim() : skill.name,
+    tags: normalizeStringArray(skill.tags),
+    examples: normalizeStringArray(skill.examples ?? []),
+    ...(inputModes.length > 0 ? { inputModes } : {}),
+    ...(outputModes.length > 0 ? { outputModes } : {}),
+  };
+}
+
+export function normalizeAgentCardSnapshot(
+  card: AgentCard,
+): Omit<TargetCardSnapshot, "lastRefreshedAt" | "lastRefreshError"> {
+  const skills = Array.isArray(card.skills) ? card.skills : [];
+
+  return {
+    ...(isNonEmptyString(card.name) ? { displayName: card.name.trim() } : {}),
+    ...(isNonEmptyString(card.description)
+      ? { description: card.description.trim() }
+      : {}),
+    ...(isNonEmptyString(card.preferredTransport)
+      ? { preferredTransport: card.preferredTransport.trim() }
+      : {}),
+    additionalInterfaces: normalizeAdditionalInterfaces(card),
+    capabilities: normalizeCapabilities(card),
+    defaultInputModes: normalizeStringArray(card.defaultInputModes),
+    defaultOutputModes: normalizeStringArray(card.defaultOutputModes),
+    skills: skills.map(normalizeSkill),
   };
 }
 
@@ -152,12 +334,9 @@ export class TargetCatalog {
 
   private readonly defaultTargetAlias: string | undefined;
 
-  private readonly cardCache = new Map<string, TargetCardCacheEntry>();
+  private readonly cardCache = new Map<string, TargetCardSnapshot>();
 
-  private readonly cardRefreshes = new Map<
-    string,
-    Promise<TargetCardCacheEntry>
-  >();
+  private readonly cardRefreshes = new Map<string, Promise<TargetCardSnapshot>>();
 
   constructor(options: TargetCatalogOptions) {
     this.config = options.config;
@@ -217,6 +396,11 @@ export class TargetCatalog {
     const normalizedAlias = alias.trim();
     const entry = this.targetsByAlias.get(normalizedAlias);
     return entry ? this.toCatalogEntry(entry) : undefined;
+  }
+
+  getCardSnapshot(normalizedBaseUrl: string): TargetCardSnapshot | undefined {
+    const existing = this.cardCache.get(normalizedBaseUrl);
+    return existing ? cloneCardSnapshot(existing) : undefined;
   }
 
   resolveAlias(alias: string): ResolvedTarget {
@@ -306,6 +490,17 @@ export class TargetCatalog {
     return this.applyCachedMetadata(target);
   }
 
+  recordAgentCard(target: ResolvedTarget, card: AgentCard): ResolvedTarget {
+    const refreshedAt = new Date().toISOString();
+    const next: TargetCardSnapshot = {
+      ...normalizeAgentCardSnapshot(card),
+      lastRefreshedAt: refreshedAt,
+    };
+
+    this.cardCache.set(target.baseUrl, next);
+    return this.applyCachedMetadata(target);
+  }
+
   private requireAlias(alias: string): ConfiguredTargetEntry {
     const normalizedAlias = alias.trim();
     const entry = this.targetsByAlias.get(normalizedAlias);
@@ -377,9 +572,9 @@ export class TargetCatalog {
     };
   }
 
-  private cardCacheSnapshot(normalizedBaseUrl: string): TargetCardCacheEntry {
+  private cardCacheSnapshot(normalizedBaseUrl: string): TargetCardSnapshot {
     const existing = this.cardCache.get(normalizedBaseUrl);
-    return cloneCardCacheEntry(existing ?? emptyCardCacheEntry());
+    return cloneCardSnapshot(existing ?? emptyCardSnapshot());
   }
 
   private applyCachedMetadata(target: ResolvedTarget): ResolvedTarget {
@@ -387,7 +582,7 @@ export class TargetCatalog {
     const displayName = target.displayName ?? cached?.displayName;
     const description = target.description ?? cached?.description;
     const streamingSupported =
-      target.streamingSupported ?? cached?.streamingSupported;
+      target.streamingSupported ?? cached?.capabilities.streaming;
 
     return {
       baseUrl: target.baseUrl,
@@ -403,7 +598,7 @@ export class TargetCatalog {
   private async loadCardMetadata(
     target: ResolvedTarget,
     options: TargetCatalogHydrationOptions,
-  ): Promise<TargetCardCacheEntry> {
+  ): Promise<TargetCardSnapshot> {
     const existing = this.cardCache.get(target.baseUrl);
 
     if (
@@ -411,19 +606,19 @@ export class TargetCatalog {
       (existing?.lastRefreshedAt !== undefined ||
         existing?.lastRefreshError !== undefined)
     ) {
-      return cloneCardCacheEntry(existing);
+      return cloneCardSnapshot(existing);
     }
 
     const inFlight = this.cardRefreshes.get(target.baseUrl);
     if (inFlight) {
-      return cloneCardCacheEntry(await inFlight);
+      return cloneCardSnapshot(await inFlight);
     }
 
     const refreshPromise = this.refreshCardMetadata(target);
     this.cardRefreshes.set(target.baseUrl, refreshPromise);
 
     try {
-      return cloneCardCacheEntry(await refreshPromise);
+      return cloneCardSnapshot(await refreshPromise);
     } finally {
       if (this.cardRefreshes.get(target.baseUrl) === refreshPromise) {
         this.cardRefreshes.delete(target.baseUrl);
@@ -433,46 +628,23 @@ export class TargetCatalog {
 
   private async refreshCardMetadata(
     target: ResolvedTarget,
-  ): Promise<TargetCardCacheEntry> {
+  ): Promise<TargetCardSnapshot> {
     const refreshedAt = new Date().toISOString();
     const previous = this.cardCache.get(target.baseUrl);
 
     try {
       const clientEntry = await this.clientPool.get(target);
       const card = await clientEntry.client.getAgentCard();
-      const next: TargetCardCacheEntry = {
-        ...(isNonEmptyString(card.name) ? { displayName: card.name } : {}),
-        ...(isNonEmptyString(card.description)
-          ? { description: card.description }
-          : {}),
-        skillSummaries: card.skills.map(summarizeSkill),
-        ...(typeof card.capabilities?.streaming === "boolean"
-          ? { streamingSupported: card.capabilities.streaming }
-          : {}),
-        ...(isNonEmptyString(card.preferredTransport)
-          ? { preferredTransport: card.preferredTransport }
-          : {}),
+      const next: TargetCardSnapshot = {
+        ...normalizeAgentCardSnapshot(card),
         lastRefreshedAt: refreshedAt,
       };
 
       this.cardCache.set(target.baseUrl, next);
       return next;
     } catch (error) {
-      const next: TargetCardCacheEntry = {
-        ...(previous?.displayName !== undefined
-          ? { displayName: previous.displayName }
-          : {}),
-        ...(previous?.description !== undefined
-          ? { description: previous.description }
-          : {}),
-        skillSummaries:
-          previous?.skillSummaries.map(cloneSkillSummary) ?? [],
-        ...(typeof previous?.streamingSupported === "boolean"
-          ? { streamingSupported: previous.streamingSupported }
-          : {}),
-        ...(previous?.preferredTransport !== undefined
-          ? { preferredTransport: previous.preferredTransport }
-          : {}),
+      const next: TargetCardSnapshot = {
+        ...cloneCardSnapshot(previous ?? emptyCardSnapshot()),
         lastRefreshedAt: refreshedAt,
         lastRefreshError: toToolError(error, fallbackErrorCode(error)),
       };

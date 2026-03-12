@@ -10,7 +10,8 @@ import type { RemoteAgentAction } from "./schemas.js";
 import type { ResolvedTarget } from "./sdk-client-pool.js";
 import type {
   TargetCatalogEntry,
-  TargetCatalogSkillSummary,
+  TargetCardCapabilitiesSnapshot,
+  TargetCardSnapshot,
 } from "./target-catalog.js";
 
 export const REMOTE_AGENT_OPERATION = "remote_agent" as const;
@@ -36,6 +37,30 @@ type ActionRawMap = {
   cancel: Task;
 };
 
+export interface TargetListPeerCardCapabilitiesSummary {
+  streaming?: boolean;
+  push_notifications?: boolean;
+  state_transition_history?: boolean;
+  extensions?: NonNullable<TargetCardCapabilitiesSnapshot["extensions"]>;
+}
+
+export interface TargetListPeerCardSummary {
+  preferred_transport?: string;
+  additional_interfaces: TargetCardSnapshot["additionalInterfaces"];
+  capabilities: TargetListPeerCardCapabilitiesSummary;
+  default_input_modes: string[];
+  default_output_modes: string[];
+  skills: Array<{
+    id: string;
+    name: string;
+    description: string;
+    tags: string[];
+    examples: string[];
+    input_modes?: string[];
+    output_modes?: string[];
+  }>;
+}
+
 export interface TargetListSummary {
   target_alias: string;
   target_url: string;
@@ -44,9 +69,7 @@ export interface TargetListSummary {
   examples: string[];
   target_name?: string;
   description?: string;
-  streaming_supported?: boolean;
-  preferred_transport?: string;
-  skills?: TargetCatalogSkillSummary[];
+  peer_card: TargetListPeerCardSummary;
   last_refreshed_at?: string;
   last_refresh_error?: ToolError;
 }
@@ -310,6 +333,52 @@ export function remoteAgentFailure<TAction extends string>(
 }
 
 function listTargetSummary(entry: TargetCatalogEntry): TargetListSummary {
+  const peerCard: TargetListPeerCardSummary = {
+    ...(entry.card.preferredTransport !== undefined
+      ? { preferred_transport: entry.card.preferredTransport }
+      : {}),
+    additional_interfaces: entry.card.additionalInterfaces.map((cardInterface) => ({
+      transport: cardInterface.transport,
+      url: cardInterface.url,
+    })),
+    capabilities: {
+      ...(typeof entry.card.capabilities.streaming === "boolean"
+        ? { streaming: entry.card.capabilities.streaming }
+        : {}),
+      ...(typeof entry.card.capabilities.pushNotifications === "boolean"
+        ? { push_notifications: entry.card.capabilities.pushNotifications }
+        : {}),
+      ...(typeof entry.card.capabilities.stateTransitionHistory === "boolean"
+        ? {
+            state_transition_history:
+              entry.card.capabilities.stateTransitionHistory,
+          }
+        : {}),
+      ...(entry.card.capabilities.extensions !== undefined
+        ? {
+            extensions: entry.card.capabilities.extensions.map((extension) =>
+              structuredClone(extension),
+            ),
+          }
+        : {}),
+    },
+    default_input_modes: [...entry.card.defaultInputModes],
+    default_output_modes: [...entry.card.defaultOutputModes],
+    skills: entry.card.skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      tags: [...skill.tags],
+      examples: [...skill.examples],
+      ...(skill.inputModes !== undefined
+        ? { input_modes: [...skill.inputModes] }
+        : {}),
+      ...(skill.outputModes !== undefined
+        ? { output_modes: [...skill.outputModes] }
+        : {}),
+    })),
+  };
+
   return {
     target_alias: entry.target.alias ?? "",
     target_url: entry.target.baseUrl,
@@ -322,25 +391,7 @@ function listTargetSummary(entry: TargetCatalogEntry): TargetListSummary {
     ...(entry.target.description !== undefined
       ? { description: entry.target.description }
       : {}),
-    ...(entry.card.streamingSupported !== undefined
-      ? { streaming_supported: entry.card.streamingSupported }
-      : entry.target.streamingSupported !== undefined
-        ? { streaming_supported: entry.target.streamingSupported }
-        : {}),
-    ...(entry.card.preferredTransport !== undefined
-      ? { preferred_transport: entry.card.preferredTransport }
-      : {}),
-    ...(entry.card.skillSummaries.length > 0
-      ? {
-          skills: entry.card.skillSummaries.map((skill) => ({
-            id: skill.id,
-            name: skill.name,
-            description: skill.description,
-            tags: [...skill.tags],
-            examples: [...skill.examples],
-          })),
-        }
-      : {}),
+    peer_card: peerCard,
     ...(entry.card.lastRefreshedAt !== undefined
       ? { last_refreshed_at: entry.card.lastRefreshedAt }
       : {}),
