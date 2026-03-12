@@ -46,15 +46,21 @@ Send a request to a remote agent.
 {
   "action": "send",
   "target_alias": "my-agent",
-  "input": "Summarize the latest quarterly report.",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Summarize the latest quarterly report."
+    }
+  ],
   "follow_updates": true
 }
 ```
 
-- `input` (required): the user text to send.
+- `parts` (required): non-empty array of `text`, `file`, or `data` parts.
 - `target_alias`: configured target name. Omit when a default target exists.
+- `task_id`: optional continuation id for `send`; for follow-up actions it identifies the remote task when no `task_handle` is available.
 - `follow_updates`: when `true`, streams updates and returns the full event log.
-- `attachments`: optional array of file or data attachments.
+- `blocking`: only for non-stream `send`; do not combine it with `follow_updates=true`.
 
 ### status
 
@@ -82,7 +88,7 @@ Cancel a running task.
 
 ## Task handles
 
-After a successful `send`, the result includes a `task_handle` (prefixed `rah_`). Always prefer `task_handle` over `target_alias + task_id` for follow-up actions — the handle encodes the target and task identity in one opaque token. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`.
+After a successful `send`, the result includes a `task_handle` (prefixed `rah_`). Always prefer `task_handle` over `target_alias + task_id` for follow-up actions — the handle encodes the target and task identity in one opaque token. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a follow-up handle.
 
 ## watch vs status
 

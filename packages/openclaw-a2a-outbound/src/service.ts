@@ -29,7 +29,7 @@ import {
 } from "./result-shape.js";
 import {
   buildRequestOptions,
-  normalizePlainIntentRequest,
+  normalizeSendRequest,
 } from "./request-normalization.js";
 import {
   createClientPool,
@@ -296,7 +296,6 @@ export class A2AOutboundService {
       createClientPool({
         defaultCardPath: this.config.defaults.cardPath,
         preferredTransports: this.config.defaults.preferredTransports,
-        acceptedOutputModes: this.config.policy.acceptedOutputModes,
         normalizeBaseUrl: this.config.policy.normalizeBaseUrl,
         enforceSupportedTransports:
           this.config.policy.enforceSupportedTransports,
@@ -516,9 +515,10 @@ export class A2AOutboundService {
     try {
       const resolved = await this.resolveSendTarget(input);
       target = resolved.target;
-      const normalized = normalizePlainIntentRequest(input, {
+      const normalized = normalizeSendRequest(input, {
         defaultTimeoutMs: this.config.defaults.timeoutMs,
         defaultServiceParameters: this.config.defaults.serviceParameters,
+        defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
         signal: options.signal,
       });
 
@@ -558,9 +558,10 @@ export class A2AOutboundService {
     try {
       const resolved = await this.resolveSendTarget(input);
       target = resolved.target;
-      const normalized = normalizePlainIntentRequest(input, {
+      const normalized = normalizeSendRequest(input, {
         defaultTimeoutMs: this.config.defaults.timeoutMs,
         defaultServiceParameters: this.config.defaults.serviceParameters,
+        defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
         signal: options.signal,
       });
 
