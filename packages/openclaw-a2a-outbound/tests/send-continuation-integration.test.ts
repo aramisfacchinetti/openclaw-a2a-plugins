@@ -19,20 +19,50 @@ function asSuccess(result: A2AToolResult): SuccessEnvelope {
   return result;
 }
 
+function taskContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<NonNullable<SuccessEnvelope["summary"]["continuation"]>["task"]> {
+  const task = summary.continuation?.task;
+
+  if (!task) {
+    throw new TypeError("expected task continuation");
+  }
+
+  return task;
+}
+
+function conversationContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<
+  NonNullable<SuccessEnvelope["summary"]["continuation"]>["conversation"]
+> {
+  const conversation = summary.continuation?.conversation;
+
+  if (!conversation) {
+    throw new TypeError("expected conversation continuation");
+  }
+
+  return conversation;
+}
+
 function taskHandleFromSummary(summary: SuccessEnvelope["summary"]): string {
-  if (typeof summary.task_handle !== "string") {
+  const task = taskContinuationFromSummary(summary);
+
+  if (typeof task.task_handle !== "string") {
     throw new TypeError("expected task_handle summary field");
   }
 
-  return summary.task_handle;
+  return task.task_handle;
 }
 
 function taskIdFromSummary(summary: SuccessEnvelope["summary"]): string {
-  if (typeof summary.task_id !== "string") {
+  const task = taskContinuationFromSummary(summary);
+
+  if (typeof task.task_id !== "string") {
     throw new TypeError("expected task_id summary field");
   }
 
-  return summary.task_id;
+  return task.task_id;
 }
 
 function asTask(raw: SuccessEnvelope["raw"]): Task {
@@ -199,11 +229,13 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   );
   const taskHandle = taskHandleFromSummary(firstSend.summary);
   const taskId = taskIdFromSummary(firstSend.summary);
+  const firstTask = taskContinuationFromSummary(firstSend.summary);
+  const firstConversation = conversationContinuationFromSummary(firstSend.summary);
 
   assert.equal(firstSend.action, "send");
-  assert.equal(firstSend.summary.status, "input-required");
-  assert.equal(firstSend.summary.task_id, taskId);
-  assert.equal(typeof firstSend.summary.context_id, "string");
+  assert.equal(firstTask.status, "input-required");
+  assert.equal(firstTask.task_id, taskId);
+  assert.equal(typeof firstConversation.context_id, "string");
 
   const secondSend = asSuccess(
     await service.execute({
@@ -212,12 +244,14 @@ test("integration: send resumes the same inbound task via task_handle", async (t
       parts: [{ kind: "text", text: "Approved. Continue and finish." }],
     }),
   );
+  const secondTask = taskContinuationFromSummary(secondSend.summary);
+  const secondConversation = conversationContinuationFromSummary(secondSend.summary);
 
   assert.equal(secondSend.action, "send");
-  assert.equal(secondSend.summary.task_handle, taskHandle);
-  assert.equal(secondSend.summary.task_id, taskId);
-  assert.equal(secondSend.summary.status, "completed");
-  assert.equal(secondSend.summary.context_id, firstSend.summary.context_id);
+  assert.equal(secondTask.task_handle, taskHandle);
+  assert.equal(secondTask.task_id, taskId);
+  assert.equal(secondTask.status, "completed");
+  assert.equal(secondConversation.context_id, firstConversation.context_id);
 
   const status = asSuccess(
     await service.execute({
@@ -230,9 +264,10 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   const userTurns = (rawTask.history ?? [])
     .filter((message) => message.role === "user")
     .map(readMessageText);
+  const statusTask = taskContinuationFromSummary(status.summary);
 
-  assert.equal(status.summary.task_id, taskId);
-  assert.equal(status.summary.status, "completed");
+  assert.equal(statusTask.task_id, taskId);
+  assert.equal(statusTask.status, "completed");
   assert.equal(callCount, 2);
   assert.deepEqual(userTurns, [
     "Please request approval first.",

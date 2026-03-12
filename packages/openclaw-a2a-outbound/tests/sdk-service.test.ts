@@ -107,12 +107,40 @@ function asFailure(result: A2AToolResult): FailureEnvelope {
   return result;
 }
 
+function taskContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<NonNullable<SuccessEnvelope["summary"]["continuation"]>["task"]> {
+  const task = summary.continuation?.task;
+
+  if (!task) {
+    throw new TypeError("expected task continuation");
+  }
+
+  return task;
+}
+
+function conversationContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<
+  NonNullable<SuccessEnvelope["summary"]["continuation"]>["conversation"]
+> {
+  const conversation = summary.continuation?.conversation;
+
+  if (!conversation) {
+    throw new TypeError("expected conversation continuation");
+  }
+
+  return conversation;
+}
+
 function taskHandleFromSummary(summary: SuccessEnvelope["summary"]): string {
-  if (typeof summary.task_handle !== "string") {
+  const task = taskContinuationFromSummary(summary);
+
+  if (typeof task.task_handle !== "string") {
     throw new TypeError("expected task_handle summary field");
   }
 
-  return summary.task_handle;
+  return task.task_handle;
 }
 
 function targetsFromSummary(summary: SuccessEnvelope["summary"]): TargetListSummary[] {
@@ -584,11 +612,11 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   const params = asRecord(peer.state.lastSendParams ?? {});
   const message = asRecord(params.message);
   const configuration = asRecord(params.configuration);
+  const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
-  assert.equal(success.summary.task_id, "task-continue-1");
-  assert.match(String(success.summary.task_handle), /^rah_/);
-  assert.equal(success.summary.context_id, "context-continue-1");
+  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(conversation.context_id, "context-continue-1");
   assert.equal(peer.state.sendCalls, 1);
   assert.equal(peer.state.streamCalls, 0);
   assert.equal(message.messageId, "message-1");
@@ -604,6 +632,42 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   ]);
   assert.deepEqual(configuration.acceptedOutputModes, ["application/json"]);
   assert.equal(configuration.blocking, false);
+});
+
+test("send preserves task continuation when message/send returns a message with taskId", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "message",
+      messageId: "agent-message-1",
+      role: "agent",
+      taskId: "task-continue-1",
+      contextId: "context-continue-1",
+      parts: [{ kind: "text", text: "continued" }],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    task_id: "task-continue-1",
+    context_id: "context-continue-1",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const success = asSuccess(result);
+  const task = taskContinuationFromSummary(success.summary);
+  const conversation = conversationContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(task.task_id, "task-continue-1");
+  assert.match(String(task.task_handle), /^rah_/);
+  assert.equal(task.can_watch, false);
+  assert.equal(conversation.context_id, "context-continue-1");
 });
 
 test("send remains permissive when file and data parts exceed advertised peer-card modes", async (t) => {
@@ -815,11 +879,11 @@ test("send with task_handle resolves target, task, and context from the handle",
   const success = asSuccess(result);
   const params = asRecord(peer.state.lastSendParams ?? {});
   const message = asRecord(params.message);
+  const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
-  assert.equal(success.summary.task_handle, handle);
-  assert.equal(success.summary.task_id, "task-handle-1");
-  assert.equal(success.summary.context_id, "ctx-handle-1");
+  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(conversation.context_id, "ctx-handle-1");
   assert.equal(message.taskId, "task-handle-1");
   assert.equal(message.contextId, "ctx-handle-1");
   assert.equal(peer.state.sendCalls, 1);
@@ -880,12 +944,17 @@ test("send with follow_updates=true emits send updates and returns a task_handle
 
   const success = asSuccess(result);
   const raw = asRecord(success.raw);
+  const task = taskContinuationFromSummary(success.summary);
+  const conversation = conversationContinuationFromSummary(success.summary);
+  const firstUpdateTask = updates[0]?.summary.continuation?.task;
+  const secondUpdateTask = updates[1]?.summary.continuation?.task;
 
   assert.equal(success.action, "send");
-  assert.equal(success.summary.task_id, "task-stream-1");
-  assert.equal(success.summary.context_id, "ctx-stream-1");
-  assert.equal(success.summary.status, "completed");
-  assert.match(taskHandleFromSummary(success.summary), /^rah_/);
+  assert.equal(task.task_id, "task-stream-1");
+  assert.equal(task.status, "completed");
+  assert.equal(task.can_watch, true);
+  assert.match(String(task.task_handle), /^rah_/);
+  assert.equal(conversation.context_id, "ctx-stream-1");
   assert.equal(peer.state.streamCalls, 1);
   assert.equal(peer.state.sendCalls, 0);
   assert.ok(Array.isArray(raw.events));
@@ -893,9 +962,14 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(updates.length, 2);
   assert.equal(updates[0]?.action, "send");
   assert.equal(updates[0]?.phase, "update");
-  assert.equal(updates[0]?.summary.context_id, "ctx-stream-1");
-  assert.equal(updates[1]?.summary.context_id, "ctx-stream-1");
-  assert.equal(updates[1]?.summary.status, "completed");
+  assert.equal(firstUpdateTask?.task_id, "task-stream-1");
+  assert.equal(firstUpdateTask?.status, "submitted");
+  assert.match(String(firstUpdateTask?.task_handle), /^rah_/);
+  assert.equal(updates[0]?.summary.continuation?.conversation?.context_id, "ctx-stream-1");
+  assert.equal(secondUpdateTask?.task_id, "task-stream-1");
+  assert.equal(secondUpdateTask?.status, "completed");
+  assert.equal(secondUpdateTask?.task_handle, task.task_handle);
+  assert.equal(updates[1]?.summary.continuation?.conversation?.context_id, "ctx-stream-1");
 });
 
 test("sendStream failures also include capability_diagnostics", async (t) => {
@@ -1014,20 +1088,30 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
 
   const success = asSuccess(result);
   const raw = asRecord(success.raw);
+  const task = taskContinuationFromSummary(success.summary);
+  const conversation = conversationContinuationFromSummary(success.summary);
+  const firstUpdateTask = updates[0]?.summary.continuation?.task;
+  const secondUpdateTask = updates[1]?.summary.continuation?.task;
 
   assert.equal(success.action, "watch");
-  assert.equal(success.summary.task_id, "task-watch-1");
-  assert.equal(success.summary.context_id, "ctx-watch-1");
-  assert.equal(success.summary.status, "completed");
-  assert.equal(success.summary.task_handle, handle);
+  assert.equal(task.task_id, "task-watch-1");
+  assert.equal(task.status, "completed");
+  assert.equal(task.task_handle, handle);
+  assert.equal(task.can_watch, true);
+  assert.equal(conversation.context_id, "ctx-watch-1");
   assert.equal(peer.state.resubscribeCalls, 1);
   assert.ok(Array.isArray(raw.events));
   assert.equal((raw.events as unknown[]).length, 2);
   assert.equal(updates.length, 2);
   assert.equal(updates[0]?.action, "watch");
-  assert.equal(updates[0]?.summary.context_id, "ctx-watch-1");
-  assert.equal(updates[1]?.summary.context_id, "ctx-watch-1");
-  assert.equal(updates[1]?.summary.status, "completed");
+  assert.equal(firstUpdateTask?.task_id, "task-watch-1");
+  assert.equal(firstUpdateTask?.status, "working");
+  assert.equal(firstUpdateTask?.task_handle, handle);
+  assert.equal(updates[0]?.summary.continuation?.conversation?.context_id, "ctx-watch-1");
+  assert.equal(secondUpdateTask?.task_id, "task-watch-1");
+  assert.equal(secondUpdateTask?.status, "completed");
+  assert.equal(secondUpdateTask?.task_handle, handle);
+  assert.equal(updates[1]?.summary.continuation?.conversation?.context_id, "ctx-watch-1");
 });
 
 test("status and cancel both work from task_handle context", async (t) => {
@@ -1079,16 +1163,23 @@ test("status and cancel both work from task_handle context", async (t) => {
 
   const status = asSuccess(statusResult);
   const cancel = asSuccess(cancelResult);
+  const statusTask = taskContinuationFromSummary(status.summary);
+  const cancelTask = taskContinuationFromSummary(cancel.summary);
+  const statusConversation = conversationContinuationFromSummary(status.summary);
+  const cancelConversation = conversationContinuationFromSummary(cancel.summary);
 
   assert.equal(status.action, "status");
-  assert.equal(status.summary.task_handle, handle);
-  assert.equal(status.summary.task_id, "task-follow-up-1");
-  assert.equal(status.summary.context_id, "ctx-follow-up-1");
-  assert.equal(status.summary.status, "completed");
+  assert.equal(statusTask.task_handle, handle);
+  assert.equal(statusTask.task_id, "task-follow-up-1");
+  assert.equal(statusTask.status, "completed");
+  assert.equal(statusTask.can_watch, false);
+  assert.equal(statusConversation.context_id, "ctx-follow-up-1");
   assert.equal(cancel.action, "cancel");
-  assert.equal(cancel.summary.task_handle, handle);
-  assert.equal(cancel.summary.context_id, "ctx-follow-up-1");
-  assert.equal(cancel.summary.status, "canceled");
+  assert.equal(cancelTask.task_handle, handle);
+  assert.equal(cancelTask.task_id, "task-follow-up-1");
+  assert.equal(cancelTask.status, "canceled");
+  assert.equal(cancelTask.can_watch, false);
+  assert.equal(cancelConversation.context_id, "ctx-follow-up-1");
   assert.equal(peer.state.getCalls, 1);
   assert.equal(peer.state.cancelCalls, 1);
   assert.equal(peer.state.lastGetTaskParams?.id, "task-follow-up-1");
@@ -1120,10 +1211,11 @@ test("send with context_id only starts a new task in an existing conversation", 
   const success = asSuccess(result);
   const params = asRecord(peer.state.lastSendParams ?? {});
   const message = asRecord(params.message);
+  const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
-  assert.equal(success.summary.context_id, "context-continue-1");
-  assert.equal("task_id" in success.summary, false);
+  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(conversation.context_id, "context-continue-1");
   assert.equal(message.contextId, "context-continue-1");
   assert.equal("taskId" in message, false);
 });

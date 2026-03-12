@@ -78,15 +78,31 @@ export interface RemoteAgentSummary {
   target_alias?: string;
   target_name?: string;
   target_url?: string;
-  task_handle?: string;
-  task_id?: string;
-  context_id?: string;
-  status?: string;
   message_text?: string;
   artifacts?: Artifact[];
-  can_watch?: boolean;
+  continuation?: RemoteAgentContinuationSummary;
   streaming_supported?: boolean;
   targets?: TargetListSummary[];
+}
+
+export interface TaskContinuationSummary {
+  task_handle?: string;
+  task_id: string;
+  status?: string;
+  can_send: true;
+  can_status: true;
+  can_cancel: true;
+  can_watch: boolean;
+}
+
+export interface ConversationContinuationSummary {
+  context_id: string;
+  can_send: true;
+}
+
+export interface RemoteAgentContinuationSummary {
+  task?: TaskContinuationSummary;
+  conversation?: ConversationContinuationSummary;
 }
 
 export type SuccessEnvelope<TAction extends RemoteAgentAction = RemoteAgentAction> =
@@ -183,22 +199,52 @@ export interface SummaryTaskContext {
   taskHandle?: string;
 }
 
-function withTaskContext(
+function continuationSummary(
+  target: ResolvedTarget,
+  context: SummaryTaskContext & { status?: string },
+): RemoteAgentContinuationSummary | undefined {
+  const task: TaskContinuationSummary | undefined =
+    context.taskId !== undefined
+      ? {
+          task_id: context.taskId,
+          ...(context.taskHandle !== undefined
+            ? { task_handle: context.taskHandle }
+            : {}),
+          ...(context.status !== undefined ? { status: context.status } : {}),
+          can_send: true,
+          can_status: true,
+          can_cancel: true,
+          can_watch: target.streamingSupported === true,
+        }
+      : undefined;
+  const conversation: ConversationContinuationSummary | undefined =
+    context.contextId !== undefined
+      ? {
+          context_id: context.contextId,
+          can_send: true,
+        }
+      : undefined;
+
+  if (task === undefined && conversation === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(task !== undefined ? { task } : {}),
+    ...(conversation !== undefined ? { conversation } : {}),
+  };
+}
+
+function withContinuationContext(
+  target: ResolvedTarget,
   summary: RemoteAgentSummary,
-  context: SummaryTaskContext,
+  context: SummaryTaskContext & { status?: string },
 ): RemoteAgentSummary {
-  const taskId = context.taskId;
-  const contextId = context.contextId;
-  const taskHandle = context.taskHandle;
+  const continuation = continuationSummary(target, context);
 
   return {
     ...summary,
-    ...(taskId !== undefined ? { task_id: taskId } : {}),
-    ...(contextId !== undefined ? { context_id: contextId } : {}),
-    ...(taskHandle !== undefined ? { task_handle: taskHandle } : {}),
-    ...(taskId !== undefined || taskHandle !== undefined
-      ? { can_watch: true }
-      : {}),
+    ...(continuation !== undefined ? { continuation } : {}),
   };
 }
 
@@ -209,15 +255,18 @@ function messageSummary(
 ): RemoteAgentSummary {
   const messageText = extractMessageText(raw);
 
-  return withTaskContext(
+  return withContinuationContext(
+    target,
     {
       ...baseSummary(target),
       ...(messageText !== undefined ? { message_text: messageText } : {}),
     },
     {
-      taskId: raw.taskId ?? context.taskId,
+      ...(raw.taskId !== undefined ? { taskId: raw.taskId } : {}),
       contextId: raw.contextId ?? context.contextId,
-      taskHandle: context.taskHandle,
+      ...(raw.taskId !== undefined && context.taskHandle !== undefined
+        ? { taskHandle: context.taskHandle }
+        : {}),
     },
   );
 }
@@ -230,11 +279,10 @@ function taskSummary(
   const messageText = extractTaskText(raw);
   const artifacts = extractArtifacts(raw);
 
-  return withTaskContext(
+  return withContinuationContext(
+    target,
     {
       ...baseSummary(target),
-      task_id: raw.id,
-      status: raw.status.state,
       ...(messageText !== undefined ? { message_text: messageText } : {}),
       ...(artifacts !== undefined ? { artifacts } : {}),
     },
@@ -242,6 +290,7 @@ function taskSummary(
       taskId: raw.id,
       contextId: raw.contextId ?? context.contextId,
       taskHandle: context.taskHandle,
+      status: raw.status.state,
     },
   );
 }
@@ -251,7 +300,8 @@ function artifactUpdateSummary(
   raw: TaskArtifactUpdateEvent,
   context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
-  return withTaskContext(
+  return withContinuationContext(
+    target,
     {
       ...baseSummary(target),
       artifacts: [
@@ -290,15 +340,16 @@ export function summarizeStreamEvent(
     case "task":
       return taskSummary(target, event, context);
     case "status-update":
-      return withTaskContext(
+      return withContinuationContext(
+        target,
         {
           ...baseSummary(target),
-          status: event.status.state,
         },
         {
           taskId: event.taskId ?? context.taskId,
           contextId: event.contextId ?? context.contextId,
           taskHandle: context.taskHandle,
+          status: event.status.state,
         },
       );
     case "artifact-update":

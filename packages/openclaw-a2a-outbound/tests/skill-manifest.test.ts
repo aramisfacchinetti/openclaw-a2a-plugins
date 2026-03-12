@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs'
 
 const manifestPath = new URL('../openclaw.plugin.json', import.meta.url)
 const skillPath = new URL('../skills/remote-agent/SKILL.md', import.meta.url)
+const readmePath = new URL('../README.md', import.meta.url)
 
 test('manifest declares skills field', () => {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
@@ -45,17 +46,27 @@ test('SKILL.md teaches target_alias and task_handle preference', () => {
   assert.ok(content.includes('task_handle'))
 })
 
-test('SKILL.md forbids inferring task continuity from context_id-only results', () => {
+test('SKILL.md documents summary.continuation task vs conversation branching', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('`summary.continuation.task`'))
+  assert.ok(content.includes('`summary.continuation.conversation`'))
+  assert.ok(
+    content.includes(
+      'Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action.',
+    ),
+  )
+})
+
+test('SKILL.md forbids inferring task continuity from conversation-only results', () => {
   const content = readFileSync(skillPath, 'utf8')
   assert.ok(
     content.includes(
-      '`context_id` only: conversation continuity only. Use it only with `send` to start a new task in the same conversation.',
+      'Never infer or synthesize `summary.continuation.task` from `summary.continuation.conversation`',
     ),
   )
-  assert.ok(content.includes('Never infer or synthesize `task_id` from `context_id`'))
   assert.ok(
     content.includes(
-      'Do not call `watch`, `status`, or `cancel` from a result that has only `context_id`.',
+      'Do not call `watch`, `status`, or `cancel` from a result that has only `summary.continuation.conversation`.',
     ),
   )
 })
@@ -64,12 +75,24 @@ test('SKILL.md documents fail-fast behavior for non-trackable continuations', ()
   const content = readFileSync(skillPath, 'utf8')
   assert.ok(
     content.includes(
-      'If lifecycle tracking is required, fail fast when the peer returns only a non-trackable conversation continuation.',
+      'If lifecycle tracking is required, fail fast when the peer returns only `summary.continuation.conversation`.',
     ),
   )
   assert.ok(
     content.includes(
-      'If the result includes `context_id` without `task_handle` or `task_id`, there is no task lifecycle to poll, watch, or cancel.',
+      'If the result includes only `summary.continuation.conversation`, there is no task lifecycle to poll, watch, or cancel.',
+    ),
+  )
+})
+
+test('README documents the nested continuation contract and migration rule', () => {
+  const content = readFileSync(readmePath, 'utf8')
+  assert.ok(content.includes('`summary.continuation.task`'))
+  assert.ok(content.includes('`summary.continuation.conversation`'))
+  assert.ok(content.includes('Do not poll from conversation continuity.'))
+  assert.ok(
+    content.includes(
+      'The old flat `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch` fields are removed.',
     ),
   )
 })

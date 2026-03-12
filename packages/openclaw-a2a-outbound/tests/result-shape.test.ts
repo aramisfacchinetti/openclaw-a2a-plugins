@@ -18,7 +18,7 @@ function target(): ResolvedTarget {
   };
 }
 
-test("sendSuccess exposes context_id for raw messages and fallback task context", () => {
+test("sendSuccess exposes only conversation continuation for context-only message replies", () => {
   const result = sendSuccess(
     target(),
     {
@@ -34,12 +34,48 @@ test("sendSuccess exposes context_id for raw messages and fallback task context"
     },
   );
 
-  assert.equal(result.summary.task_id, "task-1");
-  assert.equal(result.summary.task_handle, "rah_123");
-  assert.equal(result.summary.context_id, "context-1");
+  assert.deepEqual(result.summary.continuation, {
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  });
 });
 
-test("statusSuccess exposes context_id for raw tasks", () => {
+test("sendSuccess preserves task continuation when a message payload includes taskId", () => {
+  const result = sendSuccess(
+    target(),
+    {
+      kind: "message",
+      messageId: "message-1",
+      role: "agent",
+      taskId: "task-1",
+      contextId: "context-1",
+      parts: [{ kind: "text", text: "continued" }],
+    },
+    {
+      taskId: "task-1",
+      taskHandle: "rah_123",
+    },
+  );
+
+  assert.deepEqual(result.summary.continuation, {
+    task: {
+      task_handle: "rah_123",
+      task_id: "task-1",
+      can_send: true,
+      can_status: true,
+      can_cancel: true,
+      can_watch: false,
+    },
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  });
+});
+
+test("statusSuccess exposes nested task and conversation continuations for raw tasks", () => {
   const result = statusSuccess(
     target(),
     {
@@ -55,12 +91,24 @@ test("statusSuccess exposes context_id for raw tasks", () => {
     },
   );
 
-  assert.equal(result.summary.task_id, "task-1");
-  assert.equal(result.summary.task_handle, "rah_123");
-  assert.equal(result.summary.context_id, "context-1");
+  assert.deepEqual(result.summary.continuation, {
+    task: {
+      task_handle: "rah_123",
+      task_id: "task-1",
+      status: "completed",
+      can_send: true,
+      can_status: true,
+      can_cancel: true,
+      can_watch: false,
+    },
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  });
 });
 
-test("streamUpdate exposes context_id for status and artifact events", () => {
+test("streamUpdate exposes nested continuations for status and artifact events", () => {
   const status = streamUpdate("watch", target(), {
     kind: "status-update",
     taskId: "task-1",
@@ -82,8 +130,33 @@ test("streamUpdate exposes context_id for status and artifact events", () => {
     lastChunk: false,
   });
 
-  assert.equal(status.summary.context_id, "context-1");
-  assert.equal(artifact.summary.context_id, "context-1");
+  assert.deepEqual(status.summary.continuation, {
+    task: {
+      task_id: "task-1",
+      status: "working",
+      can_send: true,
+      can_status: true,
+      can_cancel: true,
+      can_watch: false,
+    },
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  });
+  assert.deepEqual(artifact.summary.continuation, {
+    task: {
+      task_id: "task-1",
+      can_send: true,
+      can_status: true,
+      can_cancel: true,
+      can_watch: false,
+    },
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  });
   assert.deepEqual(artifact.summary.artifacts?.[0]?.parts, [
     { kind: "text", text: "partial" },
   ]);

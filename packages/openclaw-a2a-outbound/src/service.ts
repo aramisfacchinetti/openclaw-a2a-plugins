@@ -326,8 +326,8 @@ async function consumeStream<T extends StreamingAction>(
     state.events.push(event);
     state.taskContext = mergeTaskContext(state.taskContext, taskContextFromEvent(event));
     onEvent?.(event);
-    state.latestSummary = summarizeStreamEvent(target, event);
-    onUpdate?.(streamUpdate(action, target, event));
+    state.latestSummary = summarizeStreamEvent(target, event, state.taskContext);
+    onUpdate?.(streamUpdate(action, target, event, state.taskContext));
   }
 }
 
