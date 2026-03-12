@@ -57,6 +57,7 @@ export interface RemoteAgentSummary {
   target_url?: string;
   task_handle?: string;
   task_id?: string;
+  context_id?: string;
   status?: string;
   message_text?: string;
   artifacts?: Artifact[];
@@ -153,14 +154,24 @@ function baseSummary(target: ResolvedTarget): RemoteAgentSummary {
   };
 }
 
+export interface SummaryTaskContext {
+  taskId?: string;
+  contextId?: string;
+  taskHandle?: string;
+}
+
 function withTaskContext(
   summary: RemoteAgentSummary,
-  taskId: string | undefined,
-  taskHandle: string | undefined,
+  context: SummaryTaskContext,
 ): RemoteAgentSummary {
+  const taskId = context.taskId;
+  const contextId = context.contextId;
+  const taskHandle = context.taskHandle;
+
   return {
     ...summary,
     ...(taskId !== undefined ? { task_id: taskId } : {}),
+    ...(contextId !== undefined ? { context_id: contextId } : {}),
     ...(taskHandle !== undefined ? { task_handle: taskHandle } : {}),
     ...(taskId !== undefined || taskHandle !== undefined
       ? { can_watch: true }
@@ -171,46 +182,51 @@ function withTaskContext(
 function messageSummary(
   target: ResolvedTarget,
   raw: Message,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
+  const messageText = extractMessageText(raw);
+
   return withTaskContext(
     {
       ...baseSummary(target),
-      ...(extractMessageText(raw) !== undefined
-        ? { message_text: extractMessageText(raw) }
-        : {}),
+      ...(messageText !== undefined ? { message_text: messageText } : {}),
     },
-    raw.taskId,
-    taskHandle,
+    {
+      taskId: raw.taskId ?? context.taskId,
+      contextId: raw.contextId ?? context.contextId,
+      taskHandle: context.taskHandle,
+    },
   );
 }
 
 function taskSummary(
   target: ResolvedTarget,
   raw: Task,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
+  const messageText = extractTaskText(raw);
+  const artifacts = extractArtifacts(raw);
+
   return withTaskContext(
     {
       ...baseSummary(target),
       task_id: raw.id,
       status: raw.status.state,
-      ...(extractTaskText(raw) !== undefined
-        ? { message_text: extractTaskText(raw) }
-        : {}),
-      ...(extractArtifacts(raw) !== undefined
-        ? { artifacts: extractArtifacts(raw) }
-        : {}),
+      ...(messageText !== undefined ? { message_text: messageText } : {}),
+      ...(artifacts !== undefined ? { artifacts } : {}),
     },
-    raw.id,
-    taskHandle,
+    {
+      taskId: raw.id,
+      contextId: raw.contextId ?? context.contextId,
+      taskHandle: context.taskHandle,
+    },
   );
 }
 
 function artifactUpdateSummary(
   target: ResolvedTarget,
   raw: TaskArtifactUpdateEvent,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
   return withTaskContext(
     {
@@ -232,32 +248,38 @@ function artifactUpdateSummary(
         }),
       ],
     },
-    raw.taskId,
-    taskHandle,
+    {
+      taskId: raw.taskId ?? context.taskId,
+      contextId: raw.contextId ?? context.contextId,
+      taskHandle: context.taskHandle,
+    },
   );
 }
 
 export function summarizeStreamEvent(
   target: ResolvedTarget,
   event: A2AStreamEventData,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
   switch (event.kind) {
     case "message":
-      return messageSummary(target, event, taskHandle);
+      return messageSummary(target, event, context);
     case "task":
-      return taskSummary(target, event, taskHandle);
+      return taskSummary(target, event, context);
     case "status-update":
       return withTaskContext(
         {
           ...baseSummary(target),
           status: event.status.state,
         },
-        event.taskId,
-        taskHandle,
+        {
+          taskId: event.taskId ?? context.taskId,
+          contextId: event.contextId ?? context.contextId,
+          taskHandle: context.taskHandle,
+        },
       );
     case "artifact-update":
-      return artifactUpdateSummary(target, event, taskHandle);
+      return artifactUpdateSummary(target, event, context);
   }
 }
 
@@ -343,13 +365,13 @@ export function listTargetsSuccess(
 export function sendSuccess(
   target: ResolvedTarget,
   raw: Message | Task,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<"send"> {
   return successEnvelope(
     "send",
     raw.kind === "task"
-      ? taskSummary(target, raw, taskHandle)
-      : messageSummary(target, raw, taskHandle),
+      ? taskSummary(target, raw, context)
+      : messageSummary(target, raw, context),
     raw,
   );
 }
@@ -358,7 +380,7 @@ function streamSuccess<TAction extends StreamingAction>(
   action: TAction,
   target: ResolvedTarget,
   events: A2AStreamEventData[],
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<TAction> {
   const finalEvent = events.at(-1);
 
@@ -368,7 +390,7 @@ function streamSuccess<TAction extends StreamingAction>(
 
   return successEnvelope(
     action,
-    summarizeStreamEvent(target, finalEvent, taskHandle),
+    summarizeStreamEvent(target, finalEvent, context),
     {
       events,
       finalEvent,
@@ -379,46 +401,47 @@ function streamSuccess<TAction extends StreamingAction>(
 export function sendStreamSuccess(
   target: ResolvedTarget,
   events: A2AStreamEventData[],
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<"send"> {
-  return streamSuccess("send", target, events, taskHandle);
+  return streamSuccess("send", target, events, context);
 }
 
 export function watchSuccess(
   target: ResolvedTarget,
   events: A2AStreamEventData[],
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<"watch"> {
-  return streamSuccess("watch", target, events, taskHandle);
+  return streamSuccess("watch", target, events, context);
 }
 
 export function statusSuccess(
   target: ResolvedTarget,
   raw: Task,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<"status"> {
-  return successEnvelope("status", taskSummary(target, raw, taskHandle), raw);
+  return successEnvelope("status", taskSummary(target, raw, context), raw);
 }
 
 export function cancelSuccess(
   target: ResolvedTarget,
   raw: Task,
-  taskHandle?: string,
+  context: SummaryTaskContext = {},
 ): SuccessEnvelope<"cancel"> {
-  return successEnvelope("cancel", taskSummary(target, raw, taskHandle), raw);
+  return successEnvelope("cancel", taskSummary(target, raw, context), raw);
 }
 
 export function streamUpdate<TAction extends StreamingAction>(
   action: TAction,
   target: ResolvedTarget,
   raw: A2AStreamEventData,
+  context: SummaryTaskContext = {},
 ): StreamUpdateEnvelope<TAction> {
   return {
     ok: true,
     operation: REMOTE_AGENT_OPERATION,
     action,
     phase: "update",
-    summary: summarizeStreamEvent(target, raw),
+    summary: summarizeStreamEvent(target, raw, context),
     raw,
   };
 }

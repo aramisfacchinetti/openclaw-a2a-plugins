@@ -233,6 +233,44 @@ test("normalizeSendRequest maps ids and per-call configuration fields", () => {
   });
 });
 
+test("normalizeSendRequest still generates a fresh message id for continuation sends", () => {
+  const first = normalizeSendRequest(
+    {
+      action: "send",
+      task_id: "task-1",
+      context_id: "context-1",
+      parts: [{ kind: "text", text: "first follow-up" }],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: [],
+    },
+  );
+  const second = normalizeSendRequest(
+    {
+      action: "send",
+      task_id: "task-1",
+      context_id: "context-1",
+      parts: [{ kind: "text", text: "second follow-up" }],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: [],
+    },
+  );
+
+  assert.equal(first.sendParams.message.taskId, "task-1");
+  assert.equal(first.sendParams.message.contextId, "context-1");
+  assert.equal(second.sendParams.message.taskId, "task-1");
+  assert.equal(second.sendParams.message.contextId, "context-1");
+  assert.notEqual(
+    first.sendParams.message.messageId,
+    second.sendParams.message.messageId,
+  );
+});
+
 test("normalizeSendRequest applies plugin default accepted output modes only when omitted", () => {
   const inherited = normalizeSendRequest(
     {

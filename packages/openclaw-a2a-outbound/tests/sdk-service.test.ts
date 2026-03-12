@@ -544,6 +544,9 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   const configuration = asRecord(params.configuration);
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.task_id, "task-continue-1");
+  assert.match(String(success.summary.task_handle), /^rah_/);
+  assert.equal(success.summary.context_id, "context-continue-1");
   assert.equal(peer.state.sendCalls, 1);
   assert.equal(peer.state.streamCalls, 0);
   assert.equal(message.messageId, "message-1");
@@ -559,6 +562,54 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   ]);
   assert.deepEqual(configuration.acceptedOutputModes, ["application/json"]);
   assert.equal(configuration.blocking, false);
+});
+
+test("send with task_handle resolves target, task, and context from the handle", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "message",
+      messageId: "agent-message-1",
+      role: "agent",
+      contextId: "ctx-handle-1",
+      parts: [{ kind: "text", text: "continued" }],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-handle-1",
+    contextId: "ctx-handle-1",
+  }).taskHandle;
+
+  const { service } = buildService(
+    {},
+    {
+      taskHandleRegistry,
+    },
+  );
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: handle,
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const message = asRecord(params.message);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.task_handle, handle);
+  assert.equal(success.summary.task_id, "task-handle-1");
+  assert.equal(success.summary.context_id, "ctx-handle-1");
+  assert.equal(message.taskId, "task-handle-1");
+  assert.equal(message.contextId, "ctx-handle-1");
+  assert.equal(peer.state.sendCalls, 1);
 });
 
 test("send with follow_updates=true emits send updates and returns a task_handle", async (t) => {
@@ -619,6 +670,7 @@ test("send with follow_updates=true emits send updates and returns a task_handle
 
   assert.equal(success.action, "send");
   assert.equal(success.summary.task_id, "task-stream-1");
+  assert.equal(success.summary.context_id, "ctx-stream-1");
   assert.equal(success.summary.status, "completed");
   assert.match(taskHandleFromSummary(success.summary), /^rah_/);
   assert.equal(peer.state.streamCalls, 1);
@@ -628,6 +680,8 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(updates.length, 2);
   assert.equal(updates[0]?.action, "send");
   assert.equal(updates[0]?.phase, "update");
+  assert.equal(updates[0]?.summary.context_id, "ctx-stream-1");
+  assert.equal(updates[1]?.summary.context_id, "ctx-stream-1");
   assert.equal(updates[1]?.summary.status, "completed");
 });
 
@@ -667,6 +721,7 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
   const handle = taskHandleRegistry.create({
     target: resolvedTarget(peer, { alias: "support" }),
     taskId: "task-watch-1",
+    contextId: "ctx-watch-1",
   }).taskHandle;
 
   const { service } = buildService(
@@ -694,6 +749,7 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
 
   assert.equal(success.action, "watch");
   assert.equal(success.summary.task_id, "task-watch-1");
+  assert.equal(success.summary.context_id, "ctx-watch-1");
   assert.equal(success.summary.status, "completed");
   assert.equal(success.summary.task_handle, handle);
   assert.equal(peer.state.resubscribeCalls, 1);
@@ -701,6 +757,8 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
   assert.equal((raw.events as unknown[]).length, 2);
   assert.equal(updates.length, 2);
   assert.equal(updates[0]?.action, "watch");
+  assert.equal(updates[0]?.summary.context_id, "ctx-watch-1");
+  assert.equal(updates[1]?.summary.context_id, "ctx-watch-1");
   assert.equal(updates[1]?.summary.status, "completed");
 });
 
@@ -757,14 +815,49 @@ test("status and cancel both work from task_handle context", async (t) => {
   assert.equal(status.action, "status");
   assert.equal(status.summary.task_handle, handle);
   assert.equal(status.summary.task_id, "task-follow-up-1");
+  assert.equal(status.summary.context_id, "ctx-follow-up-1");
   assert.equal(status.summary.status, "completed");
   assert.equal(cancel.action, "cancel");
   assert.equal(cancel.summary.task_handle, handle);
+  assert.equal(cancel.summary.context_id, "ctx-follow-up-1");
   assert.equal(cancel.summary.status, "canceled");
   assert.equal(peer.state.getCalls, 1);
   assert.equal(peer.state.cancelCalls, 1);
   assert.equal(peer.state.lastGetTaskParams?.id, "task-follow-up-1");
   assert.equal(peer.state.lastGetTaskParams?.historyLength, 2);
+});
+
+test("send with context_id only starts a new task in an existing conversation", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "message",
+      messageId: "message-context-1",
+      role: "agent",
+      contextId: "context-continue-1",
+      parts: [{ kind: "text", text: "conversation continued" }],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    context_id: "context-continue-1",
+    parts: [{ kind: "text", text: "start another task in this conversation" }],
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const message = asRecord(params.message);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.context_id, "context-continue-1");
+  assert.equal("task_id" in success.summary, false);
+  assert.equal(message.contextId, "context-continue-1");
+  assert.equal("taskId" in message, false);
 });
 
 test("list_targets hydrates card metadata automatically", async (t) => {
@@ -824,6 +917,105 @@ test("send fails validation when no target can be resolved", async () => {
   assert.equal(failure.error.code, "VALIDATION_ERROR");
 });
 
+test("send with task_handle rejects explicit target mismatches", async (t) => {
+  const peerOne = await startPeer();
+  const peerTwo = await startPeer();
+  t.after(() => peerOne.server.close());
+  t.after(() => peerTwo.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peerOne, { alias: "support" }),
+    taskId: "task-1",
+  }).taskHandle;
+
+  const { service } = buildService(
+    {
+      targets: [
+        configuredTarget(peerOne, { alias: "support", default: true }),
+        configuredTarget(peerTwo, { alias: "billing" }),
+      ],
+    },
+    { taskHandleRegistry },
+  );
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: handle,
+    target_alias: "billing",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const failure = asFailure(result);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+  assert.equal(peerOne.state.sendCalls, 0);
+  assert.equal(peerTwo.state.sendCalls, 0);
+});
+
+test("send with task_handle rejects task mismatches", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-1",
+  }).taskHandle;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: handle,
+    task_id: "task-2",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const failure = asFailure(result);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+  assert.equal(peer.state.sendCalls, 0);
+});
+
+test("send with task_handle rejects context mismatches when the handle knows the context", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-1",
+    contextId: "context-1",
+  }).taskHandle;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: handle,
+    context_id: "context-2",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const failure = asFailure(result);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+  assert.equal(peer.state.sendCalls, 0);
+});
+
 test("watch returns an actionable failure when the target is known not to support streaming", async (t) => {
   const peer = await startPeer({
     streaming: false,
@@ -880,6 +1072,23 @@ test("status with unknown task_handle returns UNKNOWN_TASK_HANDLE with suggested
   assert.equal(details.suggested_action, "send");
 });
 
+test("send with unknown task_handle returns UNKNOWN_TASK_HANDLE with suggested_action", async () => {
+  const { service } = buildService();
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: "rah_does-not-exist",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "UNKNOWN_TASK_HANDLE");
+  assert.equal(details.suggested_action, "send");
+});
+
 test("status with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hint", async () => {
   let now = 10_000;
   const taskHandleRegistry = createTaskHandleRegistry({
@@ -910,6 +1119,44 @@ test("status with expired task_handle returns EXPIRED_TASK_HANDLE with recovery 
   const details = asRecord(failure.error.details);
 
   assert.equal(failure.action, "status");
+  assert.equal(failure.error.code, "EXPIRED_TASK_HANDLE");
+  assert.ok(Array.isArray(details.suggested_actions));
+  assert.ok((details.suggested_actions as string[]).includes("status"));
+  assert.ok((details.suggested_actions as string[]).includes("send"));
+  assert.equal(typeof details.hint, "string");
+});
+
+test("send with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hint", async () => {
+  let now = 20_000;
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 100,
+    maxEntries: 100,
+    now: () => now,
+  });
+  const handle = taskHandleRegistry.create({
+    target: {
+      baseUrl: "https://peer.example/",
+      cardPath: "/.well-known/agent-card.json",
+      preferredTransports: ["JSONRPC", "HTTP+JSON"],
+      alias: "support",
+    },
+    taskId: "task-expired-2",
+  }).taskHandle;
+
+  now = 20_200;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+
+  const result = await service.execute({
+    action: "send",
+    task_handle: handle,
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "send");
   assert.equal(failure.error.code, "EXPIRED_TASK_HANDLE");
   assert.ok(Array.isArray(details.suggested_actions));
   assert.ok((details.suggested_actions as string[]).includes("status"));
