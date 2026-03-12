@@ -53,6 +53,8 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
   }
 
   const jsonRpcUrl = resolvePublicUrl(account.publicBaseUrl, account.jsonRpcPath);
+  const normalizedInputModes = [...account.defaultInputModes];
+  const normalizedOutputModes = [...account.defaultOutputModes];
 
   return {
     name: account.label,
@@ -63,19 +65,28 @@ function buildAgentCard(account: A2AInboundAccountConfig): AgentCard {
     version: PLUGIN_VERSION,
     url: jsonRpcUrl,
     preferredTransport: "JSONRPC",
+    additionalInterfaces: [
+      {
+        transport: "JSONRPC",
+        url: jsonRpcUrl,
+      },
+    ],
     skills: account.skills.map((skill) => ({
       id: skill.id,
       name: skill.name,
       description: skill.description ?? skill.name,
       tags: [...skill.tags],
       examples: [...skill.examples],
+      inputModes: [...normalizedInputModes],
+      outputModes: [...normalizedOutputModes],
     })),
     capabilities: {
       pushNotifications: false,
       streaming: true,
+      stateTransitionHistory: false,
     },
-    defaultInputModes: [...account.defaultInputModes],
-    defaultOutputModes: [...account.defaultOutputModes],
+    defaultInputModes: normalizedInputModes,
+    defaultOutputModes: normalizedOutputModes,
   };
 }
 

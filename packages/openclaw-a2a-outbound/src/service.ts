@@ -8,6 +8,10 @@ import type {
 } from "@a2a-js/sdk";
 import { UnsupportedOperationError } from "@a2a-js/sdk/client";
 import {
+  evaluateSendCompatibility,
+  type CapabilityDiagnostics,
+} from "./capability-diagnostics.js";
+import {
   parseA2AOutboundPluginConfig,
   type A2AOutboundPluginConfig,
 } from "./config.js";
@@ -451,9 +455,20 @@ export class A2AOutboundService {
 
   private async resolveClient(target: ResolvedTarget): Promise<ResolvedClientContext> {
     const clientEntry = await this.clientPool.get(target);
+    let resolvedTarget = target;
+
+    try {
+      const card = await clientEntry.client.getAgentCard();
+      resolvedTarget = this.targetCatalog.recordAgentCard(target, card);
+    } catch (error) {
+      log(this.logger, "warn", "a2a.remote_agent.target_card.refresh_error", {
+        target,
+        error: toToolError(error, fallbackErrorCode(error)),
+      });
+    }
 
     return {
-      target,
+      target: resolvedTarget,
       clientEntry,
     };
   }
@@ -513,11 +528,11 @@ export class A2AOutboundService {
         );
       }
 
-      const clientEntry = await this.clientPool.get(handleRecord.target);
+      const clientResolution = await this.resolveClient(handleRecord.target);
 
       return {
-        target: handleRecord.target,
-        clientEntry,
+        target: clientResolution.target,
+        clientEntry: clientResolution.clientEntry,
         taskId: handleRecord.taskId,
         ...("context_id" in input && input.context_id !== undefined
           ? { contextId: input.context_id }
@@ -535,12 +550,12 @@ export class A2AOutboundService {
       throw missingTargetContextError(input.action);
     }
 
-    const clientEntry = await this.clientPool.get(target);
+    const clientResolution = await this.resolveClient(target);
 
     if (input.task_id !== undefined) {
       return {
-        target,
-        clientEntry,
+        target: clientResolution.target,
+        clientEntry: clientResolution.clientEntry,
         taskId: input.task_id,
         ...("context_id" in input && input.context_id !== undefined
           ? { contextId: input.context_id }
@@ -550,8 +565,8 @@ export class A2AOutboundService {
 
     if (input.action === "send") {
       return {
-        target,
-        clientEntry,
+        target: clientResolution.target,
+        clientEntry: clientResolution.clientEntry,
         ...("context_id" in input && input.context_id !== undefined
           ? { contextId: input.context_id }
           : {}),
@@ -627,6 +642,7 @@ export class A2AOutboundService {
   ): Promise<A2AToolResult> {
     const span = startSpan(this.tracer, "a2a.remote_agent.send");
     let target: ResolvedTarget | undefined;
+    let capabilityDiagnostics: CapabilityDiagnostics | undefined;
 
     try {
       const resolved = await this.resolveTaskContext(input);
@@ -646,6 +662,11 @@ export class A2AOutboundService {
           signal: options.signal,
         },
       );
+      capabilityDiagnostics = evaluateSendCompatibility(
+        input,
+        normalized.sendParams.configuration?.acceptedOutputModes ?? [],
+        this.targetCatalog.getCardSnapshot(target.baseUrl),
+      );
 
       const raw = await resolved.clientEntry.client.sendMessage(
         normalized.sendParams,
@@ -662,7 +683,13 @@ export class A2AOutboundService {
 
       return sendSuccess(target, raw, taskContext);
     } catch (error) {
-      const toolError = toToolError(error, fallbackErrorCode(error));
+      let toolError = toToolError(error, fallbackErrorCode(error));
+
+      if (capabilityDiagnostics !== undefined) {
+        toolError = withErrorDetails(toolError, {
+          capability_diagnostics: capabilityDiagnostics,
+        });
+      }
 
       log(this.logger, "error", "a2a.remote_agent.send.error", {
         target,
@@ -681,6 +708,7 @@ export class A2AOutboundService {
   ): Promise<A2AToolResult> {
     const span = startSpan(this.tracer, "a2a.remote_agent.send_stream");
     let target: ResolvedTarget | undefined;
+    let capabilityDiagnostics: CapabilityDiagnostics | undefined;
     const state: StreamState = {
       events: [],
       taskContext: {},
@@ -704,6 +732,11 @@ export class A2AOutboundService {
           defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
           signal: options.signal,
         },
+      );
+      capabilityDiagnostics = evaluateSendCompatibility(
+        input,
+        normalized.sendParams.configuration?.acceptedOutputModes ?? [],
+        this.targetCatalog.getCardSnapshot(target.baseUrl),
       );
 
       await consumeStream(
@@ -736,6 +769,12 @@ export class A2AOutboundService {
       );
     } catch (error) {
       let toolError = toToolError(error, fallbackErrorCode(error));
+
+      if (capabilityDiagnostics !== undefined) {
+        toolError = withErrorDetails(toolError, {
+          capability_diagnostics: capabilityDiagnostics,
+        });
+      }
 
       if (state.events.length > 0 && state.latestSummary) {
         toolError = withErrorDetails(toolError, {
@@ -833,7 +872,11 @@ export class A2AOutboundService {
       }
       state.taskContext = mergeTaskContext(state.taskContext, resolved);
 
-      if (resolved.target.streamingSupported === false) {
+      const peerCard = this.targetCatalog.getCardSnapshot(resolved.target.baseUrl);
+      if (
+        peerCard?.capabilities.streaming === false ||
+        (peerCard === undefined && resolved.target.streamingSupported === false)
+      ) {
         throw streamingNotSupportedError(resolved.target, resolved.taskId);
       }
 

@@ -60,11 +60,26 @@ function startCardPeer(options: StartCardPeerOptions = {}): Promise<StartedCardP
             protocolVersion: "0.3.0",
             version: "0.1.0",
             url: `${baseUrl}/a2a/jsonrpc`,
-            preferredTransport: "HTTP+JSON",
+            preferredTransport: "JSONRPC",
+            additionalInterfaces: [
+              {
+                transport: "JSONRPC",
+                url: `${baseUrl}/a2a/jsonrpc`,
+              },
+              {
+                transport: "HTTP+JSON",
+                url: `${baseUrl}/a2a/rest`,
+              },
+            ],
             capabilities: {
               streaming: true,
-              pushNotifications: false,
-              stateTransitionHistory: false,
+              pushNotifications: true,
+              stateTransitionHistory: true,
+              extensions: [
+                {
+                  uri: "https://example.com/extensions/audit",
+                },
+              ],
             },
             defaultInputModes: ["text/plain"],
             defaultOutputModes: ["text/plain"],
@@ -75,6 +90,8 @@ function startCardPeer(options: StartCardPeerOptions = {}): Promise<StartedCardP
                 description: "Classifies incoming requests",
                 tags: ["support", "routing"],
                 examples: ["Route this ticket"],
+                inputModes: ["application/json"],
+                outputModes: ["application/pdf"],
               },
             ],
           },
@@ -361,12 +378,82 @@ test("successful card hydration populates cached card metadata", async (t) => {
     hydrated.card.description,
     "Routes and resolves support requests",
   );
-  assert.equal(hydrated.card.preferredTransport, "HTTP+JSON");
-  assert.equal(hydrated.card.streamingSupported, true);
-  assert.equal(hydrated.card.skillSummaries.length, 1);
-  assert.equal(hydrated.card.skillSummaries[0].name, "Ticket Triage");
+  assert.equal(hydrated.card.preferredTransport, "JSONRPC");
+  assert.deepEqual(hydrated.card.additionalInterfaces, [
+    {
+      transport: "JSONRPC",
+      url: `${peer.baseUrl}/a2a/jsonrpc`,
+    },
+    {
+      transport: "HTTP+JSON",
+      url: `${peer.baseUrl}/a2a/rest`,
+    },
+  ]);
+  assert.deepEqual(hydrated.card.capabilities, {
+    streaming: true,
+    pushNotifications: true,
+    stateTransitionHistory: true,
+    extensions: [
+      {
+        uri: "https://example.com/extensions/audit",
+      },
+    ],
+  });
+  assert.deepEqual(hydrated.card.defaultInputModes, ["text/plain"]);
+  assert.deepEqual(hydrated.card.defaultOutputModes, ["text/plain"]);
+  assert.equal(hydrated.card.skills.length, 1);
+  assert.equal(hydrated.card.skills[0].name, "Ticket Triage");
+  assert.deepEqual(hydrated.card.skills[0].inputModes, ["application/json"]);
+  assert.deepEqual(hydrated.card.skills[0].outputModes, ["application/pdf"]);
   assert.ok(hydrated.card.lastRefreshedAt);
   assert.equal(peer.state.cardRequests, 1);
+});
+
+test("card snapshots are cloned deeply when read from the catalog", async (t) => {
+  const peer = await startCardPeer();
+  t.after(() => peer.server.close());
+
+  const catalog = buildCatalog({
+    targets: [
+      {
+        alias: "support",
+        baseUrl: peer.baseUrl,
+      },
+    ],
+  });
+
+  const hydrated = await catalog.hydrateConfiguredTarget("support");
+  hydrated.card.additionalInterfaces[0]!.url = "https://mutated.example/jsonrpc";
+  hydrated.card.capabilities.extensions?.push({
+    uri: "https://mutated.example/extensions/extra",
+  });
+  hydrated.card.defaultInputModes.push("application/pdf");
+  hydrated.card.defaultOutputModes.push("application/pdf");
+  hydrated.card.skills[0]!.inputModes?.push("text/markdown");
+  hydrated.card.skills[0]!.outputModes?.push("text/csv");
+
+  const fresh = catalog.getEntry("support");
+
+  assert.ok(fresh);
+  assert.deepEqual(fresh.card.additionalInterfaces, [
+    {
+      transport: "JSONRPC",
+      url: `${peer.baseUrl}/a2a/jsonrpc`,
+    },
+    {
+      transport: "HTTP+JSON",
+      url: `${peer.baseUrl}/a2a/rest`,
+    },
+  ]);
+  assert.deepEqual(fresh.card.capabilities.extensions, [
+    {
+      uri: "https://example.com/extensions/audit",
+    },
+  ]);
+  assert.deepEqual(fresh.card.defaultInputModes, ["text/plain"]);
+  assert.deepEqual(fresh.card.defaultOutputModes, ["text/plain"]);
+  assert.deepEqual(fresh.card.skills[0]?.inputModes, ["application/json"]);
+  assert.deepEqual(fresh.card.skills[0]?.outputModes, ["application/pdf"]);
 });
 
 test("repeated card hydration reuses cached metadata without another card request", async (t) => {
@@ -420,14 +507,14 @@ test("hydrateAllConfigured populates reachable targets and records errors for un
 
   assert.ok(reachable);
   assert.equal(reachable.card.displayName, "Support Agent");
-  assert.equal(reachable.card.skillSummaries.length, 1);
-  assert.equal(reachable.card.streamingSupported, true);
+  assert.equal(reachable.card.skills.length, 1);
+  assert.equal(reachable.card.capabilities.streaming, true);
   assert.ok(reachable.card.lastRefreshedAt);
   assert.equal(reachable.card.lastRefreshError, undefined);
 
   assert.ok(unreachable);
   assert.equal(unreachable.card.displayName, undefined);
-  assert.equal(unreachable.card.skillSummaries.length, 0);
+  assert.equal(unreachable.card.skills.length, 0);
   assert.ok(unreachable.card.lastRefreshError);
   assert.ok(unreachable.card.lastRefreshedAt);
 });
@@ -459,7 +546,7 @@ test("card refresh failures are recorded without breaking configured resolution"
   assert.equal(resolvedAfter.alias, "support");
   assert.equal(resolvedAfter.description, "Configured fallback");
   assert.equal(hydrated.card.displayName, undefined);
-  assert.equal(hydrated.card.skillSummaries.length, 0);
+  assert.equal(hydrated.card.skills.length, 0);
   assert.equal(hydrated.card.lastRefreshError?.code, "A2A_SDK_ERROR");
   assert.match(hydrated.card.lastRefreshError?.message ?? "", /agent card/i);
   assert.equal(peer.state.cardRequests, 1);

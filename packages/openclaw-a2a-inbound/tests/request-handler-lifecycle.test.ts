@@ -40,26 +40,38 @@ import {
 
 function createAgentCard(): AgentCard {
   const account = createTestAccount();
+  const jsonRpcUrl = new URL(account.jsonRpcPath, account.publicBaseUrl).toString();
+  const inputModes = [...account.defaultInputModes];
+  const outputModes = [...account.defaultOutputModes];
 
   return {
     name: account.label,
     description: account.description ?? account.label,
     protocolVersion: account.protocolVersion,
     version: "test",
-    url: new URL(account.jsonRpcPath, account.publicBaseUrl).toString(),
+    url: jsonRpcUrl,
     preferredTransport: "JSONRPC",
+    additionalInterfaces: [
+      {
+        transport: "JSONRPC",
+        url: jsonRpcUrl,
+      },
+    ],
     capabilities: {
       pushNotifications: false,
       streaming: true,
+      stateTransitionHistory: false,
     },
-    defaultInputModes: [...account.defaultInputModes],
-    defaultOutputModes: [...account.defaultOutputModes],
+    defaultInputModes: inputModes,
+    defaultOutputModes: outputModes,
     skills: account.skills.map((skill) => ({
       id: skill.id,
       name: skill.name,
       description: skill.description ?? skill.name,
       tags: [...skill.tags],
       examples: [...skill.examples],
+      inputModes: [...inputModes],
+      outputModes: [...outputModes],
     })),
   };
 }

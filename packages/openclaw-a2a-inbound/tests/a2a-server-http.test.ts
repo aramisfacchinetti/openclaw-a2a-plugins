@@ -112,7 +112,7 @@ function parseSseJsonRpcEvents(body: string): Array<{
     });
 }
 
-test("served agent card exposes the minimal JSON-RPC transport and capabilities", async () => {
+test("served agent card exposes normalized transports, capabilities, and mode metadata", async () => {
   const harness = createServerHarness(async () => {});
   const routeServer = createServer((req, res) => {
     void harness.handle(req, res);
@@ -132,6 +132,7 @@ test("served agent card exposes the minimal JSON-RPC transport and capabilities"
     assert.deepEqual(agentCard.capabilities, {
       pushNotifications: false,
       streaming: true,
+      stateTransitionHistory: false,
     });
     assert.deepEqual(agentCard.defaultInputModes, [
       "text/plain",
@@ -141,10 +142,20 @@ test("served agent card exposes the minimal JSON-RPC transport and capabilities"
       "text/plain",
       "application/json",
     ]);
-    assert.ok(
-      agentCard.additionalInterfaces === undefined ||
-        agentCard.additionalInterfaces.length === 0,
-    );
+    assert.deepEqual(agentCard.additionalInterfaces, [
+      {
+        transport: "JSONRPC",
+        url: new URL(harness.account.jsonRpcPath, harness.account.publicBaseUrl).toString(),
+      },
+    ]);
+    assert.deepEqual(agentCard.skills?.[0]?.inputModes, [
+      "text/plain",
+      "application/json",
+    ]);
+    assert.deepEqual(agentCard.skills?.[0]?.outputModes, [
+      "text/plain",
+      "application/json",
+    ]);
   } finally {
     await closeHttpServer(routeServer);
     harness.close();

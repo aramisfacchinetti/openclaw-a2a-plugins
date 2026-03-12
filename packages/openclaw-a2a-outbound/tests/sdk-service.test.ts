@@ -18,7 +18,10 @@ import {
   createClientPool,
   type ResolvedTarget,
 } from "../dist/sdk-client-pool.js";
-import { createTargetCatalog } from "../dist/target-catalog.js";
+import {
+  createTargetCatalog,
+  type TargetCatalogEntry,
+} from "../dist/target-catalog.js";
 import { createTaskHandleRegistry } from "../dist/task-handle-registry.js";
 
 type JsonObject = Record<string, unknown>;
@@ -33,7 +36,9 @@ type StartPeerOptions = {
   cardPath?: string;
   rpcPath?: string;
   streaming?: boolean;
+  card?: JsonObject;
   sendResult?: JsonObject;
+  sendError?: JsonObject;
   getTaskResult?: JsonObject;
   cancelTaskResult?: JsonObject;
   streamResponses?: RpcResponse[];
@@ -78,6 +83,12 @@ function asRecord(value: unknown): JsonObject {
   }
 
   return value;
+}
+
+function capabilityDiagnosticsFromFailure(
+  failure: FailureEnvelope,
+): JsonObject {
+  return asRecord(asRecord(failure.error.details).capability_diagnostics);
 }
 
 function asSuccess(result: A2AToolResult): SuccessEnvelope {
@@ -221,17 +232,32 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
 
     if (req.method === "GET" && req.url === cardPath) {
       state.cardRequests += 1;
-      return json(res, 200, {
+      const defaultCard = {
         name: "Mock Peer",
         description: "Mock A2A peer for tests",
         protocolVersion: "0.3.0",
         version: "0.1.0",
         url: `${baseUrl}${rpcPath}`,
         preferredTransport: "JSONRPC",
+        additionalInterfaces: [
+          {
+            transport: "JSONRPC",
+            url: `${baseUrl}${rpcPath}`,
+          },
+          {
+            transport: "HTTP+JSON",
+            url: `${baseUrl}/a2a/rest`,
+          },
+        ],
         capabilities: {
           streaming: options.streaming ?? false,
-          pushNotifications: false,
-          stateTransitionHistory: false,
+          pushNotifications: true,
+          stateTransitionHistory: true,
+          extensions: [
+            {
+              uri: "https://example.com/extensions/audit",
+            },
+          ],
         },
         defaultInputModes: ["text/plain"],
         defaultOutputModes: ["text/plain"],
@@ -242,9 +268,17 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
             description: "mock skill",
             tags: ["test"],
             examples: ["Do the mock thing"],
+            inputModes: ["application/json"],
+            outputModes: ["application/pdf"],
           },
         ],
-      });
+      };
+
+      return json(
+        res,
+        200,
+        options.card ? { ...defaultCard, ...options.card } : defaultCard,
+      );
     }
 
     if (req.method === "POST" && req.url === rpcPath) {
@@ -254,6 +288,14 @@ function startPeer(options: StartPeerOptions = {}): Promise<StartedPeer> {
       if (payload.method === "message/send") {
         state.sendCalls += 1;
         state.lastSendParams = payloadParams;
+
+        if (options.sendError) {
+          return json(res, 200, {
+            jsonrpc: "2.0",
+            id: payload.id,
+            error: options.sendError,
+          });
+        }
 
         return json(res, 200, {
           jsonrpc: "2.0",
@@ -564,6 +606,177 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   assert.equal(configuration.blocking, false);
 });
 
+test("send remains permissive when file and data parts exceed advertised peer-card modes", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    card: {
+      name: "Strict Peer",
+      description: "Advertises text-only defaults",
+      capabilities: {
+        streaming: true,
+        pushNotifications: false,
+        stateTransitionHistory: false,
+      },
+      defaultInputModes: ["text/plain"],
+      defaultOutputModes: ["text/plain"],
+      skills: [],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    parts: [
+      {
+        kind: "data",
+        data: {
+          ticket: "123",
+        },
+      },
+      {
+        kind: "file",
+        name: "report.pdf",
+        uri: "https://files.example.com/report.pdf",
+      },
+    ],
+    accepted_output_modes: ["application/json"],
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const message = asRecord(params.message);
+  const configuration = asRecord(params.configuration);
+
+  assert.equal(success.action, "send");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.deepEqual(message.parts, [
+    {
+      kind: "data",
+      data: {
+        ticket: "123",
+      },
+    },
+    {
+      kind: "file",
+      file: {
+        uri: "https://files.example.com/report.pdf",
+        name: "report.pdf",
+      },
+    },
+  ]);
+  assert.deepEqual(configuration.acceptedOutputModes, ["application/json"]);
+});
+
+test("failed send errors include capability_diagnostics", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendError: {
+      code: -32001,
+      message: "remote validation failed",
+      data: {
+        field: "parts[0]",
+      },
+    },
+    card: {
+      capabilities: {
+        streaming: true,
+        pushNotifications: false,
+        stateTransitionHistory: false,
+      },
+      defaultInputModes: ["text/plain"],
+      defaultOutputModes: ["text/plain"],
+      skills: [],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    parts: [
+      {
+        kind: "data",
+        data: {
+          ticket: "123",
+        },
+      },
+    ],
+    accepted_output_modes: ["application/json"],
+  });
+
+  const failure = asFailure(result);
+  const diagnostics = capabilityDiagnosticsFromFailure(failure);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "A2A_SDK_ERROR");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.deepEqual(diagnostics, {
+    requested_input_modes: ["application/json"],
+    advertised_input_modes: ["text/plain"],
+    unsupported_input_modes: ["application/json"],
+    requested_output_modes: ["application/json"],
+    advertised_output_modes: ["text/plain"],
+    unsupported_output_modes: ["application/json"],
+    unknown_file_attachments: [],
+  });
+});
+
+test("failed send diagnostics mark unknown file MIME separately from unsupported modes", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendError: {
+      code: -32001,
+      message: "unsupported attachment",
+    },
+    card: {
+      capabilities: {
+        streaming: true,
+        pushNotifications: false,
+        stateTransitionHistory: false,
+      },
+      defaultInputModes: ["text/plain"],
+      defaultOutputModes: ["text/plain"],
+      skills: [],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    parts: [
+      {
+        kind: "file",
+        name: "mystery",
+        uri: "https://files.example.com/download",
+      },
+    ],
+    accepted_output_modes: ["text/plain"],
+  });
+
+  const diagnostics = capabilityDiagnosticsFromFailure(asFailure(result));
+
+  assert.deepEqual(diagnostics, {
+    requested_input_modes: ["unknown"],
+    advertised_input_modes: ["text/plain"],
+    unsupported_input_modes: [],
+    requested_output_modes: ["text/plain"],
+    advertised_output_modes: ["text/plain"],
+    unsupported_output_modes: [],
+    unknown_file_attachments: [0],
+  });
+});
+
 test("send with task_handle resolves target, task, and context from the handle", async (t) => {
   const peer = await startPeer({
     sendResult: {
@@ -683,6 +896,61 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(updates[0]?.summary.context_id, "ctx-stream-1");
   assert.equal(updates[1]?.summary.context_id, "ctx-stream-1");
   assert.equal(updates[1]?.summary.status, "completed");
+});
+
+test("sendStream failures also include capability_diagnostics", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        error: {
+          code: -32001,
+          message: "remote stream validation failed",
+        },
+      },
+    ],
+    card: {
+      capabilities: {
+        streaming: true,
+        pushNotifications: false,
+        stateTransitionHistory: false,
+      },
+      defaultInputModes: ["text/plain"],
+      defaultOutputModes: ["text/plain"],
+      skills: [],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    follow_updates: true,
+    parts: [
+      {
+        kind: "data",
+        data: {
+          ticket: "123",
+        },
+      },
+    ],
+    accepted_output_modes: ["application/json"],
+  });
+
+  const diagnostics = capabilityDiagnosticsFromFailure(asFailure(result));
+
+  assert.deepEqual(diagnostics, {
+    requested_input_modes: ["application/json"],
+    advertised_input_modes: ["text/plain"],
+    unsupported_input_modes: ["application/json"],
+    requested_output_modes: ["application/json"],
+    advertised_output_modes: ["text/plain"],
+    unsupported_output_modes: ["application/json"],
+    unknown_file_attachments: [],
+  });
 });
 
 test("watch with a valid task_handle emits watch updates", async (t) => {
@@ -884,15 +1152,72 @@ test("list_targets hydrates card metadata automatically", async (t) => {
 
   const success = asSuccess(result);
   const targets = targetsFromSummary(success.summary);
+  const rawTargets = success.raw as TargetCatalogEntry[];
 
   assert.equal(success.action, "list_targets");
   assert.equal(targets.length, 1);
   assert.equal(targets[0]?.target_alias, "support");
   assert.equal(targets[0]?.target_name, "Mock Peer");
   assert.equal(targets[0]?.description, "Primary support lane");
-  assert.equal(targets[0]?.streaming_supported, true);
-  assert.ok(targets[0]?.skills && targets[0].skills.length > 0);
-  assert.equal(targets[0]?.skills?.[0]?.name, "Mock Skill");
+  assert.ok(targets[0]?.peer_card);
+  assert.deepEqual(targets[0]?.peer_card, {
+    preferred_transport: "JSONRPC",
+    additional_interfaces: [
+      {
+        transport: "JSONRPC",
+        url: `${peer.baseUrl}/a2a/jsonrpc`,
+      },
+      {
+        transport: "HTTP+JSON",
+        url: `${peer.baseUrl}/a2a/rest`,
+      },
+    ],
+    capabilities: {
+      streaming: true,
+      push_notifications: true,
+      state_transition_history: true,
+      extensions: [
+        {
+          uri: "https://example.com/extensions/audit",
+        },
+      ],
+    },
+    default_input_modes: ["text/plain"],
+    default_output_modes: ["text/plain"],
+    skills: [
+      {
+        id: "mock",
+        name: "Mock Skill",
+        description: "mock skill",
+        tags: ["test"],
+        examples: ["Do the mock thing"],
+        input_modes: ["application/json"],
+        output_modes: ["application/pdf"],
+      },
+    ],
+  });
+  assert.deepEqual(rawTargets[0]?.card.additionalInterfaces, [
+    {
+      transport: "JSONRPC",
+      url: `${peer.baseUrl}/a2a/jsonrpc`,
+    },
+    {
+      transport: "HTTP+JSON",
+      url: `${peer.baseUrl}/a2a/rest`,
+    },
+  ]);
+  assert.deepEqual(rawTargets[0]?.card.capabilities, {
+    streaming: true,
+    pushNotifications: true,
+    stateTransitionHistory: true,
+    extensions: [
+      {
+        uri: "https://example.com/extensions/audit",
+      },
+    ],
+  });
+  assert.equal("streaming_supported" in (targets[0] as Record<string, unknown>), false);
+  assert.equal("preferred_transport" in (targets[0] as Record<string, unknown>), false);
   assert.equal(peer.state.cardRequests, 1);
   assert.ok(Array.isArray(success.raw));
 });
@@ -1053,6 +1378,47 @@ test("watch returns an actionable failure when the target is known not to suppor
   assert.equal(failure.error.code, "A2A_SDK_ERROR");
   assert.match(failure.error.message, /action=status/);
   assert.equal(details.suggested_action, "status");
+  assert.equal(peer.state.resubscribeCalls, 0);
+});
+
+test("watch short-circuits from the refreshed peer-card snapshot even when the handle lacks streaming metadata", async (t) => {
+  const peer = await startPeer({
+    streaming: false,
+  });
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, {
+      alias: "support",
+    }),
+    taskId: "task-no-stream-2",
+  }).taskHandle;
+
+  const { service } = buildService(
+    {
+      targets: [configuredTarget(peer, { alias: "support", default: true })],
+    },
+    {
+      taskHandleRegistry,
+    },
+  );
+
+  const result = await service.execute({
+    action: "watch",
+    task_handle: handle,
+  });
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "watch");
+  assert.equal(failure.error.code, "A2A_SDK_ERROR");
+  assert.equal(details.suggested_action, "status");
+  assert.equal(peer.state.cardRequests, 1);
   assert.equal(peer.state.resubscribeCalls, 0);
 });
 
