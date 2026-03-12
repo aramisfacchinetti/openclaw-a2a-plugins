@@ -40,6 +40,30 @@ test("task handle registry creates and resolves handles", () => {
   assert.equal(resolved.expiresAt, 1_100);
 });
 
+test("task handle registry stores and refreshes optional context ids", () => {
+  let now = 1_500;
+  const registry = createTaskHandleRegistry({
+    ttlMs: 100,
+    maxEntries: 4,
+    now: () => now,
+  });
+
+  const created = registry.create({
+    target: target(),
+    taskId: "task-ctx-1",
+    contextId: "context-1",
+  });
+
+  now = 1_550;
+  const refreshed = registry.refresh(created.taskHandle, {
+    contextId: "context-2",
+  });
+
+  assert.equal(created.contextId, "context-1");
+  assert.equal(refreshed.contextId, "context-2");
+  assert.equal(registry.resolve(created.taskHandle).contextId, "context-2");
+});
+
 test("task handle registry refresh extends the expiry window", () => {
   let now = 2_000;
   const registry = createTaskHandleRegistry({

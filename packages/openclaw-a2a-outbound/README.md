@@ -76,9 +76,9 @@ Call `list_targets` first to discover configured aliases and refreshed target-ca
 - `target_url`: explicit remote base URL when policy allows it or when it matches a configured target.
 - `parts`: required non-empty array for `send`; each part is `text`, `file`, or `data`.
 - `message_id`: optional client-supplied message id for `send`.
-- `task_handle`: opaque follow-up handle returned after delegated tasks are created.
-- `task_id`: for `send`, continue an existing remote task; for `watch`/`status`/`cancel`, fallback follow-up key when no live `task_handle` is available.
-- `context_id`: optional remote context id for `send`.
+- `task_handle`: opaque delegated-task handle. `send`, `watch`, `status`, and `cancel` all accept it.
+- `task_id`: for `send`, continue an existing remote task when no `task_handle` is available; for `watch`/`status`/`cancel`, fallback follow-up key when no live `task_handle` is available.
+- `context_id`: optional remote conversation context id for `send`. Use it either with `task_id` or by itself to start a new task inside an existing conversation.
 - `follow_updates`: stream live updates during `send`.
 - `accepted_output_modes`: optional per-call output mode override for `send`.
 - `blocking`: optional non-stream `send` knob. Rejected when `follow_updates=true`.
@@ -93,12 +93,18 @@ Snake_case tool fields are translated internally to the A2A SDK camelCase reques
 ## Actions
 
 - `list_targets`: discover configured targets, aliases, examples, and hydrated card metadata.
-- `send`: send one or more message parts to a remote agent selected by `target_alias`, `target_url`, or a configured default target.
+- `send`: send one or more message parts to a remote agent, either as a new turn or as a follow-up turn on an existing task/conversation.
 - `watch`: resubscribe to a running delegated task and stream updates.
 - `status`: fetch the latest task snapshot.
 - `cancel`: request cancellation for a delegated task.
 
-For follow-up actions, prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`. `send.task_id` is a continuation id for the remote peer, not a replacement for `task_handle` in later tool calls.
+Supported `send` modes:
+
+- new task: `send` with `target_alias`/`target_url` or a configured default target, and no continuation fields
+- existing task continuation: `send` with `task_handle`, or `task_id` plus `target_alias`/`target_url` or a configured default target
+- new task in an existing conversation: `send` with `context_id` plus `target_alias`/`target_url` or a configured default target
+
+When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`.
 
 ## Examples
 
@@ -207,6 +213,7 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
     "target_url": "https://support.example/",
     "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
     "task_id": "task-456",
+    "context_id": "ctx-456",
     "status": "completed",
     "can_watch": true
   },
@@ -215,6 +222,7 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
       {
         "kind": "task",
         "id": "task-456",
+        "contextId": "ctx-456",
         "status": {
           "state": "submitted"
         }
@@ -222,6 +230,7 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
       {
         "kind": "status-update",
         "taskId": "task-456",
+        "contextId": "ctx-456",
         "status": {
           "state": "completed"
         },
@@ -231,6 +240,7 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
     "finalEvent": {
       "kind": "status-update",
       "taskId": "task-456",
+      "contextId": "ctx-456",
       "status": {
         "state": "completed"
       },
@@ -240,9 +250,26 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
 }
 ```
 
-### Continue An Existing Remote Task
+### Continue An Existing Remote Task With `task_handle`
 
-Use `send.task_id` and `send.context_id` when the peer expects a continuation instead of a brand-new task:
+Use `send` again when a delegated task reaches `input-required` or asks for approval:
+
+```json
+{
+  "action": "send",
+  "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Approved. Continue with the task and finish the reply."
+    }
+  ]
+}
+```
+
+### Continue An Existing Remote Task With `task_id`
+
+If the handle is unavailable, `send.task_id` plus target routing continues the task:
 
 ```json
 {
@@ -254,6 +281,24 @@ Use `send.task_id` and `send.context_id` when the peer expects a continuation in
     {
       "kind": "text",
       "text": "Continue the prior conversation and draft the final reply."
+    }
+  ]
+}
+```
+
+### Start A New Task In An Existing Conversation
+
+Use `context_id` without `task_id` when the peer supports conversation continuity independent of a specific task:
+
+```json
+{
+  "action": "send",
+  "target_alias": "support",
+  "context_id": "ctx-456",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Start a new side task, but keep it in the same conversation."
     }
   ]
 }
@@ -279,6 +324,7 @@ Use `send.task_id` and `send.context_id` when the peer expects a continuation in
     "target_url": "https://support.example/",
     "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
     "task_id": "task-456",
+    "context_id": "ctx-456",
     "status": "completed",
     "can_watch": true
   },
@@ -331,7 +377,7 @@ Tool input validation uses Ajv in strict mode. Validation failures use `operatio
         {
           "keyword": "anyOf",
           "instancePath": "",
-          "message": "send requires target_alias, target_url, or a configured default target"
+          "message": "send requires task_handle, target_alias, target_url, or a configured default target"
         }
       ]
     }

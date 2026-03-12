@@ -1,4 +1,11 @@
-import type { Task, TaskIdParams, TaskQueryParams } from "@a2a-js/sdk";
+import type {
+  Message,
+  Task,
+  TaskArtifactUpdateEvent,
+  TaskIdParams,
+  TaskQueryParams,
+  TaskStatusUpdateEvent,
+} from "@a2a-js/sdk";
 import { UnsupportedOperationError } from "@a2a-js/sdk/client";
 import {
   parseA2AOutboundPluginConfig,
@@ -24,6 +31,7 @@ import {
   watchSuccess,
   type A2AStreamEventData,
   type A2AToolResult,
+  type SummaryTaskContext,
   type StreamUpdateEnvelope,
   type StreamingAction,
 } from "./result-shape.js";
@@ -68,6 +76,7 @@ type StreamExecutionOptions<T extends StreamingAction> = ExecutionOptions & {
 type StreamState = {
   events: A2AStreamEventData[];
   latestSummary?: ReturnType<typeof summarizeStreamEvent>;
+  taskContext: SummaryTaskContext;
 };
 
 type TargetContextInput = {
@@ -77,15 +86,19 @@ type TargetContextInput = {
 
 type FollowUpActionInput = WatchActionInput | StatusActionInput | CancelActionInput;
 
+type TaskAwareActionInput =
+  | FollowUpActionInput
+  | Pick<
+      SendActionInput,
+      "action" | "target_alias" | "target_url" | "task_handle" | "task_id" | "context_id"
+    >;
+
 type ResolvedClientContext = {
   target: ResolvedTarget;
   clientEntry: SDKClientPoolEntry;
 };
 
-type ResolvedTaskContext = ResolvedClientContext & {
-  taskId: string;
-  taskHandle?: string;
-};
+type ResolvedTaskContext = ResolvedClientContext & SummaryTaskContext;
 
 function fallbackErrorCode(error: unknown): A2AOutboundErrorCode {
   if (error instanceof A2AOutboundError) {
@@ -116,25 +129,75 @@ function targetSummary(target: ResolvedTarget): Record<string, unknown> {
   };
 }
 
-function firstStreamTaskId(
-  events: readonly A2AStreamEventData[],
-): string | undefined {
-  for (const event of events) {
-    switch (event.kind) {
-      case "message":
-        if (event.taskId !== undefined) {
-          return event.taskId;
-        }
-        break;
-      case "task":
-        return event.id;
-      case "status-update":
-      case "artifact-update":
-        return event.taskId;
+function taskContextFromMessage(message: Message): SummaryTaskContext {
+  return {
+    ...(message.taskId !== undefined ? { taskId: message.taskId } : {}),
+    ...(message.contextId !== undefined ? { contextId: message.contextId } : {}),
+  };
+}
+
+function taskContextFromTask(task: Task): SummaryTaskContext {
+  return {
+    taskId: task.id,
+    ...(task.contextId !== undefined ? { contextId: task.contextId } : {}),
+  };
+}
+
+function taskContextFromStatusUpdate(
+  event: TaskStatusUpdateEvent,
+): SummaryTaskContext {
+  return {
+    ...(event.taskId !== undefined ? { taskId: event.taskId } : {}),
+    ...(event.contextId !== undefined ? { contextId: event.contextId } : {}),
+  };
+}
+
+function taskContextFromArtifactUpdate(
+  event: TaskArtifactUpdateEvent,
+): SummaryTaskContext {
+  return {
+    ...(event.taskId !== undefined ? { taskId: event.taskId } : {}),
+    ...(event.contextId !== undefined ? { contextId: event.contextId } : {}),
+  };
+}
+
+function taskContextFromEvent(event: A2AStreamEventData): SummaryTaskContext {
+  switch (event.kind) {
+    case "message":
+      return taskContextFromMessage(event);
+    case "task":
+      return taskContextFromTask(event);
+    case "status-update":
+      return taskContextFromStatusUpdate(event);
+    case "artifact-update":
+      return taskContextFromArtifactUpdate(event);
+  }
+}
+
+function mergeTaskContext(
+  ...contexts: Array<SummaryTaskContext | undefined>
+): SummaryTaskContext {
+  const merged: SummaryTaskContext = {};
+
+  for (const context of contexts) {
+    if (!context) {
+      continue;
+    }
+
+    if (context.taskId !== undefined) {
+      merged.taskId = context.taskId;
+    }
+
+    if (context.contextId !== undefined) {
+      merged.contextId = context.contextId;
+    }
+
+    if (context.taskHandle !== undefined) {
+      merged.taskHandle = context.taskHandle;
     }
   }
 
-  return undefined;
+  return merged;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -203,10 +266,26 @@ function taskHandleTaskIdMismatchError(
   );
 }
 
+function taskHandleContextIdMismatchError(
+  taskHandle: string,
+  handleContextId: string,
+  explicitContextId: string,
+): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.VALIDATION_ERROR,
+    `task_handle "${taskHandle}" does not match context_id "${explicitContextId}"`,
+    {
+      task_handle: taskHandle,
+      handle_context_id: handleContextId,
+      explicit_context_id: explicitContextId,
+    },
+  );
+}
+
 function missingTargetContextError(action: "send" | "watch" | "status" | "cancel") {
   const message =
     action === "send"
-      ? "send requires target_alias, target_url, or a configured default target"
+      ? "send requires task_handle, target_alias, target_url, or a configured default target"
       : `${action} requires task_handle, or task_id plus target_alias/target_url, or a configured default target`;
 
   return new A2AOutboundError(ERROR_CODES.VALIDATION_ERROR, message);
@@ -236,10 +315,13 @@ async function consumeStream<T extends StreamingAction>(
   action: T,
   target: ResolvedTarget,
   state: StreamState,
+  onEvent?: (event: A2AStreamEventData) => void,
   onUpdate?: (update: StreamUpdateEnvelope<T>) => void,
 ): Promise<void> {
   for await (const event of stream) {
     state.events.push(event);
+    state.taskContext = mergeTaskContext(state.taskContext, taskContextFromEvent(event));
+    onEvent?.(event);
     state.latestSummary = summarizeStreamEvent(target, event);
     onUpdate?.(streamUpdate(action, target, event));
   }
@@ -392,21 +474,8 @@ export class A2AOutboundService {
     return undefined;
   }
 
-  private async resolveSendTarget(
-    input: SendActionInput,
-  ): Promise<ResolvedClientContext> {
-    const explicitTarget = this.resolveExplicitTarget(input);
-    const target = explicitTarget ?? this.targetCatalog.resolveDefaultTarget();
-
-    if (!target) {
-      throw missingTargetContextError("send");
-    }
-
-    return this.resolveClient(target);
-  }
-
   private async resolveTaskContext(
-    input: FollowUpActionInput,
+    input: TaskAwareActionInput,
   ): Promise<ResolvedTaskContext> {
     if (input.task_handle !== undefined) {
       const handleRecord = this.taskHandleRegistry.resolve(input.task_handle);
@@ -431,18 +500,32 @@ export class A2AOutboundService {
         );
       }
 
+      if (
+        "context_id" in input &&
+        typeof input.context_id === "string" &&
+        handleRecord.contextId !== undefined &&
+        input.context_id !== handleRecord.contextId
+      ) {
+        throw taskHandleContextIdMismatchError(
+          input.task_handle,
+          handleRecord.contextId,
+          input.context_id,
+        );
+      }
+
       const clientEntry = await this.clientPool.get(handleRecord.target);
 
       return {
         target: handleRecord.target,
         clientEntry,
         taskId: handleRecord.taskId,
+        ...("context_id" in input && input.context_id !== undefined
+          ? { contextId: input.context_id }
+          : handleRecord.contextId !== undefined
+            ? { contextId: handleRecord.contextId }
+            : {}),
         taskHandle: input.task_handle,
       };
-    }
-
-    if (input.task_id === undefined) {
-      throw missingTargetContextError(input.action);
     }
 
     const target =
@@ -454,36 +537,69 @@ export class A2AOutboundService {
 
     const clientEntry = await this.clientPool.get(target);
 
-    return {
-      target,
-      clientEntry,
-      taskId: input.task_id,
-    };
+    if (input.task_id !== undefined) {
+      return {
+        target,
+        clientEntry,
+        taskId: input.task_id,
+        ...("context_id" in input && input.context_id !== undefined
+          ? { contextId: input.context_id }
+          : {}),
+      };
+    }
+
+    if (input.action === "send") {
+      return {
+        target,
+        clientEntry,
+        ...("context_id" in input && input.context_id !== undefined
+          ? { contextId: input.context_id }
+          : {}),
+      };
+    }
+
+    throw missingTargetContextError(input.action);
   }
 
   private bindTaskHandle(
     target: ResolvedTarget,
     taskId: string,
     taskHandle?: string,
+    contextId?: string,
   ): string {
     if (taskHandle !== undefined) {
-      return this.taskHandleRegistry.refresh(taskHandle, { target, taskId })
+      return this.taskHandleRegistry.refresh(taskHandle, {
+        target,
+        taskId,
+        ...(contextId !== undefined ? { contextId } : {}),
+      })
         .taskHandle;
     }
 
-    return this.taskHandleRegistry.create({ target, taskId }).taskHandle;
+    return this.taskHandleRegistry.create({
+      target,
+      taskId,
+      ...(contextId !== undefined ? { contextId } : {}),
+    }).taskHandle;
   }
 
-  private bindStreamTaskHandle(
+  private bindTaskContext(
     target: ResolvedTarget,
-    events: readonly A2AStreamEventData[],
-    taskHandle?: string,
-  ): string | undefined {
-    const taskId = firstStreamTaskId(events);
+    taskContext: SummaryTaskContext,
+  ): SummaryTaskContext {
+    if (taskContext.taskId === undefined) {
+      return taskContext;
+    }
 
-    return taskId !== undefined
-      ? this.bindTaskHandle(target, taskId, taskHandle)
-      : undefined;
+    return {
+      ...taskContext,
+      taskHandle: this.bindTaskHandle(
+        target,
+        taskContext.taskId,
+        taskContext.taskHandle,
+        taskContext.contextId,
+      ),
+    };
   }
 
   private async listTargets(): Promise<A2AToolResult> {
@@ -513,24 +629,38 @@ export class A2AOutboundService {
     let target: ResolvedTarget | undefined;
 
     try {
-      const resolved = await this.resolveSendTarget(input);
+      const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
-      const normalized = normalizeSendRequest(input, {
-        defaultTimeoutMs: this.config.defaults.timeoutMs,
-        defaultServiceParameters: this.config.defaults.serviceParameters,
-        defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
-        signal: options.signal,
-      });
+      const normalized = normalizeSendRequest(
+        {
+          ...input,
+          ...(resolved.taskId !== undefined ? { task_id: resolved.taskId } : {}),
+          ...(resolved.contextId !== undefined
+            ? { context_id: resolved.contextId }
+            : {}),
+        },
+        {
+          defaultTimeoutMs: this.config.defaults.timeoutMs,
+          defaultServiceParameters: this.config.defaults.serviceParameters,
+          defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
+          signal: options.signal,
+        },
+      );
 
       const raw = await resolved.clientEntry.client.sendMessage(
         normalized.sendParams,
         normalized.requestOptions,
       );
 
-      const taskHandle =
-        raw.kind === "task" ? this.bindTaskHandle(target, raw.id) : undefined;
+      const taskContext = this.bindTaskContext(
+        target,
+        mergeTaskContext(
+          resolved,
+          raw.kind === "task" ? taskContextFromTask(raw) : taskContextFromMessage(raw),
+        ),
+      );
 
-      return sendSuccess(target, raw, taskHandle);
+      return sendSuccess(target, raw, taskContext);
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -553,17 +683,28 @@ export class A2AOutboundService {
     let target: ResolvedTarget | undefined;
     const state: StreamState = {
       events: [],
+      taskContext: {},
     };
 
     try {
-      const resolved = await this.resolveSendTarget(input);
+      const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
-      const normalized = normalizeSendRequest(input, {
-        defaultTimeoutMs: this.config.defaults.timeoutMs,
-        defaultServiceParameters: this.config.defaults.serviceParameters,
-        defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
-        signal: options.signal,
-      });
+      state.taskContext = mergeTaskContext(state.taskContext, resolved);
+      const normalized = normalizeSendRequest(
+        {
+          ...input,
+          ...(resolved.taskId !== undefined ? { task_id: resolved.taskId } : {}),
+          ...(resolved.contextId !== undefined
+            ? { context_id: resolved.contextId }
+            : {}),
+        },
+        {
+          defaultTimeoutMs: this.config.defaults.timeoutMs,
+          defaultServiceParameters: this.config.defaults.serviceParameters,
+          defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
+          signal: options.signal,
+        },
+      );
 
       await consumeStream(
         resolved.clientEntry.client.sendMessageStream(
@@ -573,6 +714,11 @@ export class A2AOutboundService {
         "send",
         target,
         state,
+        () => {
+          if (target !== undefined) {
+            state.taskContext = this.bindTaskContext(target, state.taskContext);
+          }
+        },
         options.onUpdate,
       );
 
@@ -586,7 +732,7 @@ export class A2AOutboundService {
       return sendStreamSuccess(
         target,
         state.events,
-        this.bindStreamTaskHandle(target, state.events),
+        this.bindTaskContext(target, state.taskContext),
       );
     } catch (error) {
       let toolError = toToolError(error, fallbackErrorCode(error));
@@ -621,6 +767,9 @@ export class A2AOutboundService {
       const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
       taskId = resolved.taskId;
+      if (resolved.taskId === undefined) {
+        throw missingTargetContextError("status");
+      }
 
       const params: TaskQueryParams = {
         id: resolved.taskId,
@@ -643,7 +792,10 @@ export class A2AOutboundService {
       return statusSuccess(
         target,
         raw,
-        this.bindTaskHandle(target, raw.id, resolved.taskHandle),
+        this.bindTaskContext(
+          target,
+          mergeTaskContext(resolved, taskContextFromTask(raw)),
+        ),
       );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));
@@ -669,12 +821,17 @@ export class A2AOutboundService {
     let taskId: string | undefined;
     const state: StreamState = {
       events: [],
+      taskContext: {},
     };
 
     try {
       const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
       taskId = resolved.taskId;
+      if (resolved.taskId === undefined) {
+        throw missingTargetContextError("watch");
+      }
+      state.taskContext = mergeTaskContext(state.taskContext, resolved);
 
       if (resolved.target.streamingSupported === false) {
         throw streamingNotSupportedError(resolved.target, resolved.taskId);
@@ -698,6 +855,11 @@ export class A2AOutboundService {
         "watch",
         target,
         state,
+        () => {
+          if (target !== undefined) {
+            state.taskContext = this.bindTaskContext(target, state.taskContext);
+          }
+        },
         options.onUpdate,
       );
 
@@ -711,7 +873,7 @@ export class A2AOutboundService {
       return watchSuccess(
         target,
         state.events,
-        this.bindStreamTaskHandle(target, state.events, resolved.taskHandle),
+        this.bindTaskContext(target, state.taskContext),
       );
     } catch (error) {
       let effectiveError = error;
@@ -757,6 +919,9 @@ export class A2AOutboundService {
       const resolved = await this.resolveTaskContext(input);
       target = resolved.target;
       taskId = resolved.taskId;
+      if (resolved.taskId === undefined) {
+        throw missingTargetContextError("cancel");
+      }
 
       const params: TaskIdParams = {
         id: resolved.taskId,
@@ -776,7 +941,10 @@ export class A2AOutboundService {
       return cancelSuccess(
         target,
         raw,
-        this.bindTaskHandle(target, raw.id, resolved.taskHandle),
+        this.bindTaskContext(
+          target,
+          mergeTaskContext(resolved, taskContextFromTask(raw)),
+        ),
       );
     } catch (error) {
       const toolError = toToolError(error, fallbackErrorCode(error));

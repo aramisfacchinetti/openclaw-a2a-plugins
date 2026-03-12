@@ -147,6 +147,22 @@ test("createRemoteAgentInputValidator accepts send parts and parity fields", () 
   assert.equal(out.history_length, 3);
 });
 
+test("createRemoteAgentInputValidator accepts send with task_handle", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  const out = validate({
+    action: "send",
+    task_handle: "rah_abc123",
+    parts: [{ kind: "text", text: "continue" }],
+  });
+
+  assert.equal(out.action, "send");
+  assert.equal(out.task_handle, "rah_abc123");
+});
+
 test("createRemoteAgentInputValidator rejects send without a resolvable target", () => {
   const config = parseA2AOutboundPluginConfig({
     enabled: true,
@@ -303,16 +319,9 @@ test("createRemoteAgentInputValidator rejects blocking when send follows updates
   );
 });
 
-test("createRemoteAgentInputValidator continues rejecting task_handle on send", () => {
+test("createRemoteAgentInputValidator rejects send with task_id and no target when no default target exists", () => {
   const config = parseA2AOutboundPluginConfig({
     enabled: true,
-    targets: [
-      {
-        alias: "support",
-        baseUrl: "https://support.example",
-        default: true,
-      },
-    ],
   });
   const validate = createRemoteAgentInputValidator(config);
 
@@ -321,15 +330,39 @@ test("createRemoteAgentInputValidator continues rejecting task_handle on send", 
       validate({
         action: "send",
         parts: [{ kind: "text", text: "hello" }],
-        task_handle: "rah_abc123",
+        task_id: "task-1",
       }),
     (error: unknown) =>
       isValidationError(error) &&
       hasAjvError(
         error,
         (entry) =>
-          entry.keyword === "not" &&
-          String(entry.message).includes("task_handle"),
+          entry.keyword === "anyOf" &&
+          String(entry.message).includes("configured default target"),
+      ),
+  );
+});
+
+test("createRemoteAgentInputValidator rejects context-only send with no target when no default target exists", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        parts: [{ kind: "text", text: "hello" }],
+        context_id: "context-1",
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (entry) =>
+          entry.keyword === "anyOf" &&
+          String(entry.message).includes("configured default target"),
       ),
   );
 });
