@@ -82,6 +82,25 @@ Preferred continuation forms:
 { "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "parts": [{ "kind": "text", "text": "Start a new task in the same conversation." }] }
 ```
 
+## Continuation safety
+
+Interpret follow-up capability from explicit continuation fields, not from prompt text, message text, or other inferred context.
+
+- `task_handle`: full task continuity. Prefer it for follow-up `send`, `watch`, `status`, and `cancel`.
+- `task_id` plus target context: task continuity when no `task_handle` is available. Use it only when the result explicitly returned a `task_id`.
+- `context_id` only: conversation continuity only. Use it only with `send` to start a new task in the same conversation.
+- Never infer or synthesize `task_id` from `context_id`, session ids, run ids, prior prompts, or summary text.
+- Do not call `watch`, `status`, or `cancel` from a result that has only `context_id`.
+- If lifecycle tracking is required, fail fast when the peer returns only a non-trackable conversation continuation.
+
+Invalid follow-up example:
+
+```json
+{ "action": "status", "context_id": "ctx-123" }
+```
+
+That is invalid because `status`, `watch`, and `cancel` require task continuity, not just conversation continuity.
+
 ### status
 
 Poll the current state of a delegated task.
@@ -108,7 +127,7 @@ Cancel a running task.
 
 ## Task handles
 
-After a successful `send`, the result usually includes a `task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. Always prefer `task_handle` over `target_alias + task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `task_handle`.
+After a successful `send`, the result usually includes a `task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. Always prefer `task_handle` over `target_alias + task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `task_handle`. If the result includes `context_id` without `task_handle` or `task_id`, there is no task lifecycle to poll, watch, or cancel.
 
 ## watch vs status
 
