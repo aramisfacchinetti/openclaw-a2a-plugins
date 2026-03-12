@@ -2,26 +2,30 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildRequestOptions,
-  normalizePlainIntentRequest,
+  normalizeSendRequest,
 } from "../dist/request-normalization.js";
 
-test("normalizePlainIntentRequest builds a generated user message", () => {
-  const first = normalizePlainIntentRequest(
+test("normalizeSendRequest generates user message ids when omitted", () => {
+  const first = normalizeSendRequest(
     {
-      input: "hello world",
+      action: "send",
+      parts: [{ kind: "text", text: "hello world" }],
     },
     {
       defaultTimeoutMs: 250,
       defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain"],
     },
   );
-  const second = normalizePlainIntentRequest(
+  const second = normalizeSendRequest(
     {
-      input: "hello again",
+      action: "send",
+      parts: [{ kind: "text", text: "hello again" }],
     },
     {
       defaultTimeoutMs: 250,
       defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain"],
     },
   );
 
@@ -33,28 +37,108 @@ test("normalizePlainIntentRequest builds a generated user message", () => {
       text: "hello world",
     },
   ]);
+  assert.deepEqual(first.sendParams.configuration, {
+    acceptedOutputModes: ["text/plain"],
+  });
   assert.notEqual(
     first.sendParams.message.messageId,
     second.sendParams.message.messageId,
   );
 });
 
-test("normalizePlainIntentRequest maps flattened file and data attachments", () => {
-  const normalized = normalizePlainIntentRequest(
+test("normalizeSendRequest forwards data-only parts verbatim", () => {
+  const normalized = normalizeSendRequest(
     {
-      input: "process these",
-      attachments: [
+      action: "send",
+      parts: [
         {
-          kind: "file",
-          uri: "https://example.com/report.pdf",
-          name: "report.pdf",
-          mime_type: "application/pdf",
+          kind: "data",
+          data: {
+            ticket: "123",
+            priority: "high",
+          },
+          metadata: {
+            source: "triage",
+          },
         },
+      ],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: [],
+    },
+  );
+
+  assert.deepEqual(normalized.sendParams.message.parts, [
+    {
+      kind: "data",
+      data: {
+        ticket: "123",
+        priority: "high",
+      },
+      metadata: {
+        source: "triage",
+      },
+    },
+  ]);
+});
+
+test("normalizeSendRequest forwards file-only parts with key translation", () => {
+  const normalized = normalizeSendRequest(
+    {
+      action: "send",
+      parts: [
         {
           kind: "file",
           bytes: "Zm9v",
           name: "inline.txt",
           mime_type: "text/plain",
+          metadata: {
+            source: "inline",
+          },
+        },
+      ],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: [],
+    },
+  );
+
+  assert.deepEqual(normalized.sendParams.message.parts, [
+    {
+      kind: "file",
+      file: {
+        bytes: "Zm9v",
+        name: "inline.txt",
+        mimeType: "text/plain",
+      },
+      metadata: {
+        source: "inline",
+      },
+    },
+  ]);
+});
+
+test("normalizeSendRequest forwards mixed parts exactly", () => {
+  const normalized = normalizeSendRequest(
+    {
+      action: "send",
+      parts: [
+        {
+          kind: "text",
+          text: "process these",
+          metadata: {
+            emphasis: "high",
+          },
+        },
+        {
+          kind: "file",
+          uri: "https://example.com/report.pdf",
+          name: "report.pdf",
+          mime_type: "application/pdf",
         },
         {
           kind: "data",
@@ -67,6 +151,7 @@ test("normalizePlainIntentRequest maps flattened file and data attachments", () 
     {
       defaultTimeoutMs: 250,
       defaultServiceParameters: {},
+      defaultAcceptedOutputModes: [],
     },
   );
 
@@ -74,6 +159,9 @@ test("normalizePlainIntentRequest maps flattened file and data attachments", () 
     {
       kind: "text",
       text: "process these",
+      metadata: {
+        emphasis: "high",
+      },
     },
     {
       kind: "file",
@@ -81,14 +169,6 @@ test("normalizePlainIntentRequest maps flattened file and data attachments", () 
         uri: "https://example.com/report.pdf",
         name: "report.pdf",
         mimeType: "application/pdf",
-      },
-    },
-    {
-      kind: "file",
-      file: {
-        bytes: "Zm9v",
-        name: "inline.txt",
-        mimeType: "text/plain",
       },
     },
     {
@@ -100,11 +180,26 @@ test("normalizePlainIntentRequest maps flattened file and data attachments", () 
   ]);
 });
 
-test("normalizePlainIntentRequest maps metadata and history_length", () => {
-  const normalized = normalizePlainIntentRequest(
+test("normalizeSendRequest maps ids and per-call configuration fields", () => {
+  const normalized = normalizeSendRequest(
     {
-      input: "hello",
+      action: "send",
+      message_id: "message-1",
+      task_id: "task-1",
+      context_id: "context-1",
+      parts: [{ kind: "text", text: "hello" }],
+      accepted_output_modes: ["application/json"],
+      blocking: false,
       history_length: 4,
+      push_notification_config: {
+        url: "https://example.com/callback",
+        id: "push-1",
+        token: "token-1",
+        authentication: {
+          schemes: ["Bearer"],
+          credentials: "secret",
+        },
+      },
       metadata: {
         requestId: "req-1",
       },
@@ -112,14 +207,62 @@ test("normalizePlainIntentRequest maps metadata and history_length", () => {
     {
       defaultTimeoutMs: 250,
       defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain"],
     },
   );
 
+  assert.equal(normalized.sendParams.message.messageId, "message-1");
+  assert.equal(normalized.sendParams.message.taskId, "task-1");
+  assert.equal(normalized.sendParams.message.contextId, "context-1");
   assert.deepEqual(normalized.sendParams.metadata, {
     requestId: "req-1",
   });
   assert.deepEqual(normalized.sendParams.configuration, {
+    acceptedOutputModes: ["application/json"],
+    blocking: false,
     historyLength: 4,
+    pushNotificationConfig: {
+      url: "https://example.com/callback",
+      id: "push-1",
+      token: "token-1",
+      authentication: {
+        schemes: ["Bearer"],
+        credentials: "secret",
+      },
+    },
+  });
+});
+
+test("normalizeSendRequest applies plugin default accepted output modes only when omitted", () => {
+  const inherited = normalizeSendRequest(
+    {
+      action: "send",
+      parts: [{ kind: "text", text: "default modes" }],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain", "application/json"],
+    },
+  );
+  const overridden = normalizeSendRequest(
+    {
+      action: "send",
+      parts: [{ kind: "text", text: "override modes" }],
+      accepted_output_modes: [],
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain", "application/json"],
+    },
+  );
+
+  assert.deepEqual(inherited.sendParams.configuration, {
+    acceptedOutputModes: ["text/plain", "application/json"],
+  });
+  assert.deepEqual(overridden.sendParams.configuration, {
+    acceptedOutputModes: [],
   });
 });
 

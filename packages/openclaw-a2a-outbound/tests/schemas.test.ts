@@ -75,7 +75,7 @@ test("buildRemoteAgentToolDefinition injects configured aliases into target_alia
   assert.match(String(targetAlias.description), /default target "support"/i);
 });
 
-test("createRemoteAgentInputValidator accepts flattened send attachments", () => {
+test("createRemoteAgentInputValidator accepts send parts and parity fields", () => {
   const config = parseA2AOutboundPluginConfig({
     enabled: true,
     targets: [
@@ -90,8 +90,11 @@ test("createRemoteAgentInputValidator accepts flattened send attachments", () =>
 
   const out = validate({
     action: "send",
-    input: "hello",
-    attachments: [
+    parts: [
+      {
+        kind: "text",
+        text: "hello",
+      },
       {
         kind: "file",
         uri: "https://example.com/report.pdf",
@@ -104,16 +107,29 @@ test("createRemoteAgentInputValidator accepts flattened send attachments", () =>
         },
       },
     ],
+    message_id: "message-1",
+    task_id: "task-1",
+    context_id: "context-1",
+    accepted_output_modes: ["text/plain"],
+    blocking: false,
     history_length: 3,
     metadata: {
       traceId: "trace-1",
     },
+    push_notification_config: {
+      url: "https://example.com/callback",
+    },
   });
 
   assert.equal(out.action, "send");
-  assert.equal(out.input, "hello");
-  assert.equal(out.history_length, 3);
-  assert.deepEqual(out.attachments, [
+  assert.equal(out.message_id, "message-1");
+  assert.equal(out.task_id, "task-1");
+  assert.equal(out.context_id, "context-1");
+  assert.deepEqual(out.parts, [
+    {
+      kind: "text",
+      text: "hello",
+    },
     {
       kind: "file",
       uri: "https://example.com/report.pdf",
@@ -126,6 +142,9 @@ test("createRemoteAgentInputValidator accepts flattened send attachments", () =>
       },
     },
   ]);
+  assert.deepEqual(out.accepted_output_modes, ["text/plain"]);
+  assert.equal(out.blocking, false);
+  assert.equal(out.history_length, 3);
 });
 
 test("createRemoteAgentInputValidator rejects send without a resolvable target", () => {
@@ -138,7 +157,7 @@ test("createRemoteAgentInputValidator rejects send without a resolvable target",
     () =>
       validate({
         action: "send",
-        input: "hello",
+        parts: [{ kind: "text", text: "hello" }],
       }),
     (error: unknown) =>
       isValidationError(error) &&
@@ -147,6 +166,170 @@ test("createRemoteAgentInputValidator rejects send without a resolvable target",
         (entry) =>
           entry.keyword === "anyOf" &&
           String(entry.message).includes("configured default target"),
+      ),
+  );
+});
+
+test("createRemoteAgentInputValidator rejects legacy send input and attachments", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        input: "hello",
+        attachments: [
+          {
+            kind: "data",
+            data: {
+              ticket: "123",
+            },
+          },
+        ],
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (entry) =>
+          entry.keyword === "additionalProperties" &&
+          ["input", "attachments"].includes(
+            String(
+              (
+                entry.params as {
+                  additionalProperty?: unknown;
+                } | undefined
+              )?.additionalProperty,
+            ),
+          ),
+      ),
+  );
+});
+
+test("createRemoteAgentInputValidator rejects empty send parts", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        parts: [],
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(error, (entry) => entry.keyword === "minItems"),
+  );
+});
+
+test("createRemoteAgentInputValidator rejects malformed file parts without uri or bytes", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        parts: [
+          {
+            kind: "file",
+            name: "report.pdf",
+          },
+        ],
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(error, (entry) => entry.keyword === "oneOf"),
+  );
+});
+
+test("createRemoteAgentInputValidator rejects blocking when send follows updates", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        parts: [{ kind: "text", text: "hello" }],
+        follow_updates: true,
+        blocking: false,
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (entry) =>
+          entry.keyword === "not" &&
+          String(entry.message).includes("follow_updates=true"),
+      ),
+  );
+});
+
+test("createRemoteAgentInputValidator continues rejecting task_handle on send", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        parts: [{ kind: "text", text: "hello" }],
+        task_handle: "rah_abc123",
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (entry) =>
+          entry.keyword === "not" &&
+          String(entry.message).includes("task_handle"),
       ),
   );
 });

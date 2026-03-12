@@ -15,7 +15,6 @@ import type { A2ATargetInput } from "./schemas.js";
 export interface SDKClientPoolOptions {
   defaultCardPath?: string;
   preferredTransports?: A2ATransport[];
-  acceptedOutputModes?: string[];
   normalizeBaseUrl?: boolean;
   enforceSupportedTransports?: boolean;
 }
@@ -56,22 +55,6 @@ function mergeUniqueTransports(values: readonly unknown[]): A2ATransport[] {
 
     if (!deduped.includes(value as A2ATransport)) {
       deduped.push(value as A2ATransport);
-    }
-  }
-
-  return deduped;
-}
-
-function mergeUniqueStrings(values: readonly unknown[]): string[] {
-  const deduped: string[] = [];
-
-  for (const value of values) {
-    if (typeof value !== "string" || value.trim() === "") {
-      continue;
-    }
-
-    if (!deduped.includes(value)) {
-      deduped.push(value);
     }
   }
 
@@ -147,8 +130,6 @@ export class SDKClientPool {
 
   private readonly defaultPreferredTransports: A2ATransport[];
 
-  private readonly acceptedOutputModes: string[];
-
   private readonly shouldNormalizeBaseUrl: boolean;
 
   private readonly shouldEnforceSupportedTransports: boolean;
@@ -166,10 +147,6 @@ export class SDKClientPool {
       normalizedPreferredTransports.length > 0
         ? normalizedPreferredTransports
         : [...A2A_OUTBOUND_DEFAULT_CONFIG.defaults.preferredTransports];
-
-    this.acceptedOutputModes = mergeUniqueStrings(
-      options.acceptedOutputModes ?? [],
-    );
     this.shouldNormalizeBaseUrl =
       options.normalizeBaseUrl ??
       A2A_OUTBOUND_DEFAULT_CONFIG.policy.normalizeBaseUrl;
@@ -200,19 +177,11 @@ export class SDKClientPool {
   buildFactoryOptions(
     preferredTransports: A2ATransport[],
   ): ClientFactoryOptions {
-    const overrides: Partial<ClientFactoryOptions> = {
-      preferredTransports,
-    };
-
-    if (this.acceptedOutputModes.length > 0) {
-      overrides.clientConfig = {
-        acceptedOutputModes: this.acceptedOutputModes,
-      };
-    }
-
     return ClientFactoryOptions.createFrom(
       ClientFactoryOptions.default,
-      overrides,
+      {
+        preferredTransports,
+      },
     );
   }
 

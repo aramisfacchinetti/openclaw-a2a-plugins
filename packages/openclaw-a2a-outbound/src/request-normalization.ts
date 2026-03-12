@@ -1,29 +1,29 @@
 import { randomUUID } from "node:crypto";
-import type { DataPart, FilePart, MessageSendParams } from "@a2a-js/sdk";
+import type {
+  DataPart,
+  FilePart,
+  MessageSendParams,
+  Part,
+  PushNotificationConfig,
+  TextPart,
+} from "@a2a-js/sdk";
 import type { RequestOptions } from "@a2a-js/sdk/client";
 import type {
-  RemoteAgentAttachmentInput,
+  RemoteAgentPartInput,
+  RemoteAgentPushNotificationConfigInput,
   SendActionInput,
 } from "./schemas.js";
 
 export interface SendRequestNormalizationOptions {
   defaultTimeoutMs: number;
   defaultServiceParameters: Record<string, string>;
+  defaultAcceptedOutputModes: readonly string[];
   signal?: AbortSignal;
 }
 
 export interface NormalizedSendRequest {
   sendParams: MessageSendParams;
   requestOptions: RequestOptions;
-}
-
-export interface PlainIntentRequestInput {
-  input: string;
-  attachments?: RemoteAgentAttachmentInput[];
-  history_length?: number;
-  timeout_ms?: number;
-  service_parameters?: Record<string, string>;
-  metadata?: MessageSendParams["metadata"];
 }
 
 function mergeServiceParameters(
@@ -54,55 +54,94 @@ function mergeSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
   return AbortSignal.any(availableSignals);
 }
 
-function cloneAttachmentPart(
-  attachment: RemoteAgentAttachmentInput,
-): FilePart | DataPart {
-  switch (attachment.kind) {
+function clonePart(part: RemoteAgentPartInput): Part {
+  switch (part.kind) {
+    case "text":
+      return {
+        kind: "text",
+        text: part.text,
+        ...(part.metadata !== undefined
+          ? { metadata: { ...part.metadata } }
+          : {}),
+      } satisfies TextPart;
     case "file":
       return {
         kind: "file",
         file:
-          attachment.uri !== undefined
+          part.uri !== undefined
             ? {
-                uri: attachment.uri,
-                ...(attachment.name !== undefined ? { name: attachment.name } : {}),
-                ...(attachment.mime_type !== undefined
-                  ? { mimeType: attachment.mime_type }
+                uri: part.uri,
+                ...(part.name !== undefined ? { name: part.name } : {}),
+                ...(part.mime_type !== undefined
+                  ? { mimeType: part.mime_type }
                   : {}),
               }
             : {
-                bytes: attachment.bytes!,
-                ...(attachment.name !== undefined ? { name: attachment.name } : {}),
-                ...(attachment.mime_type !== undefined
-                  ? { mimeType: attachment.mime_type }
+                bytes: part.bytes!,
+                ...(part.name !== undefined ? { name: part.name } : {}),
+                ...(part.mime_type !== undefined
+                  ? { mimeType: part.mime_type }
                   : {}),
               },
-        ...(attachment.metadata !== undefined
-          ? { metadata: attachment.metadata }
+        ...(part.metadata !== undefined
+          ? { metadata: { ...part.metadata } }
           : {}),
-      };
+      } satisfies FilePart;
     case "data":
       return {
         kind: "data",
         data: {
-          ...attachment.data,
+          ...part.data,
         },
-        ...(attachment.metadata !== undefined
-          ? { metadata: attachment.metadata }
+        ...(part.metadata !== undefined
+          ? { metadata: { ...part.metadata } }
           : {}),
-      };
+      } satisfies DataPart;
   }
 }
 
+function clonePushNotificationConfig(
+  input: RemoteAgentPushNotificationConfigInput,
+): PushNotificationConfig {
+  return {
+    url: input.url,
+    ...(input.id !== undefined ? { id: input.id } : {}),
+    ...(input.token !== undefined ? { token: input.token } : {}),
+    ...(input.authentication !== undefined
+      ? {
+          authentication: {
+            schemes: [...input.authentication.schemes],
+            ...(input.authentication.credentials !== undefined
+              ? { credentials: input.authentication.credentials }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 function buildSendConfiguration(
-  input: PlainIntentRequestInput,
-): MessageSendParams["configuration"] | undefined {
-  if (input.history_length === undefined) {
-    return undefined;
-  }
+  input: SendActionInput,
+  defaultAcceptedOutputModes: readonly string[],
+): NonNullable<MessageSendParams["configuration"]> {
+  const acceptedOutputModes =
+    input.accepted_output_modes !== undefined
+      ? [...input.accepted_output_modes]
+      : [...defaultAcceptedOutputModes];
 
   return {
-    historyLength: input.history_length,
+    acceptedOutputModes,
+    ...(input.blocking !== undefined ? { blocking: input.blocking } : {}),
+    ...(input.history_length !== undefined
+      ? { historyLength: input.history_length }
+      : {}),
+    ...(input.push_notification_config !== undefined
+      ? {
+          pushNotificationConfig: clonePushNotificationConfig(
+            input.push_notification_config,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -127,49 +166,37 @@ export function buildRequestOptions(
   };
 }
 
-export function normalizePlainIntentRequest(
-  input: PlainIntentRequestInput | SendActionInput,
+export function normalizeSendRequest(
+  input: SendActionInput,
   options: SendRequestNormalizationOptions,
 ): NormalizedSendRequest {
-  const normalizedInput: PlainIntentRequestInput = {
-    input: input.input,
-    ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
-    ...(input.history_length !== undefined
-      ? { history_length: input.history_length }
-      : {}),
-    ...(input.timeout_ms !== undefined ? { timeout_ms: input.timeout_ms } : {}),
-    ...(input.service_parameters !== undefined
-      ? { service_parameters: input.service_parameters }
-      : {}),
-    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-  };
-
-  const configuration = buildSendConfiguration(normalizedInput);
+  const configuration = buildSendConfiguration(
+    input,
+    options.defaultAcceptedOutputModes,
+  );
 
   return {
     sendParams: {
       message: {
         kind: "message",
-        messageId: randomUUID(),
+        messageId: input.message_id ?? randomUUID(),
         role: "user",
-        parts: [
-          {
-            kind: "text",
-            text: normalizedInput.input,
-          },
-          ...(normalizedInput.attachments?.map(cloneAttachmentPart) ?? []),
-        ],
+        parts: input.parts.map(clonePart),
+        ...(input.task_id !== undefined ? { taskId: input.task_id } : {}),
+        ...(input.context_id !== undefined
+          ? { contextId: input.context_id }
+          : {}),
       },
-      ...(normalizedInput.metadata !== undefined
-        ? { metadata: normalizedInput.metadata }
+      ...(input.metadata !== undefined
+        ? { metadata: { ...input.metadata } }
         : {}),
-      ...(configuration !== undefined ? { configuration } : {}),
+      configuration,
     },
     requestOptions: buildRequestOptions(
-      normalizedInput.timeout_ms,
+      input.timeout_ms,
       options.defaultTimeoutMs,
       options.defaultServiceParameters,
-      normalizedInput.service_parameters,
+      input.service_parameters,
       options.signal,
     ),
   };

@@ -74,27 +74,31 @@ Call `list_targets` first to discover configured aliases and refreshed target-ca
 - `action`: required for every request.
 - `target_alias`: preferred routing key for `send`, `watch`, `status`, and `cancel`.
 - `target_url`: explicit remote base URL when policy allows it or when it matches a configured target.
-- `input`: required for `send`; becomes the single user text part sent to the peer.
-- `attachments`: optional file or data attachments for `send`.
+- `parts`: required non-empty array for `send`; each part is `text`, `file`, or `data`.
+- `message_id`: optional client-supplied message id for `send`.
 - `task_handle`: opaque follow-up handle returned after delegated tasks are created.
-- `task_id`: fallback follow-up key when no live `task_handle` is available.
+- `task_id`: for `send`, continue an existing remote task; for `watch`/`status`/`cancel`, fallback follow-up key when no live `task_handle` is available.
+- `context_id`: optional remote context id for `send`.
 - `follow_updates`: stream live updates during `send`.
+- `accepted_output_modes`: optional per-call output mode override for `send`.
+- `blocking`: optional non-stream `send` knob. Rejected when `follow_updates=true`.
 - `history_length`: optional history window for `send` and `status`.
+- `push_notification_config`: optional push callback config for `send`.
 - `timeout_ms`: per-request timeout override.
 - `service_parameters`: optional outbound service parameters.
 - `metadata`: optional metadata payload for `send`.
 
-Action-specific validation rejects unsupported fields for each action, so keep requests flat and action-focused.
+Snake_case tool fields are translated internally to the A2A SDK camelCase request payload. Action-specific validation rejects unsupported fields for each action, so keep requests flat and action-focused.
 
 ## Actions
 
 - `list_targets`: discover configured targets, aliases, examples, and hydrated card metadata.
-- `send`: send user input to a remote agent selected by `target_alias`, `target_url`, or a configured default target.
+- `send`: send one or more message parts to a remote agent selected by `target_alias`, `target_url`, or a configured default target.
 - `watch`: resubscribe to a running delegated task and stream updates.
 - `status`: fetch the latest task snapshot.
 - `cancel`: request cancellation for a delegated task.
 
-For follow-up actions, prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`.
+For follow-up actions, prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`. `send.task_id` is a continuation id for the remote peer, not a replacement for `task_handle` in later tool calls.
 
 ## Examples
 
@@ -148,7 +152,12 @@ For follow-up actions, prefer `task_handle` first. If the handle is expired or u
 {
   "action": "send",
   "target_alias": "support",
-  "input": "Summarize this bug report for triage.",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Summarize this bug report for triage."
+    }
+  ],
   "metadata": {
     "ticket_id": "INC-42"
   }
@@ -178,7 +187,12 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
 ```json
 {
   "action": "send",
-  "input": "Draft a reply to the customer update.",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Draft a reply to the customer update."
+    }
+  ],
   "follow_updates": true
 }
 ```
@@ -223,6 +237,25 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
       "final": true
     }
   }
+}
+```
+
+### Continue An Existing Remote Task
+
+Use `send.task_id` and `send.context_id` when the peer expects a continuation instead of a brand-new task:
+
+```json
+{
+  "action": "send",
+  "target_alias": "support",
+  "task_id": "task-456",
+  "context_id": "ctx-456",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Continue the prior conversation and draft the final reply."
+    }
+  ]
 }
 ```
 

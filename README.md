@@ -69,7 +69,12 @@ The ClawHub skill is a slash-command setup helper for installing, enabling, conf
 {
   "action": "send",
   "target_alias": "support",
-  "input": "Summarize this incident and propose next steps."
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Summarize this incident and propose next steps."
+    }
+  ]
 }
 ```
 

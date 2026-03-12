@@ -26,12 +26,26 @@ const TASK_HANDLE_SCHEMA = {
     "Opaque task handle issued by this plugin. Handles are process-local and invalidated by restarts.",
 } as const;
 
-const ATTACHMENT_METADATA_SCHEMA = {
+const PART_METADATA_SCHEMA = {
   type: "object",
   additionalProperties: true,
 } as const;
 
-const FILE_ATTACHMENT_SCHEMA = {
+const TEXT_PART_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["text"] },
+    text: {
+      type: "string",
+      description: "Text content for the message part.",
+    },
+    metadata: PART_METADATA_SCHEMA,
+  },
+  required: ["kind", "text"],
+} as const;
+
+const FILE_PART_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -56,13 +70,13 @@ const FILE_ATTACHMENT_SCHEMA = {
       minLength: 1,
       description: "Optional MIME type.",
     },
-    metadata: ATTACHMENT_METADATA_SCHEMA,
+    metadata: PART_METADATA_SCHEMA,
   },
   required: ["kind"],
   anyOf: [{ required: ["uri"] }, { required: ["bytes"] }],
 } as const;
 
-const DATA_ATTACHMENT_SCHEMA = {
+const DATA_PART_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -72,9 +86,56 @@ const DATA_ATTACHMENT_SCHEMA = {
       additionalProperties: true,
       description: "Structured attachment payload.",
     },
-    metadata: ATTACHMENT_METADATA_SCHEMA,
+    metadata: PART_METADATA_SCHEMA,
   },
   required: ["kind", "data"],
+} as const;
+
+const PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    schemes: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "string",
+        minLength: 1,
+      },
+      description: "Supported authentication schemes for push callbacks.",
+    },
+    credentials: {
+      type: "string",
+      minLength: 1,
+      description: "Optional credentials for the push callback endpoint.",
+    },
+  },
+  required: ["schemes"],
+} as const;
+
+const PUSH_NOTIFICATION_CONFIG_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    url: {
+      type: "string",
+      minLength: 1,
+      format: "uri",
+      description: "Callback URL for task push notifications.",
+    },
+    id: {
+      type: "string",
+      minLength: 1,
+      description: "Optional client-managed push notification config id.",
+    },
+    token: {
+      type: "string",
+      minLength: 1,
+      description: "Optional validation token for incoming notifications.",
+    },
+    authentication: PUSH_NOTIFICATION_AUTHENTICATION_SCHEMA,
+  },
+  required: ["url"],
 } as const;
 
 export interface A2ATargetInput {
@@ -83,7 +144,13 @@ export interface A2ATargetInput {
   preferredTransports?: A2ATransport[];
 }
 
-export interface RemoteAgentFileAttachmentInput {
+export interface RemoteAgentTextPartInput {
+  kind: "text";
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RemoteAgentFilePartInput {
   kind: "file";
   uri?: string;
   bytes?: string;
@@ -92,15 +159,28 @@ export interface RemoteAgentFileAttachmentInput {
   metadata?: Record<string, unknown>;
 }
 
-export interface RemoteAgentDataAttachmentInput {
+export interface RemoteAgentDataPartInput {
   kind: "data";
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
 
-export type RemoteAgentAttachmentInput =
-  | RemoteAgentFileAttachmentInput
-  | RemoteAgentDataAttachmentInput;
+export type RemoteAgentPartInput =
+  | RemoteAgentTextPartInput
+  | RemoteAgentFilePartInput
+  | RemoteAgentDataPartInput;
+
+export interface RemoteAgentPushNotificationAuthenticationInput {
+  schemes: string[];
+  credentials?: string;
+}
+
+export interface RemoteAgentPushNotificationConfigInput {
+  url: string;
+  id?: string;
+  token?: string;
+  authentication?: RemoteAgentPushNotificationAuthenticationInput;
+}
 
 interface RemoteAgentBaseInput {
   target_alias?: string;
@@ -117,11 +197,15 @@ export interface ListTargetsActionInput {
 
 export interface SendActionInput extends RemoteAgentBaseInput {
   action: "send";
-  input: string;
-  attachments?: RemoteAgentAttachmentInput[];
+  parts: [RemoteAgentPartInput, ...RemoteAgentPartInput[]];
+  message_id?: string;
+  context_id?: string;
   follow_updates?: boolean;
+  accepted_output_modes?: string[];
+  blocking?: boolean;
   history_length?: number;
   metadata?: MessageSendParams["metadata"];
+  push_notification_config?: RemoteAgentPushNotificationConfigInput;
 }
 
 export interface WatchActionInput extends RemoteAgentBaseInput {
@@ -164,13 +248,18 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "action",
       "target_alias",
       "target_url",
-      "input",
-      "attachments",
+      "parts",
+      "message_id",
+      "task_id",
+      "context_id",
       "follow_updates",
+      "accepted_output_modes",
+      "blocking",
       "history_length",
       "timeout_ms",
       "service_parameters",
       "metadata",
+      "push_notification_config",
     ]),
     watch: new Set([
       "action",
@@ -282,30 +371,52 @@ export function buildRemoteAgentParametersSchema(
         description:
           "Explicit remote target base URL. When target URL overrides are disabled, the URL must match a configured target.",
       },
-      input: {
-        type: "string",
-        minLength: 1,
-        description:
-          "User text input for action=send. This becomes the single user text part.",
-      },
-      attachments: {
+      parts: {
         type: "array",
+        minItems: 1,
         description:
-          "Optional file/data attachments for action=send. Inline text attachments are not supported in phase 4; use input instead.",
+          "Message parts for action=send. Provide one or more text, file, or data parts.",
         items: {
-          oneOf: [FILE_ATTACHMENT_SCHEMA, DATA_ATTACHMENT_SCHEMA],
+          oneOf: [TEXT_PART_SCHEMA, FILE_PART_SCHEMA, DATA_PART_SCHEMA],
         },
       },
       task_handle: TASK_HANDLE_SCHEMA,
+      message_id: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Optional client-supplied message id for action=send. A UUID is generated when omitted.",
+      },
       task_id: {
         type: "string",
         minLength: 1,
-        description: "Remote task id for watch/status/cancel when no task_handle is available.",
+        description:
+          "Remote task id. For action=send this continues an existing task; for watch/status/cancel it identifies the delegated task when no task_handle is available.",
+      },
+      context_id: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Optional remote context id for action=send to continue an existing conversation context.",
       },
       follow_updates: {
         type: "boolean",
         description:
           "When true, action=send streams updates and returns the full event log.",
+      },
+      accepted_output_modes: {
+        type: "array",
+        items: {
+          type: "string",
+          minLength: 1,
+        },
+        description:
+          "Optional output MIME types for action=send. Overrides plugin policy.acceptedOutputModes for this call.",
+      },
+      blocking: {
+        type: "boolean",
+        description:
+          "Optional action=send knob for message/send. Rejected when follow_updates=true.",
       },
       history_length: {
         type: "integer",
@@ -327,6 +438,11 @@ export function buildRemoteAgentParametersSchema(
         type: "object",
         additionalProperties: true,
         description: "Optional metadata payload for action=send.",
+      },
+      push_notification_config: {
+        ...PUSH_NOTIFICATION_CONFIG_SCHEMA,
+        description:
+          "Optional action=send push notification configuration forwarded to the remote agent.",
       },
     },
     required: ["action"],
@@ -431,11 +547,21 @@ function validateSendInput(
 ): ErrorObject[] {
   const errors = validateExplicitTargetFields(input, summary, config);
 
-  if (input.input === undefined) {
+  if (input.parts === undefined) {
     errors.push(
-      makeError("", "required", "send requires input", {
-        missingProperty: "input",
+      makeError("", "required", "send requires parts", {
+        missingProperty: "parts",
       }),
+    );
+  }
+
+  if (input.follow_updates === true && input.blocking !== undefined) {
+    errors.push(
+      makeError(
+        "/blocking",
+        "not",
+        "send does not allow blocking when follow_updates=true",
+      ),
     );
   }
 
