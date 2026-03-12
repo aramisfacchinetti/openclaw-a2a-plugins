@@ -45,6 +45,35 @@ test('SKILL.md teaches target_alias and task_handle preference', () => {
   assert.ok(content.includes('task_handle'))
 })
 
+test('SKILL.md forbids inferring task continuity from context_id-only results', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(
+    content.includes(
+      '`context_id` only: conversation continuity only. Use it only with `send` to start a new task in the same conversation.',
+    ),
+  )
+  assert.ok(content.includes('Never infer or synthesize `task_id` from `context_id`'))
+  assert.ok(
+    content.includes(
+      'Do not call `watch`, `status`, or `cancel` from a result that has only `context_id`.',
+    ),
+  )
+})
+
+test('SKILL.md documents fail-fast behavior for non-trackable continuations', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(
+    content.includes(
+      'If lifecycle tracking is required, fail fast when the peer returns only a non-trackable conversation continuation.',
+    ),
+  )
+  assert.ok(
+    content.includes(
+      'If the result includes `context_id` without `task_handle` or `task_id`, there is no task lifecycle to poll, watch, or cancel.',
+    ),
+  )
+})
+
 test('SKILL.md requires both outbound enable flags', () => {
   const content = readFileSync(skillPath, 'utf8')
   const closingIndex = content.indexOf('\n---\n', 4)
