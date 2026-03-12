@@ -289,7 +289,12 @@ test("remote_agent execute returns VALIDATION_ERROR for unknown alias", async ()
   const result = await executeTool(remoteAgent, {
     action: "send",
     target_alias: "unknown",
-    input: "hello",
+    parts: [
+      {
+        kind: "text",
+        text: "hello",
+      },
+    ],
   });
 
   const payload = toFailure(readStructuredContent(result));

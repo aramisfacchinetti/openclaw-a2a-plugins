@@ -110,7 +110,6 @@ function buildCatalog(config: unknown): TargetCatalog {
   const clientPool = createClientPool({
     defaultCardPath: parsed.defaults.cardPath,
     preferredTransports: parsed.defaults.preferredTransports,
-    acceptedOutputModes: parsed.policy.acceptedOutputModes,
     normalizeBaseUrl: parsed.policy.normalizeBaseUrl,
     enforceSupportedTransports: parsed.policy.enforceSupportedTransports,
   });

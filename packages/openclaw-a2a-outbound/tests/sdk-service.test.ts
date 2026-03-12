@@ -60,7 +60,9 @@ type StartedPeer = {
   cardPath: string;
 };
 
-type ServiceConfigOverrides = Partial<A2AOutboundPluginConfig> & {
+type ServiceConfigOverrides = Partial<
+  Omit<A2AOutboundPluginConfig, "defaults" | "taskHandles" | "policy">
+> & {
   defaults?: Partial<A2AOutboundPluginConfig["defaults"]>;
   taskHandles?: Partial<A2AOutboundPluginConfig["taskHandles"]>;
   policy?: Partial<A2AOutboundPluginConfig["policy"]>;
@@ -446,7 +448,12 @@ test("send routes through an explicit target_alias", async (t) => {
   const result = await service.execute({
     action: "send",
     target_alias: "support",
-    input: "hello",
+    parts: [
+      {
+        kind: "text",
+        text: "hello",
+      },
+    ],
   });
 
   const success = asSuccess(result);
@@ -464,6 +471,11 @@ test("send routes through an explicit target_alias", async (t) => {
   assert.equal(message.role, "user");
   assert.equal(parts[0]?.kind, "text");
   assert.equal(parts[0]?.text, "hello");
+  assert.deepEqual(
+    asRecord(asRecord(peer.state.lastSendParams ?? {}).configuration)
+      .acceptedOutputModes,
+    [],
+  );
 });
 
 test("send falls back to the configured default target", async (t) => {
@@ -481,7 +493,12 @@ test("send falls back to the configured default target", async (t) => {
 
   const result = await service.execute({
     action: "send",
-    input: "hello default",
+    parts: [
+      {
+        kind: "text",
+        text: "hello default",
+      },
+    ],
   });
 
   const success = asSuccess(result);
@@ -490,6 +507,58 @@ test("send falls back to the configured default target", async (t) => {
   assert.equal(success.summary.target_alias, "support");
   assert.equal(success.summary.target_url, `${peer.baseUrl}/`);
   assert.equal(peer.state.sendCalls, 1);
+});
+
+test("send forwards blocking, accepted output modes, and continuation ids on message/send", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+    policy: {
+      acceptedOutputModes: ["text/plain"],
+    },
+  });
+
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    message_id: "message-1",
+    task_id: "task-continue-1",
+    context_id: "context-continue-1",
+    parts: [
+      {
+        kind: "data",
+        data: {
+          ticket: "123",
+        },
+      },
+    ],
+    accepted_output_modes: ["application/json"],
+    blocking: false,
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const message = asRecord(params.message);
+  const configuration = asRecord(params.configuration);
+
+  assert.equal(success.action, "send");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.streamCalls, 0);
+  assert.equal(message.messageId, "message-1");
+  assert.equal(message.taskId, "task-continue-1");
+  assert.equal(message.contextId, "context-continue-1");
+  assert.deepEqual(message.parts, [
+    {
+      kind: "data",
+      data: {
+        ticket: "123",
+      },
+    },
+  ]);
+  assert.deepEqual(configuration.acceptedOutputModes, ["application/json"]);
+  assert.equal(configuration.blocking, false);
 });
 
 test("send with follow_updates=true emits send updates and returns a task_handle", async (t) => {
@@ -530,7 +599,12 @@ test("send with follow_updates=true emits send updates and returns a task_handle
     {
       action: "send",
       target_alias: "support",
-      input: "stream hello",
+      parts: [
+        {
+          kind: "text",
+          text: "stream hello",
+        },
+      ],
       follow_updates: true,
     },
     {
@@ -548,6 +622,7 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(success.summary.status, "completed");
   assert.match(taskHandleFromSummary(success.summary), /^rah_/);
   assert.equal(peer.state.streamCalls, 1);
+  assert.equal(peer.state.sendCalls, 0);
   assert.ok(Array.isArray(raw.events));
   assert.equal((raw.events as unknown[]).length, 2);
   assert.equal(updates.length, 2);
@@ -734,7 +809,12 @@ test("send fails validation when no target can be resolved", async () => {
 
   const result = await service.execute({
     action: "send",
-    input: "hello",
+    parts: [
+      {
+        kind: "text",
+        text: "hello",
+      },
+    ],
   });
 
   const failure = asFailure(result);
