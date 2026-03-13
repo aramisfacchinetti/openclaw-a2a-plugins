@@ -19,6 +19,13 @@ function target(): ResolvedTarget {
   };
 }
 
+function streamingTarget(): ResolvedTarget {
+  return {
+    ...target(),
+    streamingSupported: true,
+  };
+}
+
 function peerCardSummaryFromRaw(
   entry: TargetCatalogEntry,
 ): TargetListPeerCardSummary {
@@ -85,6 +92,7 @@ test("sendSuccess exposes only conversation continuation for context-only messag
     },
   );
 
+  assert.equal(result.summary.response_kind, "message");
   assert.deepEqual(result.summary.continuation, {
     conversation: {
       context_id: "context-1",
@@ -110,10 +118,12 @@ test("sendSuccess preserves task continuation when a message payload includes ta
     },
   );
 
+  assert.equal(result.summary.response_kind, "message");
   assert.deepEqual(result.summary.continuation, {
     task: {
       task_handle: "rah_123",
       task_id: "task-1",
+      can_resume_send: true,
       can_send: true,
       can_status: true,
       can_cancel: true,
@@ -128,7 +138,7 @@ test("sendSuccess preserves task continuation when a message payload includes ta
 
 test("statusSuccess exposes nested task and conversation continuations for raw tasks", () => {
   const result = statusSuccess(
-    target(),
+    streamingTarget(),
     {
       kind: "task",
       id: "task-1",
@@ -142,14 +152,16 @@ test("statusSuccess exposes nested task and conversation continuations for raw t
     },
   );
 
+  assert.equal(result.summary.response_kind, "task");
   assert.deepEqual(result.summary.continuation, {
     task: {
       task_handle: "rah_123",
       task_id: "task-1",
       status: "completed",
-      can_send: true,
+      can_resume_send: false,
+      can_send: false,
       can_status: true,
-      can_cancel: true,
+      can_cancel: false,
       can_watch: false,
     },
     conversation: {
@@ -160,7 +172,7 @@ test("statusSuccess exposes nested task and conversation continuations for raw t
 });
 
 test("streamUpdate exposes nested continuations for status and artifact events", () => {
-  const status = streamUpdate("watch", target(), {
+  const status = streamUpdate("watch", streamingTarget(), {
     kind: "status-update",
     taskId: "task-1",
     contextId: "context-1",
@@ -169,7 +181,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
     },
     final: false,
   });
-  const artifact = streamUpdate("watch", target(), {
+  const artifact = streamUpdate("watch", streamingTarget(), {
     kind: "artifact-update",
     taskId: "task-1",
     contextId: "context-1",
@@ -181,14 +193,16 @@ test("streamUpdate exposes nested continuations for status and artifact events",
     lastChunk: false,
   });
 
+  assert.equal(status.summary.response_kind, "task");
   assert.deepEqual(status.summary.continuation, {
     task: {
       task_id: "task-1",
       status: "working",
+      can_resume_send: true,
       can_send: true,
       can_status: true,
       can_cancel: true,
-      can_watch: false,
+      can_watch: true,
     },
     conversation: {
       context_id: "context-1",
@@ -198,6 +212,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
   assert.deepEqual(artifact.summary.continuation, {
     task: {
       task_id: "task-1",
+      can_resume_send: true,
       can_send: true,
       can_status: true,
       can_cancel: true,
@@ -211,6 +226,51 @@ test("streamUpdate exposes nested continuations for status and artifact events",
   assert.deepEqual(artifact.summary.artifacts?.[0]?.parts, [
     { kind: "text", text: "partial" },
   ]);
+});
+
+test("streamUpdate summarizes accumulated task state instead of only the final event", () => {
+  const update = streamUpdate("send", streamingTarget(), [
+    {
+      kind: "task",
+      id: "task-1",
+      contextId: "context-1",
+      status: {
+        state: "submitted",
+      },
+    },
+    {
+      kind: "artifact-update",
+      taskId: "task-1",
+      contextId: "context-1",
+      artifact: {
+        artifactId: "artifact-1",
+        parts: [{ kind: "text", text: "partial reply" }],
+      },
+      append: false,
+      lastChunk: false,
+    },
+    {
+      kind: "status-update",
+      taskId: "task-1",
+      contextId: "context-1",
+      status: {
+        state: "completed",
+      },
+      final: true,
+    },
+  ]);
+
+  assert.equal(update.summary.response_kind, "task");
+  assert.equal(update.summary.message_text, "partial reply");
+  assert.deepEqual(update.summary.continuation?.task, {
+    task_id: "task-1",
+    status: "completed",
+    can_resume_send: false,
+    can_send: false,
+    can_status: true,
+    can_cancel: false,
+    can_watch: false,
+  });
 });
 
 test("listTargetsSuccess nests peer-card data under peer_card without flat capability mirrors", () => {
@@ -268,8 +328,14 @@ test("listTargetsSuccess nests peer-card data under peer_card without flat capab
 
   assert.ok(summaryEntry);
   assert.ok(rawEntry);
-  assert.equal("streaming_supported" in (summaryEntry as Record<string, unknown>), false);
-  assert.equal("preferred_transport" in (summaryEntry as Record<string, unknown>), false);
+  assert.equal(
+    "streaming_supported" in (summaryEntry as unknown as Record<string, unknown>),
+    false,
+  );
+  assert.equal(
+    "preferred_transport" in (summaryEntry as unknown as Record<string, unknown>),
+    false,
+  );
   assert.deepEqual(summaryEntry?.peer_card, {
     preferred_transport: "JSONRPC",
     additional_interfaces: [

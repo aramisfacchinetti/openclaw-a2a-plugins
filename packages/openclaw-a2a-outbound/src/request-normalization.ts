@@ -186,6 +186,9 @@ export function normalizeSendRequest(
         ...(input.context_id !== undefined
           ? { contextId: input.context_id }
           : {}),
+        ...(input.reference_task_ids !== undefined
+          ? { referenceTaskIds: [...input.reference_task_ids] }
+          : {}),
       },
       ...(input.metadata !== undefined
         ? { metadata: { ...input.metadata } }
@@ -199,5 +202,23 @@ export function normalizeSendRequest(
       input.service_parameters,
       options.signal,
     ),
+  };
+}
+
+export function normalizeStrictTaskCreationSendRequest(
+  input: SendActionInput,
+  options: SendRequestNormalizationOptions,
+): NormalizedSendRequest {
+  const normalized = normalizeSendRequest(input, options);
+
+  return {
+    ...normalized,
+    sendParams: {
+      ...normalized.sendParams,
+      configuration: {
+        ...normalized.sendParams.configuration,
+        blocking: false,
+      },
+    },
   };
 }

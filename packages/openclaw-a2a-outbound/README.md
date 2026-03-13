@@ -79,7 +79,9 @@ Call `list_targets` first to discover configured aliases and refreshed peer-card
 - `task_handle`: opaque delegated-task handle. `send`, `watch`, `status`, and `cancel` all accept it.
 - `task_id`: for `send`, continue an existing remote task when no `task_handle` is available; for `watch`/`status`/`cancel`, fallback follow-up key when no live `task_handle` is available.
 - `context_id`: optional remote conversation context id for `send`. Use it either with `task_id` or by itself to start a new task inside an existing conversation.
-- `follow_updates`: stream live updates during `send`.
+- `reference_task_ids`: optional related task ids for `send`. `task_id` continues an existing task; `reference_task_ids` references prior tasks without continuing them.
+- `task_requirement`: optional `send` contract. Defaults to `"optional"`; set `task_requirement="required"` to require a real task.
+- `follow_updates`: stream the initial `send`. `follow_updates=true` means “stream the initial send”; it does not guarantee task creation unless `task_requirement="required"`.
 - `accepted_output_modes`: optional per-call output mode override for `send`.
 - `blocking`: optional non-stream `send` knob. Rejected when `follow_updates=true`.
 - `history_length`: optional history window for `send` and `status`.
@@ -104,6 +106,7 @@ Supported `send` modes:
 
 - new task: `send` with `target_alias`/`target_url` or a configured default target, and no continuation fields
 - existing task continuation: `send` with `task_handle`, or `task_id` plus `target_alias`/`target_url` or a configured default target
+- related new task: `send` with `reference_task_ids`, optionally plus `context_id`, plus `target_alias`/`target_url` or a configured default target
 - new task in an existing conversation: `send` with `context_id` plus `target_alias`/`target_url` or a configured default target
 
 When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`.
@@ -112,9 +115,12 @@ When a delegated task pauses in `input-required` or an approval workflow, resume
 
 This package returns continuation metadata under `summary.continuation`.
 
-- `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, and `can_watch` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
+- `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, `can_resume_send`, `can_watch`, and the deprecated alias `can_send` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
 - `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`.
+- `response_kind`: descriptive wire-shape classification only. `response_kind="message"` means the peer returned a `Message`; `response_kind="task"` means a task-bearing response or event appeared. `response_kind` does not replace `summary.continuation`.
 - Do not poll from conversation continuity.
+- Message-only follow-up uses `context_id`, not task actions.
+- `task_handle` is returned only when the peer actually created a task.
 - The old flat `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch` fields are removed.
 
 Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
@@ -274,11 +280,45 @@ if (task) {
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
+    "response_kind": "message",
     "message_text": "Triage summary: reproduce, collect logs, and notify the on-call engineer."
   },
   "raw": {
     "kind": "message"
   }
+}
+```
+
+### Require A Durable Task
+
+```json
+{
+  "action": "send",
+  "target_alias": "support",
+  "task_requirement": "required",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Start a trackable task and return immediately."
+    }
+  ]
+}
+```
+
+### Start Related Work Without Continuing A Task
+
+```json
+{
+  "action": "send",
+  "target_alias": "support",
+  "context_id": "ctx-123",
+  "reference_task_ids": ["task-101", "task-102"],
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Start a related task in the same conversation."
+    }
+  ]
 }
 ```
 
@@ -307,15 +347,17 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
+    "response_kind": "task",
     "continuation": {
       "task": {
         "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
         "task_id": "task-456",
         "status": "completed",
-        "can_send": true,
+        "can_resume_send": false,
+        "can_send": false,
         "can_status": true,
-        "can_cancel": true,
-        "can_watch": true
+        "can_cancel": false,
+        "can_watch": false
       },
       "conversation": {
         "context_id": "ctx-456",
@@ -433,6 +475,7 @@ Use `summary.continuation.conversation.context_id` when the prior result has con
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
+    "response_kind": "message",
     "message_text": "Conversation continued. Start the next task when ready.",
     "continuation": {
       "conversation": {
@@ -485,15 +528,17 @@ Do not poll from conversation continuity.
   "summary": {
     "target_alias": "support",
     "target_url": "https://support.example/",
+    "response_kind": "task",
     "continuation": {
       "task": {
         "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
         "task_id": "task-456",
         "status": "completed",
-        "can_send": true,
+        "can_resume_send": false,
+        "can_send": false,
         "can_status": true,
-        "can_cancel": true,
-        "can_watch": true
+        "can_cancel": false,
+        "can_watch": false
       },
       "conversation": {
         "context_id": "ctx-456",
