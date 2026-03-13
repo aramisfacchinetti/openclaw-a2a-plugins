@@ -301,6 +301,16 @@ export function normalizeAgentCardSnapshot(
   };
 }
 
+function refreshedCardSnapshot(
+  card: AgentCard,
+  refreshedAt: string,
+): TargetCardSnapshot {
+  return {
+    ...normalizeAgentCardSnapshot(card),
+    lastRefreshedAt: refreshedAt,
+  };
+}
+
 function fallbackErrorCode(error: unknown): A2AOutboundErrorCode {
   return error instanceof A2AOutboundError
     ? error.code
@@ -491,11 +501,7 @@ export class TargetCatalog {
   }
 
   recordAgentCard(target: ResolvedTarget, card: AgentCard): ResolvedTarget {
-    const refreshedAt = new Date().toISOString();
-    const next: TargetCardSnapshot = {
-      ...normalizeAgentCardSnapshot(card),
-      lastRefreshedAt: refreshedAt,
-    };
+    const next = refreshedCardSnapshot(card, new Date().toISOString());
 
     this.cardCache.set(target.baseUrl, next);
     return this.applyCachedMetadata(target);
@@ -635,10 +641,7 @@ export class TargetCatalog {
     try {
       const clientEntry = await this.clientPool.get(target);
       const card = await clientEntry.client.getAgentCard();
-      const next: TargetCardSnapshot = {
-        ...normalizeAgentCardSnapshot(card),
-        lastRefreshedAt: refreshedAt,
-      };
+      const next = refreshedCardSnapshot(card, refreshedAt);
 
       this.cardCache.set(target.baseUrl, next);
       return next;
