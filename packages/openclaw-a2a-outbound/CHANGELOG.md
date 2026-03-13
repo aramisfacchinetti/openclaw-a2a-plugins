@@ -1,5 +1,15 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 2.0.0
+
+### Major Changes
+
+- 8627a84: Replace the flat `remote_agent` summary task fields with nested `summary.continuation.task` and `summary.continuation.conversation` objects so task lifecycle and conversation continuity are handled separately.
+
+### Patch Changes
+
+- dc7ba6e: Align the bundled remote-agent skill gate with both outbound enable flags and document the optional a2a-delegation-setup helper.
+
 ## 1.0.0
 
 ### Major Changes
