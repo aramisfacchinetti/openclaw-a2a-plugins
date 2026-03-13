@@ -5,6 +5,7 @@ import {
   sendSuccess,
   statusSuccess,
   streamUpdate,
+  type TargetListPeerCardSummary,
 } from "../dist/result-shape.js";
 import type { ResolvedTarget } from "../dist/sdk-client-pool.js";
 import type { TargetCatalogEntry } from "../dist/target-catalog.js";
@@ -15,6 +16,56 @@ function target(): ResolvedTarget {
     baseUrl: "https://support.example/",
     cardPath: "/.well-known/agent-card.json",
     preferredTransports: ["JSONRPC", "HTTP+JSON"],
+  };
+}
+
+function peerCardSummaryFromRaw(
+  entry: TargetCatalogEntry,
+): TargetListPeerCardSummary {
+  return {
+    ...(entry.card.preferredTransport !== undefined
+      ? { preferred_transport: entry.card.preferredTransport }
+      : {}),
+    additional_interfaces: entry.card.additionalInterfaces.map((cardInterface) => ({
+      transport: cardInterface.transport,
+      url: cardInterface.url,
+    })),
+    capabilities: {
+      ...(typeof entry.card.capabilities.streaming === "boolean"
+        ? { streaming: entry.card.capabilities.streaming }
+        : {}),
+      ...(typeof entry.card.capabilities.pushNotifications === "boolean"
+        ? { push_notifications: entry.card.capabilities.pushNotifications }
+        : {}),
+      ...(typeof entry.card.capabilities.stateTransitionHistory === "boolean"
+        ? {
+            state_transition_history:
+              entry.card.capabilities.stateTransitionHistory,
+          }
+        : {}),
+      ...(entry.card.capabilities.extensions !== undefined
+        ? {
+            extensions: entry.card.capabilities.extensions.map((extension) =>
+              structuredClone(extension),
+            ),
+          }
+        : {}),
+    },
+    default_input_modes: [...entry.card.defaultInputModes],
+    default_output_modes: [...entry.card.defaultOutputModes],
+    skills: entry.card.skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      tags: [...skill.tags],
+      examples: [...skill.examples],
+      ...(skill.inputModes !== undefined
+        ? { input_modes: [...skill.inputModes] }
+        : {}),
+      ...(skill.outputModes !== undefined
+        ? { output_modes: [...skill.outputModes] }
+        : {}),
+    })),
   };
 }
 
@@ -251,6 +302,7 @@ test("listTargetsSuccess nests peer-card data under peer_card without flat capab
       },
     ],
   });
+  assert.deepEqual(summaryEntry?.peer_card, peerCardSummaryFromRaw(rawEntry));
   assert.deepEqual(rawEntry.card.additionalInterfaces, [
     {
       transport: "JSONRPC",
@@ -267,6 +319,8 @@ test("listTargetsSuccess nests peer-card data under peer_card without flat capab
     stateTransitionHistory: false,
     extensions: [{ uri: "https://example.com/extensions/audit" }],
   });
+  assert.deepEqual(rawEntry.card.defaultInputModes, ["text/plain"]);
+  assert.deepEqual(rawEntry.card.defaultOutputModes, ["text/plain"]);
   assert.deepEqual(rawEntry.card.skills[0]?.inputModes, ["application/json"]);
   assert.deepEqual(rawEntry.card.skills[0]?.outputModes, ["application/pdf"]);
 });
