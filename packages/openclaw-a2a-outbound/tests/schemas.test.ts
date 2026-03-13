@@ -110,6 +110,8 @@ test("createRemoteAgentInputValidator accepts send parts and parity fields", () 
     message_id: "message-1",
     task_id: "task-1",
     context_id: "context-1",
+    reference_task_ids: ["task-0"],
+    task_requirement: "required",
     accepted_output_modes: ["text/plain"],
     blocking: false,
     history_length: 3,
@@ -125,6 +127,8 @@ test("createRemoteAgentInputValidator accepts send parts and parity fields", () 
   assert.equal(out.message_id, "message-1");
   assert.equal(out.task_id, "task-1");
   assert.equal(out.context_id, "context-1");
+  assert.deepEqual(out.reference_task_ids, ["task-0"]);
+  assert.equal(out.task_requirement, "required");
   assert.deepEqual(out.parts, [
     {
       kind: "text",
@@ -145,6 +149,31 @@ test("createRemoteAgentInputValidator accepts send parts and parity fields", () 
   assert.deepEqual(out.accepted_output_modes, ["text/plain"]);
   assert.equal(out.blocking, false);
   assert.equal(out.history_length, 3);
+});
+
+test("createRemoteAgentInputValidator accepts task_id with reference_task_ids", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+    targets: [
+      {
+        alias: "support",
+        baseUrl: "https://support.example",
+        default: true,
+      },
+    ],
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  const out = validate({
+    action: "send",
+    task_id: "task-1",
+    reference_task_ids: ["task-2", "task-3"],
+    parts: [{ kind: "text", text: "continue with references" }],
+  });
+
+  assert.equal(out.action, "send");
+  assert.equal(out.task_id, "task-1");
+  assert.deepEqual(out.reference_task_ids, ["task-2", "task-3"]);
 });
 
 test("createRemoteAgentInputValidator accepts send with task_handle", () => {

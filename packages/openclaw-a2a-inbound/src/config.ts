@@ -23,6 +23,11 @@ export const DEFAULT_OUTPUT_MODES = [
   "text/plain",
   "application/json",
 ] as const;
+export const INBOUND_AGENT_STYLES = [
+  "hybrid",
+  "task-generating",
+] as const;
+export type A2AInboundAgentStyle = (typeof INBOUND_AGENT_STYLES)[number];
 
 export interface A2AInboundSkillConfig {
   id: string;
@@ -50,6 +55,7 @@ export interface A2AInboundAccountConfig {
   maxBodyBytes: number;
   defaultInputModes: A2AInboundInputMode[];
   defaultOutputModes: string[];
+  agentStyle: A2AInboundAgentStyle;
   taskStore: A2AInboundTaskStoreConfig;
   skills: A2AInboundSkillConfig[];
 }
@@ -133,6 +139,11 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
             type: "array",
             items: { type: "string" },
             default: [...DEFAULT_OUTPUT_MODES],
+          },
+          agentStyle: {
+            type: "string",
+            enum: [...INBOUND_AGENT_STYLES],
+            default: "hybrid",
           },
           taskStore: {
             oneOf: [
@@ -226,6 +237,11 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
     help: "Persist tasks in memory only or in a single-writer JSON file directory.",
     advanced: true,
   },
+  "accounts.*.agentStyle": {
+    label: "Agent Style",
+    help: 'Choose "hybrid" to stay protocol-faithful or "task-generating" to force new executions onto the durable task path.',
+    advanced: true,
+  },
   "accounts.*.taskStore.path": {
     label: "Task Store Path",
     help: "Absolute directory path used when task storage is set to json-file.",
@@ -314,6 +330,31 @@ function readStringArray(
   }
 
   return deduped.size > 0 ? [...deduped] : [...fallback];
+}
+
+function parseAgentStyle(
+  accountId: string,
+  value: unknown,
+): A2AInboundAgentStyle {
+  if (typeof value === "undefined") {
+    return "hybrid";
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(
+      `channels.${CHANNEL_ID}.accounts.${accountId}.agentStyle must be one of ${INBOUND_AGENT_STYLES.join(", ")}.`,
+    );
+  }
+
+  const trimmed = value.trim() as A2AInboundAgentStyle;
+
+  if (!INBOUND_AGENT_STYLES.includes(trimmed)) {
+    throw new Error(
+      `channels.${CHANNEL_ID}.accounts.${accountId}.agentStyle must be one of ${INBOUND_AGENT_STYLES.join(", ")}; received "${value}".`,
+    );
+  }
+
+  return trimmed;
 }
 
 function parseDefaultInputModes(
@@ -485,6 +526,7 @@ function parseAccount(
     maxBodyBytes: readPositiveInteger(record.maxBodyBytes, DEFAULT_MAX_BODY_BYTES),
     defaultInputModes: parseDefaultInputModes(accountId, record.defaultInputModes),
     defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
+    agentStyle: parseAgentStyle(accountId, record.agentStyle),
     taskStore: parseTaskStore(accountId, record.taskStore),
     skills: parseSkills(record.skills),
   };

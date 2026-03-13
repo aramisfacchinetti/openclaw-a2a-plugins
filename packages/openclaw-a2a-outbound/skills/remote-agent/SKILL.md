@@ -44,6 +44,7 @@ Send a request to a remote agent. Use it for:
 
 - a brand-new remote task
 - a follow-up turn on an existing remote task
+- a related new task that references prior work
 - a new task inside an existing remote conversation
 
 ```json
@@ -63,9 +64,11 @@ Send a request to a remote agent. Use it for:
 - `parts` (required): non-empty array of `text`, `file`, or `data` parts.
 - `target_alias`: configured target name. Omit when a default target exists.
 - `task_handle`: preferred continuation key for `send`, `watch`, `status`, and `cancel`.
-- `task_id`: optional continuation id for `send`; for follow-up actions it identifies the remote task when no `task_handle` is available.
+- `task_id`: optional continuation id for `send`; for follow-up actions it identifies the remote task when no `task_handle` is available. `task_id` continues an existing task.
 - `context_id`: optional conversation continuation id for `send`. Use it with `task_id`, or by itself to start a new task in the same conversation.
-- `follow_updates`: when `true`, streams updates and returns the full event log.
+- `reference_task_ids`: optional related task ids for `send`. `reference_task_ids` references prior tasks without continuing them.
+- `task_requirement`: optional durability contract. `task_requirement="required"` forces explicit task creation or fails fast.
+- `follow_updates`: when `true`, streams updates and returns the full event log. `follow_updates=true` means “stream the initial send”; it does not guarantee task creation unless `task_requirement="required"`.
 - `blocking`: only for non-stream `send`; do not combine it with `follow_updates=true`.
 
 Preferred continuation forms:
@@ -82,10 +85,15 @@ Preferred continuation forms:
 { "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "parts": [{ "kind": "text", "text": "Start a new task in the same conversation." }] }
 ```
 
+```json
+{ "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "reference_task_ids": ["task-1", "task-2"], "parts": [{ "kind": "text", "text": "Start related work without continuing those tasks." }] }
+```
+
 ## Continuation safety
 
 Interpret follow-up capability from `result.summary.continuation`, not from prompt text, message text, or other inferred context.
 
+- `response_kind` is descriptive only. Keep follow-up logic anchored to `summary.continuation`.
 - `summary.continuation.task`: trackable task continuity. Use it for follow-up `send`, `watch`, `status`, and `cancel`.
 - `summary.continuation.conversation`: conversation continuity only. Use it only with `send` to start a new task in the same conversation.
 - Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action.
@@ -138,7 +146,7 @@ Cancel a running task.
 
 ## Task handles
 
-After a successful `send`, the result usually includes `summary.continuation.task.task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. Always prefer `summary.continuation.task.task_handle` over `target_alias + summary.continuation.task.task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `summary.continuation.task.task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `summary.continuation.task.task_handle`. If the result includes only `summary.continuation.conversation`, there is no task lifecycle to poll, watch, or cancel.
+After a successful `send`, the result usually includes `summary.continuation.task.task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. `task_handle` is returned only when the peer actually created a task. Always prefer `summary.continuation.task.task_handle` over `target_alias + summary.continuation.task.task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `summary.continuation.task.task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `summary.continuation.task.task_handle`. If the result includes only `summary.continuation.conversation`, there is no task lifecycle to poll, watch, or cancel.
 
 ## watch vs status
 
