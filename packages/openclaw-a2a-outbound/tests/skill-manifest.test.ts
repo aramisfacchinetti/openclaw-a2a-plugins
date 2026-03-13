@@ -46,6 +46,25 @@ test('SKILL.md teaches target_alias and task_handle preference', () => {
   assert.ok(content.includes('task_handle'))
 })
 
+test('SKILL.md documents conditional task creation and strict durable mode', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('`task_requirement`'))
+  assert.ok(content.includes('`follow_updates=true` means'))
+  assert.ok(content.includes('`task_requirement="required"`'))
+  assert.ok(content.includes('`task_handle` is returned only when the peer actually created a task'))
+})
+
+test('SKILL.md documents task_id versus reference_task_ids', () => {
+  const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('`reference_task_ids`'))
+  assert.ok(content.includes('`task_id` continues an existing task'))
+  assert.ok(
+    content.includes(
+      '`reference_task_ids` references prior tasks without continuing them',
+    ),
+  )
+})
+
 test('SKILL.md documents summary.continuation task vs conversation branching', () => {
   const content = readFileSync(skillPath, 'utf8')
   assert.ok(content.includes('`summary.continuation.task`'))
@@ -89,6 +108,9 @@ test('README documents the nested continuation contract and migration rule', () 
   const content = readFileSync(readmePath, 'utf8')
   assert.ok(content.includes('`summary.continuation.task`'))
   assert.ok(content.includes('`summary.continuation.conversation`'))
+  assert.ok(content.includes('`response_kind`'))
+  assert.ok(content.includes('`task_requirement="required"`'))
+  assert.ok(content.includes('`reference_task_ids`'))
   assert.ok(content.includes('Do not poll from conversation continuity.'))
   assert.ok(
     content.includes(

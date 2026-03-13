@@ -28,10 +28,13 @@ import {
 
 function createExecutorHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
-  options?: Parameters<typeof createPluginRuntimeHarness>[1],
+  options?: Parameters<typeof createPluginRuntimeHarness>[1] & {
+    account?: Parameters<typeof createTestAccount>[0];
+  },
 ) {
+  const { account: accountOverrides, ...runtimeOptions } = options ?? {};
   const { pluginRuntime } = options
-    ? createPluginRuntimeHarness(script, options)
+    ? createPluginRuntimeHarness(script, runtimeOptions)
     : createPluginRuntimeHarness(script);
   const liveExecutions = new A2ALiveExecutionRegistry();
   const taskRuntime = createTaskStore();
@@ -41,7 +44,7 @@ function createExecutorHarness(
     taskRuntime,
     executor: createOpenClawA2AExecutor({
       accountId: "default",
-      account: createTestAccount(),
+      account: createTestAccount(accountOverrides),
       cfg: {},
       channelRuntime: pluginRuntime.channel,
       pluginRuntime,
@@ -118,6 +121,102 @@ test("block emission alone does not force task mode for a terminal reply", async
 
   assert.equal(recorder.events.length, 1);
   assert.equal(isMessage(recorder.events[0]), true);
+});
+
+test("task-generating mode publishes a Task for a simple blocking reply", async () => {
+  const { executor } = createExecutorHarness(
+    async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-task-generating-blocking");
+      emit({
+        runId: "run-task-generating-blocking",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Durable blocking reply" },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-task-generating-blocking",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+    {
+      account: {
+        agentStyle: "task-generating",
+      },
+    },
+  );
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
+
+  assert.equal(recorder.events[0]?.kind, "task");
+  assert.equal(recorder.events.some(isMessage), false);
+  assert.deepEqual(getStatusSequence(recorder.events), [
+    ["submitted", false],
+    ["working", false],
+    ["completed", true],
+  ]);
+  assert.equal(getArtifactText(assistantUpdates[0]), "Durable blocking reply");
+});
+
+test("task-generating mode emits task-bearing events for streaming replies", async () => {
+  const { executor, liveExecutions } = createExecutorHarness(
+    async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-task-generating-stream");
+      emit({
+        runId: "run-task-generating-stream",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      emit({
+        runId: "run-task-generating-stream",
+        stream: "assistant",
+        data: { text: "Streamed" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await params.dispatcherOptions.deliver(
+        { text: "Streamed reply" },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-task-generating-stream",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+    {
+      account: {
+        agentStyle: "task-generating",
+      },
+    },
+  );
+  const requestContext = createRequestContext();
+  liveExecutions.setRequestMode(requestContext.userMessage.messageId, "streaming");
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const assistantUpdates = getArtifactUpdates(recorder.events, "assistant-output");
+  const assistantTexts = assistantUpdates
+    .map((event) => getArtifactText(event))
+    .filter((value): value is string => typeof value === "string");
+
+  assert.equal(recorder.events[0]?.kind, "task");
+  assert.equal(recorder.events.some(isMessage), false);
+  assert.deepEqual(getStatusSequence(recorder.events), [
+    ["submitted", false],
+    ["working", false],
+    ["completed", true],
+  ]);
+  assert.deepEqual(assistantTexts, ["Streamed", " reply"]);
 });
 
 test("data-only requests dispatch with a synthetic agent body and empty command text", async () => {

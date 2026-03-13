@@ -94,6 +94,11 @@ Phase 2 still does not expose:
 
 Direct streaming runs that never promote return one canonical final `Message` and do not materialize a task. Promoted runs persist the committed task snapshot and committed updates.
 
+Each account also exposes `agentStyle`:
+
+- `hybrid` (default): stay protocol-faithful and allow new blocking or streaming sends to complete as a direct `Message` when task promotion never becomes necessary
+- `task-generating`: eagerly materialize every new execution as a task, so simple blocking replies return a `Task` and simple streaming replies emit task-bearing events
+
 ## Example OpenClaw Config
 
 Channel config lives under `channels.a2a`, not under `plugins.entries`.
@@ -113,6 +118,7 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
           maxBodyBytes: 1048576,
           defaultInputModes: ["text/plain", "application/json"],
           defaultOutputModes: ["text/plain", "application/json"],
+          agentStyle: "hybrid",
           taskStore: {
             kind: "json-file",
             path: "/var/lib/openclaw/a2a-tasks"
@@ -135,10 +141,12 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 ## Streaming And Resubscribe Semantics
 
 - `message/send`
-  - `blocking`: may return a direct canonical `Message` or a committed `Task`
+  - `blocking` with `agentStyle="hybrid"`: may return a direct canonical `Message` or a committed `Task`
+  - `blocking` with `agentStyle="task-generating"`: always returns a committed `Task`
   - `non_blocking`: always starts on the task path
 - `message/stream`
-  - direct runs yield exactly one canonical final `Message`
+  - `agentStyle="hybrid"` direct runs yield exactly one canonical final `Message`
+  - `agentStyle="task-generating"` new runs emit the committed initial `Task`, then committed `status-update` and `artifact-update` events, then the committed final status update
   - promoted runs yield the committed initial `Task`, then committed `status-update` and `artifact-update` events, then the committed final status update
 - `tasks/resubscribe`
   - emits the latest committed task snapshot first

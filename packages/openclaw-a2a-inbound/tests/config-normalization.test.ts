@@ -38,8 +38,27 @@ test("parser normalizes paths, defaults, and account labels", () => {
   assert.equal(account.jsonRpcPath, "/rpc");
   assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.deepEqual(account.defaultOutputModes, [...DEFAULT_OUTPUT_MODES]);
+  assert.equal(account.agentStyle, "hybrid");
   assert.deepEqual(account.taskStore, { kind: "memory" });
   assert.equal(isA2AInboundAccountConfigured(account), true);
+});
+
+test("parser accepts explicit task-generating agentStyle", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          default: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            agentStyle: "task-generating",
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(parsed.accounts.default?.agentStyle, "task-generating");
 });
 
 test("duplicate enabled route paths are rejected", () => {

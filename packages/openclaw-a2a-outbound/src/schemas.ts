@@ -17,6 +17,8 @@ export const REMOTE_AGENT_ACTIONS = [
 ] as const;
 
 export type RemoteAgentAction = (typeof REMOTE_AGENT_ACTIONS)[number];
+export const TASK_REQUIREMENTS = ["optional", "required"] as const;
+export type TaskRequirement = (typeof TASK_REQUIREMENTS)[number];
 
 const TASK_HANDLE_SCHEMA = {
   type: "string",
@@ -200,6 +202,8 @@ export interface SendActionInput extends RemoteAgentBaseInput {
   parts: [RemoteAgentPartInput, ...RemoteAgentPartInput[]];
   message_id?: string;
   context_id?: string;
+  reference_task_ids?: string[];
+  task_requirement?: TaskRequirement;
   follow_updates?: boolean;
   accepted_output_modes?: string[];
   blocking?: boolean;
@@ -253,6 +257,8 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "message_id",
       "task_id",
       "context_id",
+      "reference_task_ids",
+      "task_requirement",
       "follow_updates",
       "accepted_output_modes",
       "blocking",
@@ -400,10 +406,26 @@ export function buildRemoteAgentParametersSchema(
         description:
           "Optional remote context id for action=send to continue an existing conversation context.",
       },
+      reference_task_ids: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "string",
+          minLength: 1,
+        },
+        description:
+          "Optional related remote task ids for action=send. References prior tasks without continuing them.",
+      },
+      task_requirement: {
+        type: "string",
+        enum: TASK_REQUIREMENTS,
+        description:
+          'Optional action=send durable-task contract. "optional" keeps protocol-faithful message-or-task behavior; "required" fails unless the peer creates a real task.',
+      },
       follow_updates: {
         type: "boolean",
         description:
-          "When true, action=send streams updates and returns the full event log.",
+          "When true, action=send streams the initial send. It does not guarantee task creation unless task_requirement=required.",
       },
       accepted_output_modes: {
         type: "array",

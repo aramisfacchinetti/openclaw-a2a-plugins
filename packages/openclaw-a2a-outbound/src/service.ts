@@ -1,11 +1,13 @@
 import type {
   Message,
+  MessageSendParams,
   Task,
   TaskArtifactUpdateEvent,
   TaskIdParams,
   TaskQueryParams,
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
+import { isDeepStrictEqual } from "node:util";
 import { UnsupportedOperationError } from "@a2a-js/sdk/client";
 import {
   evaluateSendCompatibility,
@@ -31,10 +33,11 @@ import {
   sendSuccess,
   statusSuccess,
   streamUpdate,
-  summarizeStreamEvent,
+  summarizeStreamEvents,
   watchSuccess,
   type A2AStreamEventData,
   type A2AToolResult,
+  type RemoteAgentSummary,
   type SummaryTaskContext,
   type StreamUpdateEnvelope,
   type StreamingAction,
@@ -42,6 +45,8 @@ import {
 import {
   buildRequestOptions,
   normalizeSendRequest,
+  normalizeStrictTaskCreationSendRequest,
+  type NormalizedSendRequest,
 } from "./request-normalization.js";
 import {
   createClientPool,
@@ -79,8 +84,14 @@ type StreamExecutionOptions<T extends StreamingAction> = ExecutionOptions & {
 
 type StreamState = {
   events: A2AStreamEventData[];
-  latestSummary?: ReturnType<typeof summarizeStreamEvent>;
+  latestSummary?: RemoteAgentSummary;
   taskContext: SummaryTaskContext;
+};
+
+type PreparedSend = {
+  resolved: ResolvedTaskContext;
+  normalized: NormalizedSendRequest;
+  capabilityDiagnostics: CapabilityDiagnostics;
 };
 
 type TargetContextInput = {
@@ -314,6 +325,87 @@ function streamingNotSupportedError(
   );
 }
 
+function isTerminalTaskStatus(status: string | undefined): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "canceled" ||
+    status === "rejected"
+  );
+}
+
+function isStrictTaskRequirement(input: SendActionInput): boolean {
+  return input.task_requirement === "required";
+}
+
+function taskRequiredButMessageReturnedError(
+  message: Message,
+): A2AOutboundError {
+  return new A2AOutboundError(
+    ERROR_CODES.TASK_REQUIRED_BUT_MESSAGE_RETURNED,
+    'task_requirement="required" expected a Task response, but the peer returned only a Message',
+    {
+      ...(message.contextId !== undefined ? { context_id: message.contextId } : {}),
+      ...(message.messageId !== undefined ? { message_id: message.messageId } : {}),
+      response_kind: "message",
+    },
+  );
+}
+
+function taskSnapshotIdentity(task: Task): Record<string, unknown> {
+  return {
+    id: task.id,
+    ...(task.contextId !== undefined ? { contextId: task.contextId } : {}),
+    status: structuredClone(task.status),
+    ...(task.history !== undefined ? { history: structuredClone(task.history) } : {}),
+    ...(task.artifacts !== undefined
+      ? { artifacts: structuredClone(task.artifacts) }
+      : {}),
+  };
+}
+
+function equivalentTaskSnapshots(
+  initialTask: Task,
+  event: A2AStreamEventData,
+): boolean {
+  return (
+    event.kind === "task" &&
+    isDeepStrictEqual(
+      taskSnapshotIdentity(initialTask),
+      taskSnapshotIdentity(event),
+    )
+  );
+}
+
+function withRecoverableStatusSuggestion(
+  error: ReturnType<typeof toToolError>,
+  taskContext: SummaryTaskContext,
+): ReturnType<typeof toToolError> {
+  return withErrorDetails(error, {
+    task_id: taskContext.taskId,
+    ...(taskContext.taskHandle !== undefined
+      ? { task_handle: taskContext.taskHandle }
+      : {}),
+    ...(taskContext.contextId !== undefined
+      ? { context_id: taskContext.contextId }
+      : {}),
+    suggested_action: "status",
+  });
+}
+
+function appendStreamEvent<T extends StreamingAction>(
+  action: T,
+  target: ResolvedTarget,
+  state: StreamState,
+  event: A2AStreamEventData,
+  onUpdate?: (update: StreamUpdateEnvelope<T>) => void,
+): void {
+  state.events.push(event);
+  state.taskContext = mergeTaskContext(state.taskContext, taskContextFromEvent(event));
+  state.latestSummary = summarizeStreamEvents(target, state.events, state.taskContext);
+  onUpdate?.(streamUpdate(action, target, state.events, state.taskContext));
+}
+
 async function consumeStream<T extends StreamingAction>(
   stream: AsyncIterable<A2AStreamEventData>,
   action: T,
@@ -321,13 +413,19 @@ async function consumeStream<T extends StreamingAction>(
   state: StreamState,
   onEvent?: (event: A2AStreamEventData) => void,
   onUpdate?: (update: StreamUpdateEnvelope<T>) => void,
+  shouldSkipEvent?: (event: A2AStreamEventData, index: number) => boolean,
 ): Promise<void> {
+  let index = 0;
+
   for await (const event of stream) {
-    state.events.push(event);
-    state.taskContext = mergeTaskContext(state.taskContext, taskContextFromEvent(event));
+    if (shouldSkipEvent?.(event, index)) {
+      index += 1;
+      continue;
+    }
+
+    index += 1;
     onEvent?.(event);
-    state.latestSummary = summarizeStreamEvent(target, event, state.taskContext);
-    onUpdate?.(streamUpdate(action, target, event, state.taskContext));
+    appendStreamEvent(action, target, state, event, onUpdate);
   }
 }
 
@@ -617,6 +715,111 @@ export class A2AOutboundService {
     };
   }
 
+  private prepareSend(
+    input: SendActionInput,
+    options: ExecutionOptions,
+    requestBuilder: (
+      input: SendActionInput,
+      options: {
+        defaultTimeoutMs: number;
+        defaultServiceParameters: Record<string, string>;
+        defaultAcceptedOutputModes: readonly string[];
+        signal?: AbortSignal;
+      },
+    ) => NormalizedSendRequest = normalizeSendRequest,
+  ): Promise<PreparedSend> {
+    return this.resolveTaskContext(input).then((resolved) => {
+      const normalized = requestBuilder(
+        {
+          ...input,
+          ...(resolved.taskId !== undefined ? { task_id: resolved.taskId } : {}),
+          ...(resolved.contextId !== undefined
+            ? { context_id: resolved.contextId }
+            : {}),
+        },
+        {
+          defaultTimeoutMs: this.config.defaults.timeoutMs,
+          defaultServiceParameters: this.config.defaults.serviceParameters,
+          defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
+          signal: options.signal,
+        },
+      );
+      const capabilityDiagnostics = evaluateSendCompatibility(
+        input,
+        normalized.sendParams.configuration?.acceptedOutputModes ?? [],
+        this.targetCatalog.getCardSnapshot(resolved.target.baseUrl),
+      );
+
+      return {
+        resolved,
+        normalized,
+        capabilityDiagnostics,
+      };
+    });
+  }
+
+  private taskQueryOptions(
+    input: Pick<
+      SendActionInput | WatchActionInput,
+      "timeout_ms" | "service_parameters"
+    >,
+    signal?: AbortSignal,
+  ) {
+    return buildRequestOptions(
+      input.timeout_ms,
+      this.config.defaults.timeoutMs,
+      this.config.defaults.serviceParameters,
+      input.service_parameters,
+      signal,
+    );
+  }
+
+  private async consumeResubscribeStream<T extends StreamingAction>(
+    action: T,
+    resolved: ResolvedTaskContext,
+    input: Pick<
+      SendActionInput | WatchActionInput,
+      "timeout_ms" | "service_parameters"
+    >,
+    state: StreamState,
+    options: StreamExecutionOptions<T>,
+    dedupeInitialTask?: Task,
+  ): Promise<void> {
+    if (resolved.taskId === undefined) {
+      throw missingTargetContextError("watch");
+    }
+
+    const peerCard = this.targetCatalog.getCardSnapshot(resolved.target.baseUrl);
+    if (
+      peerCard?.capabilities.streaming === false ||
+      (peerCard === undefined && resolved.target.streamingSupported === false)
+    ) {
+      throw streamingNotSupportedError(resolved.target, resolved.taskId);
+    }
+
+    const params: TaskIdParams = {
+      id: resolved.taskId,
+    };
+
+    await consumeStream(
+      resolved.clientEntry.client.resubscribeTask(
+        params,
+        this.taskQueryOptions(input, options.signal),
+      ),
+      action,
+      resolved.target,
+      state,
+      () => {
+        state.taskContext = this.bindTaskContext(resolved.target, state.taskContext);
+      },
+      options.onUpdate,
+      (event, index) =>
+        index === 0 &&
+        dedupeInitialTask !== undefined &&
+        equivalentTaskSnapshots(dedupeInitialTask, event),
+    );
+  }
+
   private async listTargets(): Promise<A2AToolResult> {
     const span = startSpan(this.tracer, "a2a.remote_agent.list_targets");
 
@@ -645,43 +848,49 @@ export class A2AOutboundService {
     let capabilityDiagnostics: CapabilityDiagnostics | undefined;
 
     try {
-      const resolved = await this.resolveTaskContext(input);
-      target = resolved.target;
-      const normalized = normalizeSendRequest(
-        {
-          ...input,
-          ...(resolved.taskId !== undefined ? { task_id: resolved.taskId } : {}),
-          ...(resolved.contextId !== undefined
-            ? { context_id: resolved.contextId }
-            : {}),
-        },
-        {
-          defaultTimeoutMs: this.config.defaults.timeoutMs,
-          defaultServiceParameters: this.config.defaults.serviceParameters,
-          defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
-          signal: options.signal,
-        },
-      );
-      capabilityDiagnostics = evaluateSendCompatibility(
+      const prepared = await this.prepareSend(
         input,
-        normalized.sendParams.configuration?.acceptedOutputModes ?? [],
-        this.targetCatalog.getCardSnapshot(target.baseUrl),
+        options,
+        isStrictTaskRequirement(input)
+          ? normalizeStrictTaskCreationSendRequest
+          : normalizeSendRequest,
+      );
+      target = prepared.resolved.target;
+      capabilityDiagnostics = prepared.capabilityDiagnostics;
+
+      const raw = await prepared.resolved.clientEntry.client.sendMessage(
+        prepared.normalized.sendParams,
+        prepared.normalized.requestOptions,
       );
 
-      const raw = await resolved.clientEntry.client.sendMessage(
-        normalized.sendParams,
-        normalized.requestOptions,
-      );
+      if (isStrictTaskRequirement(input)) {
+        if (raw.kind !== "task") {
+          throw taskRequiredButMessageReturnedError(raw);
+        }
 
-      const taskContext = this.bindTaskContext(
+        return sendSuccess(
+          target,
+          raw,
+          this.bindTaskContext(
+            target,
+            mergeTaskContext(prepared.resolved, taskContextFromTask(raw)),
+          ),
+        );
+      }
+
+      return sendSuccess(
         target,
-        mergeTaskContext(
-          resolved,
-          raw.kind === "task" ? taskContextFromTask(raw) : taskContextFromMessage(raw),
+        raw,
+        this.bindTaskContext(
+          target,
+          mergeTaskContext(
+            prepared.resolved,
+            raw.kind === "task"
+              ? taskContextFromTask(raw)
+              : taskContextFromMessage(raw),
+          ),
         ),
       );
-
-      return sendSuccess(target, raw, taskContext);
     } catch (error) {
       let toolError = toToolError(error, fallbackErrorCode(error));
 
@@ -715,42 +924,116 @@ export class A2AOutboundService {
     };
 
     try {
-      const resolved = await this.resolveTaskContext(input);
-      target = resolved.target;
-      state.taskContext = mergeTaskContext(state.taskContext, resolved);
-      const normalized = normalizeSendRequest(
-        {
-          ...input,
-          ...(resolved.taskId !== undefined ? { task_id: resolved.taskId } : {}),
-          ...(resolved.contextId !== undefined
-            ? { context_id: resolved.contextId }
-            : {}),
-        },
-        {
-          defaultTimeoutMs: this.config.defaults.timeoutMs,
-          defaultServiceParameters: this.config.defaults.serviceParameters,
-          defaultAcceptedOutputModes: this.config.policy.acceptedOutputModes,
-          signal: options.signal,
-        },
-      );
-      capabilityDiagnostics = evaluateSendCompatibility(
-        input,
-        normalized.sendParams.configuration?.acceptedOutputModes ?? [],
-        this.targetCatalog.getCardSnapshot(target.baseUrl),
-      );
+      if (isStrictTaskRequirement(input)) {
+        const prepared = await this.prepareSend(
+          input,
+          options,
+          normalizeStrictTaskCreationSendRequest,
+        );
+        target = prepared.resolved.target;
+        capabilityDiagnostics = prepared.capabilityDiagnostics;
+
+        const raw = await prepared.resolved.clientEntry.client.sendMessage(
+          prepared.normalized.sendParams,
+          prepared.normalized.requestOptions,
+        );
+
+        if (raw.kind !== "task") {
+          throw taskRequiredButMessageReturnedError(raw);
+        }
+
+        const createdTaskContext = this.bindTaskContext(
+          target,
+          mergeTaskContext(prepared.resolved, taskContextFromTask(raw)),
+        );
+        state.taskContext = mergeTaskContext(state.taskContext, createdTaskContext);
+        appendStreamEvent("send", target, state, raw, options.onUpdate);
+
+        if (isTerminalTaskStatus(raw.status.state)) {
+          return sendStreamSuccess(target, state.events, state.taskContext);
+        }
+
+        try {
+          await this.consumeResubscribeStream(
+            "send",
+            {
+              ...prepared.resolved,
+              ...createdTaskContext,
+            },
+            input,
+            state,
+            options,
+            raw,
+          );
+
+          if (state.events.length === 1) {
+            throw new A2AOutboundError(
+              ERROR_CODES.A2A_SDK_ERROR,
+              "stream ended without watch events",
+            );
+          }
+        } catch (error) {
+          let effectiveError = error;
+
+          if (effectiveError instanceof UnsupportedOperationError) {
+            effectiveError = streamingNotSupportedError(target, raw.id);
+          }
+
+          let toolError = toToolError(
+            effectiveError,
+            fallbackErrorCode(effectiveError),
+          );
+          toolError = withRecoverableStatusSuggestion(toolError, createdTaskContext);
+
+          if (capabilityDiagnostics !== undefined) {
+            toolError = withErrorDetails(toolError, {
+              capability_diagnostics: capabilityDiagnostics,
+            });
+          }
+
+          if (state.events.length > 0 && state.latestSummary) {
+            toolError = withErrorDetails(toolError, {
+              partial_event_count: state.events.length,
+              latest_event_summary: state.latestSummary,
+            });
+          }
+
+          log(this.logger, "error", "a2a.remote_agent.send_stream.error", {
+            target,
+            error: toolError,
+          });
+
+          return remoteAgentFailure("send", toolError);
+        }
+
+        if (state.events.length === 0) {
+          throw new A2AOutboundError(
+            ERROR_CODES.A2A_SDK_ERROR,
+            "stream ended without events",
+          );
+        }
+
+        return sendStreamSuccess(target, state.events, state.taskContext);
+      }
+
+      const prepared = await this.prepareSend(input, options);
+      target = prepared.resolved.target;
+      capabilityDiagnostics = prepared.capabilityDiagnostics;
+      state.taskContext = mergeTaskContext(state.taskContext, prepared.resolved);
 
       await consumeStream(
-        resolved.clientEntry.client.sendMessageStream(
-          normalized.sendParams,
-          normalized.requestOptions,
+        prepared.resolved.clientEntry.client.sendMessageStream(
+          prepared.normalized.sendParams,
+          prepared.normalized.requestOptions,
         ),
         "send",
         target,
         state,
-        () => {
-          if (target !== undefined) {
-            state.taskContext = this.bindTaskContext(target, state.taskContext);
-          }
+        (event) => {
+          state.taskContext = this.bindTaskContext(
+            prepared.resolved.target,
+            mergeTaskContext(state.taskContext, taskContextFromEvent(event)),
+          );
         },
         options.onUpdate,
       );
@@ -872,38 +1155,12 @@ export class A2AOutboundService {
       }
       state.taskContext = mergeTaskContext(state.taskContext, resolved);
 
-      const peerCard = this.targetCatalog.getCardSnapshot(resolved.target.baseUrl);
-      if (
-        peerCard?.capabilities.streaming === false ||
-        (peerCard === undefined && resolved.target.streamingSupported === false)
-      ) {
-        throw streamingNotSupportedError(resolved.target, resolved.taskId);
-      }
-
-      const params: TaskIdParams = {
-        id: resolved.taskId,
-      };
-
-      await consumeStream(
-        resolved.clientEntry.client.resubscribeTask(
-          params,
-          buildRequestOptions(
-            input.timeout_ms,
-            this.config.defaults.timeoutMs,
-            this.config.defaults.serviceParameters,
-            input.service_parameters,
-            options.signal,
-          ),
-        ),
+      await this.consumeResubscribeStream(
         "watch",
-        target,
+        resolved,
+        input,
         state,
-        () => {
-          if (target !== undefined) {
-            state.taskContext = this.bindTaskContext(target, state.taskContext);
-          }
-        },
-        options.onUpdate,
+        options,
       );
 
       if (state.events.length === 0) {

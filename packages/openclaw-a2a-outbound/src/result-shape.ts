@@ -23,6 +23,7 @@ export type A2AStreamEventData =
   | TaskArtifactUpdateEvent;
 
 export type StreamingAction = Extract<RemoteAgentAction, "send" | "watch">;
+export type ResponseKind = "message" | "task";
 
 export type StreamRawResult = {
   events: A2AStreamEventData[];
@@ -78,6 +79,7 @@ export interface RemoteAgentSummary {
   target_alias?: string;
   target_name?: string;
   target_url?: string;
+  response_kind?: ResponseKind;
   message_text?: string;
   artifacts?: Artifact[];
   continuation?: RemoteAgentContinuationSummary;
@@ -89,9 +91,10 @@ export interface TaskContinuationSummary {
   task_handle?: string;
   task_id: string;
   status?: string;
-  can_send: true;
-  can_status: true;
-  can_cancel: true;
+  can_resume_send: boolean;
+  can_send: boolean;
+  can_status: boolean;
+  can_cancel: boolean;
   can_watch: boolean;
 }
 
@@ -167,17 +170,37 @@ function extractArtifacts(task: Task): Artifact[] | undefined {
   return task.artifacts.map(cloneArtifact);
 }
 
-function extractTaskText(task: Task): string | undefined {
-  const historyText = task.history?.flatMap((message) => {
+function extractTaskHistoryText(task: Task | undefined): string[] {
+  return task?.history?.flatMap((message) => {
     const text = extractMessageText(message);
     return text !== undefined ? [text] : [];
-  });
-  const artifactText = extractArtifacts(task)?.flatMap((artifact) =>
-    textParts(artifact.parts),
+  }) ?? [];
+}
+
+function extractArtifactText(artifacts: readonly Artifact[] | undefined): string[] {
+  return (
+    artifacts?.flatMap((artifact) => textParts(artifact.parts)) ??
+    []
   );
-  const texts = [...(historyText ?? []), ...(artifactText ?? [])];
+}
+
+function extractTaskText(task: Task): string | undefined {
+  const artifacts = extractArtifacts(task);
+  const texts = [
+    ...extractTaskHistoryText(task),
+    ...extractArtifactText(artifacts),
+  ];
 
   return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+function isTerminalTaskStatus(status: string | undefined): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "canceled" ||
+    status === "rejected"
+  );
 }
 
 function baseSummary(target: ResolvedTarget): RemoteAgentSummary {
@@ -211,10 +234,14 @@ function continuationSummary(
             ? { task_handle: context.taskHandle }
             : {}),
           ...(context.status !== undefined ? { status: context.status } : {}),
-          can_send: true,
+          can_resume_send: !isTerminalTaskStatus(context.status),
+          can_send: !isTerminalTaskStatus(context.status),
           can_status: true,
-          can_cancel: true,
-          can_watch: target.streamingSupported === true,
+          can_cancel: !isTerminalTaskStatus(context.status),
+          can_watch:
+            context.status !== undefined &&
+            !isTerminalTaskStatus(context.status) &&
+            target.streamingSupported === true,
         }
       : undefined;
   const conversation: ConversationContinuationSummary | undefined =
@@ -259,6 +286,7 @@ function messageSummary(
     target,
     {
       ...baseSummary(target),
+      response_kind: "message",
       ...(messageText !== undefined ? { message_text: messageText } : {}),
     },
     {
@@ -283,6 +311,7 @@ function taskSummary(
     target,
     {
       ...baseSummary(target),
+      response_kind: "task",
       ...(messageText !== undefined ? { message_text: messageText } : {}),
       ...(artifacts !== undefined ? { artifacts } : {}),
     },
@@ -295,6 +324,23 @@ function taskSummary(
   );
 }
 
+function artifactFromUpdate(raw: TaskArtifactUpdateEvent): Artifact {
+  return cloneArtifact({
+    artifactId: raw.artifact.artifactId,
+    parts: [...raw.artifact.parts],
+    ...(raw.artifact.description !== undefined
+      ? { description: raw.artifact.description }
+      : {}),
+    ...(raw.artifact.extensions !== undefined
+      ? { extensions: [...raw.artifact.extensions] }
+      : {}),
+    ...(raw.artifact.metadata !== undefined
+      ? { metadata: raw.artifact.metadata }
+      : {}),
+    ...(raw.artifact.name !== undefined ? { name: raw.artifact.name } : {}),
+  });
+}
+
 function artifactUpdateSummary(
   target: ResolvedTarget,
   raw: TaskArtifactUpdateEvent,
@@ -304,27 +350,221 @@ function artifactUpdateSummary(
     target,
     {
       ...baseSummary(target),
-      artifacts: [
-        cloneArtifact({
-          artifactId: raw.artifact.artifactId,
-          parts: [...raw.artifact.parts],
-          ...(raw.artifact.description !== undefined
-            ? { description: raw.artifact.description }
-            : {}),
-          ...(raw.artifact.extensions !== undefined
-            ? { extensions: [...raw.artifact.extensions] }
-            : {}),
-          ...(raw.artifact.metadata !== undefined
-            ? { metadata: raw.artifact.metadata }
-            : {}),
-          ...(raw.artifact.name !== undefined ? { name: raw.artifact.name } : {}),
-        }),
-      ],
+      response_kind: "task",
+      artifacts: [artifactFromUpdate(raw)],
     },
     {
       taskId: raw.taskId ?? context.taskId,
       contextId: raw.contextId ?? context.contextId,
       taskHandle: context.taskHandle,
+    },
+  );
+}
+
+function isTaskBearingEvent(event: A2AStreamEventData): boolean {
+  return (
+    event.kind === "task" ||
+    event.kind === "status-update" ||
+    event.kind === "artifact-update"
+  );
+}
+
+type AccumulatedTaskState = {
+  latestMessage?: Message;
+  latestTask?: Task;
+  latestTaskId?: string;
+  latestContextId?: string;
+  latestStatus?: string;
+  artifacts: Map<string, Artifact>;
+};
+
+function replaceArtifacts(
+  artifacts: readonly Artifact[] | undefined,
+): Map<string, Artifact> {
+  const next = new Map<string, Artifact>();
+
+  for (const artifact of artifacts ?? []) {
+    next.set(artifact.artifactId, cloneArtifact(artifact));
+  }
+
+  return next;
+}
+
+function applyArtifactUpdate(
+  artifacts: Map<string, Artifact>,
+  update: TaskArtifactUpdateEvent,
+): void {
+  const next = artifactFromUpdate(update);
+  const previous = artifacts.get(next.artifactId);
+
+  if (!previous || update.append !== true) {
+    artifacts.set(next.artifactId, next);
+    return;
+  }
+
+  artifacts.set(next.artifactId, {
+    artifactId: previous.artifactId,
+    parts: [...previous.parts, ...next.parts],
+    ...(next.description !== undefined
+      ? { description: next.description }
+      : previous.description !== undefined
+        ? { description: previous.description }
+        : {}),
+    ...(next.extensions !== undefined
+      ? { extensions: [...next.extensions] }
+      : previous.extensions !== undefined
+        ? { extensions: [...previous.extensions] }
+        : {}),
+    ...(next.metadata !== undefined
+      ? { metadata: next.metadata }
+      : previous.metadata !== undefined
+        ? { metadata: previous.metadata }
+        : {}),
+    ...(next.name !== undefined
+      ? { name: next.name }
+      : previous.name !== undefined
+        ? { name: previous.name }
+        : {}),
+  });
+}
+
+function extractArtifactsFromState(
+  state: AccumulatedTaskState,
+): Artifact[] | undefined {
+  if (state.artifacts.size === 0) {
+    return undefined;
+  }
+
+  return [...state.artifacts.values()].map(cloneArtifact);
+}
+
+function extractTaskTextFromState(
+  state: AccumulatedTaskState,
+  artifacts: readonly Artifact[] | undefined,
+): string | undefined {
+  const texts = [
+    ...extractTaskHistoryText(state.latestTask),
+    ...extractArtifactText(artifacts),
+  ];
+
+  if (texts.length === 0 && state.latestMessage !== undefined) {
+    const latestMessageText = extractMessageText(state.latestMessage);
+
+    if (latestMessageText !== undefined) {
+      texts.push(latestMessageText);
+    }
+  }
+
+  return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+function accumulateTaskState(
+  events: readonly A2AStreamEventData[],
+): AccumulatedTaskState {
+  const state: AccumulatedTaskState = {
+    artifacts: new Map<string, Artifact>(),
+  };
+
+  for (const event of events) {
+    switch (event.kind) {
+      case "message":
+        state.latestMessage = event;
+        if (event.taskId !== undefined) {
+          state.latestTaskId = event.taskId;
+        }
+        if (event.contextId !== undefined) {
+          state.latestContextId = event.contextId;
+        }
+        break;
+      case "task":
+        state.latestTask = structuredClone(event) as Task;
+        state.latestTaskId = event.id;
+        state.latestContextId = event.contextId;
+        state.latestStatus = event.status.state;
+        state.artifacts = replaceArtifacts(event.artifacts);
+        break;
+      case "status-update":
+        if (event.taskId !== undefined) {
+          state.latestTaskId = event.taskId;
+        }
+        if (event.contextId !== undefined) {
+          state.latestContextId = event.contextId;
+        }
+        state.latestStatus = event.status.state;
+        break;
+      case "artifact-update":
+        if (event.taskId !== undefined) {
+          state.latestTaskId = event.taskId;
+        }
+        if (event.contextId !== undefined) {
+          state.latestContextId = event.contextId;
+        }
+        applyArtifactUpdate(state.artifacts, event);
+        break;
+    }
+  }
+
+  return state;
+}
+
+export function summarizeStreamEvents(
+  target: ResolvedTarget,
+  events: readonly A2AStreamEventData[],
+  context: SummaryTaskContext = {},
+): RemoteAgentSummary {
+  if (events.length === 0) {
+    throw new TypeError("stream summary requires at least one event");
+  }
+
+  const taskBearingEvents = events.filter(isTaskBearingEvent);
+
+  if (taskBearingEvents.length === 0) {
+    const latestEvent = events.at(-1);
+
+    if (!latestEvent || latestEvent.kind !== "message") {
+      throw new TypeError("message-only stream summary requires message events");
+    }
+
+    const messageText = extractMessageText(latestEvent);
+    const responseKind =
+      events.length === 1 && latestEvent.kind === "message"
+        ? "message"
+        : undefined;
+
+    return withContinuationContext(
+      target,
+      {
+        ...baseSummary(target),
+        ...(responseKind !== undefined ? { response_kind: responseKind } : {}),
+        ...(messageText !== undefined ? { message_text: messageText } : {}),
+      },
+      {
+        ...(latestEvent.taskId !== undefined ? { taskId: latestEvent.taskId } : {}),
+        contextId: latestEvent.contextId ?? context.contextId,
+        ...(latestEvent.taskId !== undefined && context.taskHandle !== undefined
+          ? { taskHandle: context.taskHandle }
+          : {}),
+      },
+    );
+  }
+
+  const accumulated = accumulateTaskState(events);
+  const artifacts = extractArtifactsFromState(accumulated);
+  const messageText = extractTaskTextFromState(accumulated, artifacts);
+
+  return withContinuationContext(
+    target,
+    {
+      ...baseSummary(target),
+      response_kind: "task",
+      ...(messageText !== undefined ? { message_text: messageText } : {}),
+      ...(artifacts !== undefined ? { artifacts } : {}),
+    },
+    {
+      taskId: accumulated.latestTaskId ?? context.taskId,
+      contextId: accumulated.latestContextId ?? context.contextId,
+      taskHandle: context.taskHandle,
+      status: accumulated.latestStatus,
     },
   );
 }
@@ -344,6 +584,7 @@ export function summarizeStreamEvent(
         target,
         {
           ...baseSummary(target),
+          response_kind: "task",
         },
         {
           taskId: event.taskId ?? context.taskId,
@@ -492,7 +733,7 @@ function streamSuccess<TAction extends StreamingAction>(
 
   return successEnvelope(
     action,
-    summarizeStreamEvent(target, finalEvent, context),
+    summarizeStreamEvents(target, events, context),
     {
       events,
       finalEvent,
@@ -535,15 +776,22 @@ export function cancelSuccess(
 export function streamUpdate<TAction extends StreamingAction>(
   action: TAction,
   target: ResolvedTarget,
-  raw: A2AStreamEventData,
+  raw: A2AStreamEventData | readonly A2AStreamEventData[],
   context: SummaryTaskContext = {},
 ): StreamUpdateEnvelope<TAction> {
+  const events = Array.isArray(raw) ? [...raw] : [raw];
+  const finalEvent = events.at(-1);
+
+  if (!finalEvent) {
+    throw new TypeError("stream update requires at least one event");
+  }
+
   return {
     ok: true,
     operation: REMOTE_AGENT_OPERATION,
     action,
     phase: "update",
-    summary: summarizeStreamEvent(target, raw, context),
-    raw,
+    summary: summarizeStreamEvents(target, events, context),
+    raw: finalEvent,
   };
 }

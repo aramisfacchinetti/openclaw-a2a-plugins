@@ -80,6 +80,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       requestContext,
       eventBus,
       this.options.liveExecutions,
+      this.options.account.agentStyle,
       undefined,
     );
     let unsubscribeAgentEvents: (() => boolean) | undefined;

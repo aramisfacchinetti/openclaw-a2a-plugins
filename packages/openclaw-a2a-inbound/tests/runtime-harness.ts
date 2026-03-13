@@ -277,6 +277,7 @@ export function createTestAccount(
       "text/plain",
       "application/json",
     ],
+    agentStyle: "hybrid",
     taskStore: {
       kind: "memory",
     },

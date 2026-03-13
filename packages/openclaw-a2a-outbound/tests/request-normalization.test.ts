@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildRequestOptions,
   normalizeSendRequest,
+  normalizeStrictTaskCreationSendRequest,
 } from "../dist/request-normalization.js";
 
 test("normalizeSendRequest generates user message ids when omitted", () => {
@@ -187,6 +188,7 @@ test("normalizeSendRequest maps ids and per-call configuration fields", () => {
       message_id: "message-1",
       task_id: "task-1",
       context_id: "context-1",
+      reference_task_ids: ["task-0", "task-9"],
       parts: [{ kind: "text", text: "hello" }],
       accepted_output_modes: ["application/json"],
       blocking: false,
@@ -214,6 +216,10 @@ test("normalizeSendRequest maps ids and per-call configuration fields", () => {
   assert.equal(normalized.sendParams.message.messageId, "message-1");
   assert.equal(normalized.sendParams.message.taskId, "task-1");
   assert.equal(normalized.sendParams.message.contextId, "context-1");
+  assert.deepEqual(normalized.sendParams.message.referenceTaskIds, [
+    "task-0",
+    "task-9",
+  ]);
   assert.deepEqual(normalized.sendParams.metadata, {
     requestId: "req-1",
   });
@@ -301,6 +307,26 @@ test("normalizeSendRequest applies plugin default accepted output modes only whe
   });
   assert.deepEqual(overridden.sendParams.configuration, {
     acceptedOutputModes: [],
+  });
+});
+
+test("normalizeStrictTaskCreationSendRequest forces explicit non-blocking task creation", () => {
+  const normalized = normalizeStrictTaskCreationSendRequest(
+    {
+      action: "send",
+      parts: [{ kind: "text", text: "require a task" }],
+      blocking: true,
+    },
+    {
+      defaultTimeoutMs: 250,
+      defaultServiceParameters: {},
+      defaultAcceptedOutputModes: ["text/plain"],
+    },
+  );
+
+  assert.deepEqual(normalized.sendParams.configuration, {
+    acceptedOutputModes: ["text/plain"],
+    blocking: false,
   });
 });
 

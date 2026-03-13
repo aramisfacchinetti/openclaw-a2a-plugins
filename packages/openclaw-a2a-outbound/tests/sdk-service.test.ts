@@ -647,6 +647,7 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
     message_id: "message-1",
     task_id: "task-continue-1",
     context_id: "context-continue-1",
+    reference_task_ids: ["task-ref-1", "task-ref-2"],
     parts: [
       {
         kind: "data",
@@ -666,6 +667,7 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
   assert.equal(success.summary.continuation?.task, undefined);
   assert.equal(conversation.context_id, "context-continue-1");
   assert.equal(peer.state.sendCalls, 1);
@@ -673,6 +675,7 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   assert.equal(message.messageId, "message-1");
   assert.equal(message.taskId, "task-continue-1");
   assert.equal(message.contextId, "context-continue-1");
+  assert.deepEqual(message.referenceTaskIds, ["task-ref-1", "task-ref-2"]);
   assert.deepEqual(message.parts, [
     {
       kind: "data",
@@ -715,10 +718,85 @@ test("send preserves task continuation when message/send returns a message with 
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
   assert.equal(task.task_id, "task-continue-1");
   assert.match(String(task.task_handle), /^rah_/);
   assert.equal(task.can_watch, false);
   assert.equal(conversation.context_id, "context-continue-1");
+});
+
+test("task_requirement=required returns a task and handle from explicit non-blocking creation", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "task",
+      id: "task-required-1",
+      contextId: "ctx-required-1",
+      status: {
+        state: "working",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    task_requirement: "required",
+    blocking: true,
+    parts: [{ kind: "text", text: "require a durable task" }],
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const configuration = asRecord(params.configuration);
+  const task = taskContinuationFromSummary(success.summary);
+  const conversation = conversationContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "task");
+  assert.equal(task.task_id, "task-required-1");
+  assert.equal(task.status, "working");
+  assert.equal(task.can_resume_send, true);
+  assert.match(String(task.task_handle), /^rah_/);
+  assert.equal(conversation.context_id, "ctx-required-1");
+  assert.equal(configuration.blocking, false);
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.streamCalls, 0);
+});
+
+test("task_requirement=required fails when the peer returns only a Message", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "message",
+      messageId: "message-required-1",
+      role: "agent",
+      contextId: "ctx-required-1",
+      parts: [{ kind: "text", text: "not durable" }],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    task_requirement: "required",
+    parts: [{ kind: "text", text: "require a durable task" }],
+  });
+
+  const failure = asFailure(result);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "TASK_REQUIRED_BUT_MESSAGE_RETURNED");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.streamCalls, 0);
 });
 
 test("send remains permissive when file and data parts exceed advertised peer-card modes", async (t) => {
@@ -933,6 +1011,7 @@ test("send with task_handle resolves target, task, and context from the handle",
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
   assert.equal(success.summary.continuation?.task, undefined);
   assert.equal(conversation.context_id, "ctx-handle-1");
   assert.equal(message.taskId, "task-handle-1");
@@ -1001,9 +1080,11 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   const secondUpdateTask = updates[1]?.summary.continuation?.task;
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "task");
   assert.equal(task.task_id, "task-stream-1");
   assert.equal(task.status, "completed");
-  assert.equal(task.can_watch, true);
+  assert.equal(task.can_resume_send, false);
+  assert.equal(task.can_watch, false);
   assert.match(String(task.task_handle), /^rah_/);
   assert.equal(conversation.context_id, "ctx-stream-1");
   assert.equal(peer.state.streamCalls, 1);
@@ -1021,6 +1102,216 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(secondUpdateTask?.status, "completed");
   assert.equal(secondUpdateTask?.task_handle, task.task_handle);
   assert.equal(updates[1]?.summary.continuation?.conversation?.context_id, "ctx-stream-1");
+});
+
+test("non-strict follow_updates accepts a message-only stream summary", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    streamResponses: [
+      {
+        result: {
+          kind: "message",
+          messageId: "message-stream-1",
+          role: "agent",
+          contextId: "ctx-message-stream-1",
+          parts: [{ kind: "text", text: "message-only stream" }],
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const result = await service.execute({
+    action: "send",
+    target_alias: "support",
+    follow_updates: true,
+    parts: [{ kind: "text", text: "stream me a message" }],
+  });
+
+  const success = asSuccess(result);
+  const conversation = conversationContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
+  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(conversation.context_id, "ctx-message-stream-1");
+  assert.equal(peer.state.streamCalls, 1);
+  assert.equal(peer.state.sendCalls, 0);
+});
+
+test("task_requirement=required with follow_updates merges send and watch without duplicating the initial snapshot", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendResult: {
+      kind: "task",
+      id: "task-required-stream-1",
+      contextId: "ctx-required-stream-1",
+      status: {
+        state: "submitted",
+      },
+    },
+    resubscribeResponses: [
+      {
+        result: {
+          kind: "task",
+          id: "task-required-stream-1",
+          contextId: "ctx-required-stream-1",
+          status: {
+            state: "submitted",
+          },
+        },
+      },
+      {
+        result: {
+          kind: "status-update",
+          taskId: "task-required-stream-1",
+          contextId: "ctx-required-stream-1",
+          status: {
+            state: "completed",
+          },
+          final: true,
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+  const updates: StreamUpdateEnvelope<"send">[] = [];
+
+  const result = await service.execute(
+    {
+      action: "send",
+      target_alias: "support",
+      task_requirement: "required",
+      follow_updates: true,
+      parts: [{ kind: "text", text: "create and watch a durable task" }],
+    },
+    {
+      onUpdate(update) {
+        updates.push(update as StreamUpdateEnvelope<"send">);
+      },
+    },
+  );
+
+  const success = asSuccess(result);
+  const raw = asRecord(success.raw);
+  const task = taskContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "task");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.streamCalls, 0);
+  assert.equal(peer.state.resubscribeCalls, 1);
+  assert.equal((raw.events as unknown[]).length, 2);
+  assert.equal(updates.length, 2);
+  assert.equal(task.task_id, "task-required-stream-1");
+  assert.equal(task.status, "completed");
+  assert.equal(task.can_resume_send, false);
+  assert.equal(updates[0]?.summary.continuation?.task?.status, "submitted");
+  assert.equal(updates[1]?.summary.continuation?.task?.status, "completed");
+});
+
+test("task_requirement=required with follow_updates returns a single initial snapshot when the created task is already terminal", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendResult: {
+      kind: "task",
+      id: "task-required-terminal-1",
+      contextId: "ctx-required-terminal-1",
+      status: {
+        state: "completed",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+  const updates: StreamUpdateEnvelope<"send">[] = [];
+
+  const result = await service.execute(
+    {
+      action: "send",
+      target_alias: "support",
+      task_requirement: "required",
+      follow_updates: true,
+      parts: [{ kind: "text", text: "create and finish immediately" }],
+    },
+    {
+      onUpdate(update) {
+        updates.push(update as StreamUpdateEnvelope<"send">);
+      },
+    },
+  );
+
+  const success = asSuccess(result);
+  const raw = asRecord(success.raw);
+  const task = taskContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "task");
+  assert.equal((raw.events as unknown[]).length, 1);
+  assert.equal(updates.length, 1);
+  assert.equal(task.task_id, "task-required-terminal-1");
+  assert.equal(task.status, "completed");
+  assert.equal(task.can_resume_send, false);
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.resubscribeCalls, 0);
+});
+
+test("task_requirement=required with follow_updates returns a recoverable failure when watch cannot be established", async (t) => {
+  const peer = await startPeer({
+    streaming: false,
+    sendResult: {
+      kind: "task",
+      id: "task-required-failed-watch-1",
+      contextId: "ctx-required-failed-watch-1",
+      status: {
+        state: "working",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+  const updates: StreamUpdateEnvelope<"send">[] = [];
+
+  const result = await service.execute(
+    {
+      action: "send",
+      target_alias: "support",
+      task_requirement: "required",
+      follow_updates: true,
+      parts: [{ kind: "text", text: "create and watch a durable task" }],
+    },
+    {
+      onUpdate(update) {
+        updates.push(update as StreamUpdateEnvelope<"send">);
+      },
+    },
+  );
+
+  const failure = asFailure(result);
+  const details = asRecord(failure.error.details);
+
+  assert.equal(failure.action, "send");
+  assert.equal(failure.error.code, "A2A_SDK_ERROR");
+  assert.equal(details.task_id, "task-required-failed-watch-1");
+  assert.equal(details.context_id, "ctx-required-failed-watch-1");
+  assert.equal(details.suggested_action, "status");
+  assert.equal(peer.state.sendCalls, 1);
+  assert.equal(peer.state.resubscribeCalls, 0);
+  assert.equal(updates.length, 1);
 });
 
 test("sendStream failures also include capability_diagnostics", async (t) => {
@@ -1145,10 +1436,12 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
   const secondUpdateTask = updates[1]?.summary.continuation?.task;
 
   assert.equal(success.action, "watch");
+  assert.equal(success.summary.response_kind, "task");
   assert.equal(task.task_id, "task-watch-1");
   assert.equal(task.status, "completed");
   assert.equal(task.task_handle, handle);
-  assert.equal(task.can_watch, true);
+  assert.equal(task.can_resume_send, false);
+  assert.equal(task.can_watch, false);
   assert.equal(conversation.context_id, "ctx-watch-1");
   assert.equal(peer.state.resubscribeCalls, 1);
   assert.ok(Array.isArray(raw.events));
@@ -1220,15 +1513,19 @@ test("status and cancel both work from task_handle context", async (t) => {
   const cancelConversation = conversationContinuationFromSummary(cancel.summary);
 
   assert.equal(status.action, "status");
+  assert.equal(status.summary.response_kind, "task");
   assert.equal(statusTask.task_handle, handle);
   assert.equal(statusTask.task_id, "task-follow-up-1");
   assert.equal(statusTask.status, "completed");
+  assert.equal(statusTask.can_resume_send, false);
   assert.equal(statusTask.can_watch, false);
   assert.equal(statusConversation.context_id, "ctx-follow-up-1");
   assert.equal(cancel.action, "cancel");
+  assert.equal(cancel.summary.response_kind, "task");
   assert.equal(cancelTask.task_handle, handle);
   assert.equal(cancelTask.task_id, "task-follow-up-1");
   assert.equal(cancelTask.status, "canceled");
+  assert.equal(cancelTask.can_resume_send, false);
   assert.equal(cancelTask.can_watch, false);
   assert.equal(cancelConversation.context_id, "ctx-follow-up-1");
   assert.equal(peer.state.getCalls, 1);
@@ -1265,6 +1562,7 @@ test("send with context_id only starts a new task in an existing conversation", 
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
   assert.equal(success.summary.continuation?.task, undefined);
   assert.equal(conversation.context_id, "context-continue-1");
   assert.equal(message.contextId, "context-continue-1");
@@ -1371,8 +1669,14 @@ test("list_targets hydrates card metadata automatically", async (t) => {
     targets[0]?.peer_card,
     rawTargets[0] ? peerCardSummaryFromRaw(rawTargets[0]) : undefined,
   );
-  assert.equal("streaming_supported" in (targets[0] as Record<string, unknown>), false);
-  assert.equal("preferred_transport" in (targets[0] as Record<string, unknown>), false);
+  assert.equal(
+    "streaming_supported" in (targets[0] as unknown as Record<string, unknown>),
+    false,
+  );
+  assert.equal(
+    "preferred_transport" in (targets[0] as unknown as Record<string, unknown>),
+    false,
+  );
   assert.equal(peer.state.cardRequests, 1);
   assert.ok(Array.isArray(success.raw));
 });

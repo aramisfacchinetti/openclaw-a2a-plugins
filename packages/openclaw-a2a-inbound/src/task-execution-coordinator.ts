@@ -1,6 +1,9 @@
 import type { Message, Part } from "@a2a-js/sdk";
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
-import { DEFAULT_OUTPUT_MODES } from "./config.js";
+import {
+  DEFAULT_OUTPUT_MODES,
+  type A2AInboundAgentStyle,
+} from "./config.js";
 import type {
   A2AInitialResponseMode,
   A2ALiveExecutionRegistry,
@@ -232,6 +235,7 @@ export class A2ATaskExecutionCoordinator {
     private readonly requestContext: RequestContext,
     private readonly eventBus: ExecutionEventBus,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
+    private readonly agentStyle: A2AInboundAgentStyle,
     expectedSessionKey?: string,
   ) {
     this.expectedSessionKey = expectedSessionKey;
@@ -257,6 +261,11 @@ export class A2ATaskExecutionCoordinator {
   prepareForExecution(): void {
     if (this.requestContext.task) {
       this.promoteToTask("continuing existing task");
+      return;
+    }
+
+    if (this.agentStyle === "task-generating") {
+      this.promoteToTask("task-generating agents eagerly materialize new tasks");
       return;
     }
 
