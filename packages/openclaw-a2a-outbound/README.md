@@ -196,11 +196,52 @@ if (task) {
   },
   "raw": [
     {
+      "target": {
+        "baseUrl": "https://support.example/",
+        "cardPath": "/.well-known/agent-card.json",
+        "preferredTransports": ["JSONRPC", "HTTP+JSON"],
+        "alias": "support",
+        "displayName": "Support Agent",
+        "description": "Primary support lane",
+        "streamingSupported": true
+      },
+      "configuredDescription": "Primary support lane",
       "default": true,
       "tags": ["support"],
       "examples": ["Summarize this incident and propose next steps."],
       "card": {
-        "preferredTransport": "JSONRPC"
+        "displayName": "Support Agent",
+        "description": "Summarize incidents and propose next actions.",
+        "preferredTransport": "JSONRPC",
+        "additionalInterfaces": [
+          {
+            "transport": "JSONRPC",
+            "url": "https://support.example/a2a/jsonrpc"
+          },
+          {
+            "transport": "HTTP+JSON",
+            "url": "https://support.example/a2a/rest"
+          }
+        ],
+        "capabilities": {
+          "streaming": true,
+          "pushNotifications": true,
+          "stateTransitionHistory": true
+        },
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+          {
+            "id": "triage",
+            "name": "Incident Triage",
+            "description": "Summarize incidents and propose next actions.",
+            "tags": ["support"],
+            "examples": ["Summarize this incident and propose next steps."],
+            "inputModes": ["application/json"],
+            "outputModes": ["application/pdf"]
+          }
+        ],
+        "lastRefreshedAt": "2026-03-12T10:00:00.000Z"
       }
     }
   ]

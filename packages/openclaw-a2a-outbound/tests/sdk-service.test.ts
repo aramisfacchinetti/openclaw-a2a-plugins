@@ -12,6 +12,7 @@ import type {
   FailureEnvelope,
   SuccessEnvelope,
   StreamUpdateEnvelope,
+  TargetListPeerCardSummary,
   TargetListSummary,
 } from "../dist/result-shape.js";
 import {
@@ -149,6 +150,56 @@ function targetsFromSummary(summary: SuccessEnvelope["summary"]): TargetListSumm
   }
 
   return summary.targets;
+}
+
+function peerCardSummaryFromRaw(
+  entry: TargetCatalogEntry,
+): TargetListPeerCardSummary {
+  return {
+    ...(entry.card.preferredTransport !== undefined
+      ? { preferred_transport: entry.card.preferredTransport }
+      : {}),
+    additional_interfaces: entry.card.additionalInterfaces.map((cardInterface) => ({
+      transport: cardInterface.transport,
+      url: cardInterface.url,
+    })),
+    capabilities: {
+      ...(typeof entry.card.capabilities.streaming === "boolean"
+        ? { streaming: entry.card.capabilities.streaming }
+        : {}),
+      ...(typeof entry.card.capabilities.pushNotifications === "boolean"
+        ? { push_notifications: entry.card.capabilities.pushNotifications }
+        : {}),
+      ...(typeof entry.card.capabilities.stateTransitionHistory === "boolean"
+        ? {
+            state_transition_history:
+              entry.card.capabilities.stateTransitionHistory,
+          }
+        : {}),
+      ...(entry.card.capabilities.extensions !== undefined
+        ? {
+            extensions: entry.card.capabilities.extensions.map((extension) =>
+              structuredClone(extension),
+            ),
+          }
+        : {}),
+    },
+    default_input_modes: [...entry.card.defaultInputModes],
+    default_output_modes: [...entry.card.defaultOutputModes],
+    skills: entry.card.skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      tags: [...skill.tags],
+      examples: [...skill.examples],
+      ...(skill.inputModes !== undefined
+        ? { input_modes: [...skill.inputModes] }
+        : {}),
+      ...(skill.outputModes !== undefined
+        ? { output_modes: [...skill.outputModes] }
+        : {}),
+    })),
+  };
 }
 
 function json(res: ServerResponse, statusCode: number, body: unknown): void {
@@ -1308,6 +1359,18 @@ test("list_targets hydrates card metadata automatically", async (t) => {
       },
     ],
   });
+  assert.deepEqual(rawTargets[0]?.card.defaultInputModes, ["text/plain"]);
+  assert.deepEqual(rawTargets[0]?.card.defaultOutputModes, ["text/plain"]);
+  assert.deepEqual(rawTargets[0]?.card.skills[0]?.inputModes, [
+    "application/json",
+  ]);
+  assert.deepEqual(rawTargets[0]?.card.skills[0]?.outputModes, [
+    "application/pdf",
+  ]);
+  assert.deepEqual(
+    targets[0]?.peer_card,
+    rawTargets[0] ? peerCardSummaryFromRaw(rawTargets[0]) : undefined,
+  );
   assert.equal("streaming_supported" in (targets[0] as Record<string, unknown>), false);
   assert.equal("preferred_transport" in (targets[0] as Record<string, unknown>), false);
   assert.equal(peer.state.cardRequests, 1);
@@ -1650,6 +1713,13 @@ test("list_targets with unreachable peer still returns entries with lastRefreshE
   assert.equal(targets.length, 1);
   assert.equal(targets[0]?.target_alias, "down");
   assert.equal(targets[0]?.target_url, `${peerUrl}/`);
+  assert.deepEqual(targets[0]?.peer_card, {
+    additional_interfaces: [],
+    capabilities: {},
+    default_input_modes: [],
+    default_output_modes: [],
+    skills: [],
+  });
   assert.ok(targets[0]?.last_refresh_error);
   assert.equal(typeof targets[0]?.last_refresh_error?.code, "string");
 });
