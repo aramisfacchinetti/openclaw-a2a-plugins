@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 1.0.1
+
+### Patch Changes
+
+- Follow-up release to align with the official publish workflow.
+
 ## 1.0.0
 
 ### Major Changes
