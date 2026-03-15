@@ -18,6 +18,27 @@ Pin the exact published version if you want reproducible installs:
 openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 ```
 
+## Networking Prerequisites
+
+This plugin is an **inbound channel**: it waits for external A2A agents to call it over HTTP. Two independent requirements must both be met before any traffic can arrive.
+
+**1. Set `publicBaseUrl` in the account config**
+
+`publicBaseUrl` is the plugin's only config-level readiness gate. Without it the account will not start because the agent card URL cannot be constructed. Set it to the externally reachable base URL of your gateway (see below).
+
+**2. Make the OpenClaw gateway reachable from the internet**
+
+OpenClaw binds to `127.0.0.1` by default (`gateway.bind: "loopback"`). An external agent can never connect to a loopback address. You must configure the gateway to accept external connections before any A2A traffic can arrive:
+
+| Goal | Gateway config |
+| --- | --- |
+| LAN / reverse proxy (nginx, Caddy, Cloudflare Tunnel, …) | `gateway.bind: "lan"` (binds `0.0.0.0`) |
+| Tailscale Serve — tailnet-only HTTPS | `gateway.bind: "tailnet"`, `gateway.tailscale.mode: "serve"` |
+| Tailscale Funnel — public internet HTTPS | `gateway.bind: "tailnet"`, `gateway.tailscale.mode: "funnel"` |
+| Explicit bind host | `gateway.bind: "custom"`, `gateway.customBindHost: "<host>"` |
+
+Set `publicBaseUrl` to the URL that resolves through whichever of the above options you choose — the agent card and the gateway endpoint must agree.
+
 ## Current Contract
 
 - Plugin/package id: `openclaw-a2a-inbound`
@@ -136,7 +157,7 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 }
 ```
 
-`publicBaseUrl` is the only readiness prerequisite because the plugin needs it to publish a valid agent card URL.
+`publicBaseUrl` is the only plugin-level readiness prerequisite — the account will not start without it. Gateway networking must also be configured independently; see [Networking Prerequisites](#networking-prerequisites).
 
 ## Streaming And Resubscribe Semantics
 
