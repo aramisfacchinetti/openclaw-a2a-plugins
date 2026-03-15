@@ -1,7 +1,7 @@
 {
   "id": "openclaw-a2a-inbound",
   "name": "Inbound A2A Channel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "entry": "./dist/index.js",
   "channels": [
     "a2a"
