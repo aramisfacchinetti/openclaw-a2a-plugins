@@ -31,7 +31,7 @@ The ClawHub skill is an optional guided setup helper for installing, enabling, c
 
 ## OpenClaw Plugin Config
 
-The plugin installs through the OpenClaw CLI, but the tool stays disabled until you set `"enabled": true` for plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config:
+`openclaw plugins install` enables the plugin at the OpenClaw system level automatically — no separate `openclaw plugins enable` step is required. However, the `remote_agent` tool is gated by the plugin's own `"enabled"` flag inside its configuration object. Set `"enabled": true` under plugin id `openclaw-a2a-outbound` in your OpenClaw plugin config to activate the tool:
 
 ```json
 {
