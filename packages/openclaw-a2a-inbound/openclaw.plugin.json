@@ -1,9 +1,11 @@
 {
   "id": "openclaw-a2a-inbound",
   "name": "Inbound A2A Channel",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "entry": "./dist/index.js",
-  "channels": ["a2a"],
+  "channels": [
+    "a2a"
+  ],
   "description": "Accept inbound A2A requests and route them into OpenClaw agents through a native channel plugin.",
   "configSchema": {
     "type": "object",

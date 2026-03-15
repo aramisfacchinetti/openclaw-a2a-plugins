@@ -1,15 +1,20 @@
 {
   "id": "openclaw-a2a-outbound",
   "name": "External A2A Delegation",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "entry": "./dist/index.js",
   "description": "Delegate requests to external A2A agents and manage delegated tasks.",
-  "skills": ["./skills"],
+  "skills": [
+    "./skills"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "enabled": { "type": "boolean", "default": false },
+      "enabled": {
+        "type": "boolean",
+        "default": false
+      },
       "defaults": {
         "type": "object",
         "additionalProperties": false,
@@ -27,13 +32,22 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["JSONRPC", "HTTP+JSON", "GRPC"]
+              "enum": [
+                "JSONRPC",
+                "HTTP+JSON",
+                "GRPC"
+              ]
             },
-            "default": ["JSONRPC", "HTTP+JSON"]
+            "default": [
+              "JSONRPC",
+              "HTTP+JSON"
+            ]
           },
           "serviceParameters": {
             "type": "object",
-            "additionalProperties": { "type": "string" },
+            "additionalProperties": {
+              "type": "string"
+            },
             "default": {}
           }
         }
@@ -44,7 +58,10 @@
         "items": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["alias", "baseUrl"],
+          "required": [
+            "alias",
+            "baseUrl"
+          ],
           "properties": {
             "alias": {
               "type": "string"
@@ -57,7 +74,9 @@
             },
             "tags": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "default": []
             },
             "cardPath": {
@@ -68,13 +87,22 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "enum": ["JSONRPC", "HTTP+JSON", "GRPC"]
+                "enum": [
+                  "JSONRPC",
+                  "HTTP+JSON",
+                  "GRPC"
+                ]
               },
-              "default": ["JSONRPC", "HTTP+JSON"]
+              "default": [
+                "JSONRPC",
+                "HTTP+JSON"
+              ]
             },
             "examples": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "default": []
             },
             "default": {
@@ -106,7 +134,9 @@
         "properties": {
           "acceptedOutputModes": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "default": []
           },
           "normalizeBaseUrl": {
