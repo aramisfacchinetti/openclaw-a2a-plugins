@@ -24,7 +24,10 @@ function isPublishLifecycle(env = process.env) {
   return npmCommand === "publish" || lifecycleEvent === "prepublishonly";
 }
 
-function enforcePackagePublish(env = process.env, packageName = "this package") {
+function enforcePackagePublish(
+  env = process.env,
+  packageName = "this package",
+) {
   if (!isPublishLifecycle(env) || isDryRun(env) || isAllowedCiPublish(env)) {
     return;
   }
