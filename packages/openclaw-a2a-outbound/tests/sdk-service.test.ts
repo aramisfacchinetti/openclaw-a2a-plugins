@@ -1084,7 +1084,7 @@ test("send with follow_updates=true emits send updates and returns a task_handle
   assert.equal(task.task_id, "task-stream-1");
   assert.equal(task.status, "completed");
   assert.equal(task.can_resume_send, false);
-  assert.equal(task.can_watch, false);
+  assert.equal(task.can_watch, true);
   assert.match(String(task.task_handle), /^rah_/);
   assert.equal(conversation.context_id, "ctx-stream-1");
   assert.equal(peer.state.streamCalls, 1);
@@ -1441,7 +1441,7 @@ test("watch with a valid task_handle emits watch updates", async (t) => {
   assert.equal(task.status, "completed");
   assert.equal(task.task_handle, handle);
   assert.equal(task.can_resume_send, false);
-  assert.equal(task.can_watch, false);
+  assert.equal(task.can_watch, true);
   assert.equal(conversation.context_id, "ctx-watch-1");
   assert.equal(peer.state.resubscribeCalls, 1);
   assert.ok(Array.isArray(raw.events));

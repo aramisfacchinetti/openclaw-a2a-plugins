@@ -121,7 +121,7 @@ This package returns continuation metadata under `summary.continuation`.
 - Do not poll from conversation continuity.
 - Message-only follow-up uses `context_id`, not task actions.
 - `task_handle` is returned only when the peer actually created a task.
-- The old flat `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch` fields are removed.
+- Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`.
 
 Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
 

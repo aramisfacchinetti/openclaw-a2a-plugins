@@ -79,7 +79,15 @@ export interface RemoteAgentSummary {
   target_alias?: string;
   target_name?: string;
   target_url?: string;
+  task_id?: string;
+  task_handle?: string;
+  context_id?: string;
+  status?: string;
   response_kind?: ResponseKind;
+  can_resume_send?: boolean;
+  can_status?: boolean;
+  can_cancel?: boolean;
+  can_watch?: boolean;
   message_text?: string;
   artifacts?: Artifact[];
   continuation?: RemoteAgentContinuationSummary;
@@ -226,6 +234,10 @@ function continuationSummary(
   target: ResolvedTarget,
   context: SummaryTaskContext & { status?: string },
 ): RemoteAgentContinuationSummary | undefined {
+  const streamingAvailabilityKnown = target.streamingSupported !== undefined;
+  const canWatch =
+    context.taskId !== undefined &&
+    (streamingAvailabilityKnown ? target.streamingSupported !== false : true);
   const task: TaskContinuationSummary | undefined =
     context.taskId !== undefined
       ? {
@@ -238,10 +250,7 @@ function continuationSummary(
           can_send: !isTerminalTaskStatus(context.status),
           can_status: true,
           can_cancel: !isTerminalTaskStatus(context.status),
-          can_watch:
-            context.status !== undefined &&
-            !isTerminalTaskStatus(context.status) &&
-            target.streamingSupported === true,
+          can_watch: canWatch,
         }
       : undefined;
   const conversation: ConversationContinuationSummary | undefined =
@@ -268,9 +277,37 @@ function withContinuationContext(
   context: SummaryTaskContext & { status?: string },
 ): RemoteAgentSummary {
   const continuation = continuationSummary(target, context);
+  const taskContinuation = continuation?.task;
+  const conversationContinuation = continuation?.conversation;
 
   return {
     ...summary,
+    ...(taskContinuation !== undefined
+      ? {
+          task_id: taskContinuation.task_id,
+          ...(taskContinuation.task_handle !== undefined
+            ? { task_handle: taskContinuation.task_handle }
+            : {}),
+          ...(taskContinuation.status !== undefined
+            ? { status: taskContinuation.status }
+            : {}),
+          can_resume_send: taskContinuation.can_resume_send,
+          can_status: taskContinuation.can_status,
+          can_cancel: taskContinuation.can_cancel,
+          can_watch: taskContinuation.can_watch,
+        }
+      : {
+          can_resume_send:
+            conversationContinuation !== undefined ? true : undefined,
+          can_status: false,
+          can_cancel: false,
+          can_watch: false,
+        }),
+    ...(conversationContinuation !== undefined
+      ? { context_id: conversationContinuation.context_id }
+      : context.contextId !== undefined
+        ? { context_id: context.contextId }
+        : {}),
     ...(continuation !== undefined ? { continuation } : {}),
   };
 }
