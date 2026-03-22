@@ -192,6 +192,128 @@ test("createRemoteAgentInputValidator accepts send with task_handle", () => {
   assert.equal(out.task_handle, "rah_abc123");
 });
 
+test("createRemoteAgentInputValidator accepts nested continuation for send and follow-up actions", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+  const continuation = {
+    target: {
+      target_url: "https://support.example/",
+      card_path: "/.well-known/agent-card.json",
+      preferred_transports: ["JSONRPC", "HTTP+JSON"],
+      target_alias: "support",
+    },
+    task: {
+      task_handle: "rah_abc123",
+      task_id: "task-1",
+    },
+    conversation: {
+      context_id: "context-1",
+      can_send: true,
+    },
+  } as const;
+
+  assert.deepEqual(
+    validate({
+      action: "send",
+      continuation,
+      parts: [{ kind: "text", text: "continue" }],
+    }).continuation,
+    continuation,
+  );
+  assert.deepEqual(
+    validate({
+      action: "status",
+      continuation,
+    }).continuation,
+    continuation,
+  );
+  assert.deepEqual(
+    validate({
+      action: "watch",
+      continuation,
+    }).continuation,
+    continuation,
+  );
+  assert.deepEqual(
+    validate({
+      action: "cancel",
+      continuation,
+    }).continuation,
+    continuation,
+  );
+});
+
+test("createRemoteAgentInputValidator rejects follow-up continuation with only conversation continuity", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  for (const action of ["status", "watch", "cancel"] as const) {
+    assert.throws(
+      () =>
+        validate({
+          action,
+          continuation: {
+            target: {
+              target_url: "https://support.example/",
+              card_path: "/.well-known/agent-card.json",
+              preferred_transports: ["JSONRPC", "HTTP+JSON"],
+            },
+            conversation: {
+              context_id: "context-1",
+              can_send: true,
+            },
+          },
+        }),
+      (error: unknown) =>
+        isValidationError(error) &&
+        hasAjvError(
+          error,
+          (entry) =>
+            entry.keyword === "required" &&
+            String(entry.message).includes("continuation.task.task_id"),
+        ),
+    );
+  }
+});
+
+test("createRemoteAgentInputValidator rejects mixed flat and nested continuation routing", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  assert.throws(
+    () =>
+      validate({
+        action: "send",
+        continuation: {
+          target: {
+            target_url: "https://support.example/",
+            card_path: "/.well-known/agent-card.json",
+            preferred_transports: ["JSONRPC", "HTTP+JSON"],
+          },
+          task: {
+            task_id: "task-1",
+          },
+        },
+        task_id: "task-1",
+        parts: [{ kind: "text", text: "continue" }],
+      }),
+    (error: unknown) =>
+      isValidationError(error) &&
+      hasAjvError(
+        error,
+        (entry) =>
+          entry.keyword === "not" &&
+          String(entry.message).includes("does not allow"),
+      ),
+  );
+});
+
 test("createRemoteAgentInputValidator rejects send without a resolvable target", () => {
   const config = parseA2AOutboundPluginConfig({
     enabled: true,

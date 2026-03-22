@@ -26,6 +26,17 @@ function streamingTarget(): ResolvedTarget {
   };
 }
 
+function continuationTarget(targetValue: ResolvedTarget) {
+  return {
+    target_url: targetValue.baseUrl,
+    card_path: targetValue.cardPath,
+    preferred_transports: [...targetValue.preferredTransports],
+    ...(targetValue.alias !== undefined
+      ? { target_alias: targetValue.alias }
+      : {}),
+  };
+}
+
 function peerCardSummaryFromRaw(
   entry: TargetCatalogEntry,
 ): TargetListPeerCardSummary {
@@ -99,6 +110,7 @@ test("sendSuccess exposes only conversation continuation for context-only messag
   assert.equal(result.summary.can_cancel, false);
   assert.equal(result.summary.can_watch, false);
   assert.deepEqual(result.summary.continuation, {
+    target: continuationTarget(target()),
     conversation: {
       context_id: "context-1",
       can_send: true,
@@ -132,6 +144,7 @@ test("sendSuccess preserves task continuation when a message payload includes ta
   assert.equal(result.summary.can_cancel, true);
   assert.equal(result.summary.can_watch, true);
   assert.deepEqual(result.summary.continuation, {
+    target: continuationTarget(target()),
     task: {
       task_handle: "rah_123",
       task_id: "task-1",
@@ -174,6 +187,7 @@ test("statusSuccess exposes nested task and conversation continuations for raw t
   assert.equal(result.summary.can_cancel, false);
   assert.equal(result.summary.can_watch, true);
   assert.deepEqual(result.summary.continuation, {
+    target: continuationTarget(streamingTarget()),
     task: {
       task_handle: "rah_123",
       task_id: "task-1",
@@ -216,6 +230,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
   assert.equal(status.summary.response_kind, "task");
   assert.equal(status.summary.can_watch, true);
   assert.deepEqual(status.summary.continuation, {
+    target: continuationTarget(streamingTarget()),
     task: {
       task_id: "task-1",
       status: "working",
@@ -231,6 +246,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
     },
   });
   assert.deepEqual(artifact.summary.continuation, {
+    target: continuationTarget(streamingTarget()),
     task: {
       task_id: "task-1",
       can_resume_send: true,
