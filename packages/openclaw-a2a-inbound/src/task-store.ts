@@ -80,10 +80,16 @@ export interface StoredCommittedJournalRecord {
   event: JournalEvent;
 }
 
-export interface PreparedTaskResubscription {
-  snapshot: Task;
-  subscription?: TaskJournalSubscriptionHandle;
-}
+export type PreparedTaskResubscription =
+  | {
+      kind: "snapshot-only";
+      snapshot: Task;
+    }
+  | {
+      kind: "live-tail";
+      snapshot: Task;
+      subscription: TaskJournalSubscriptionHandle;
+    };
 
 type TaskRuntimeSubscriber = (event: JournalEvent) => void;
 
@@ -680,6 +686,9 @@ export class A2ATaskRuntimeStore implements TaskStore {
 
   async prepareResubscribe(
     taskId: string,
+    options: {
+      allowLiveTail: boolean;
+    },
   ): Promise<PreparedTaskResubscription | undefined> {
     return this.enqueueByTask(taskId, async () => {
       const taskRecord = await this.backend.loadRecord(taskId);
@@ -688,13 +697,18 @@ export class A2ATaskRuntimeStore implements TaskStore {
         return undefined;
       }
 
-      if (!isActiveExecutionTaskState(taskRecord.task.status.state)) {
+      if (
+        !isActiveExecutionTaskState(taskRecord.task.status.state) ||
+        !options.allowLiveTail
+      ) {
         return {
+          kind: "snapshot-only",
           snapshot: cloneTask(taskRecord.task),
         };
       }
 
       return {
+        kind: "live-tail",
         snapshot: cloneTask(taskRecord.task),
         subscription: this.createSubscription(taskId),
       };

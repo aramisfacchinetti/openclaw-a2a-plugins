@@ -91,6 +91,16 @@ function readMemoryStoredRecord(
   return record ? structuredClone(record) : undefined;
 }
 
+function readOpenSubscriptionCount(store: ReturnType<typeof createTaskStore>): number {
+  const subscriptions = (
+    store as unknown as {
+      subscriptions?: Set<unknown>;
+    }
+  ).subscriptions;
+
+  return subscriptions?.size ?? 0;
+}
+
 async function readJsonStoredRecord(
   root: string,
   taskId: string,
@@ -281,7 +291,7 @@ test("save, writeBinding, and persistIncomingMessage preserve the existing journ
   );
 });
 
-test("prepareResubscribe returns the latest snapshot and only future tail events for active tasks", async () => {
+test("prepareResubscribe with allowLiveTail=true returns the latest snapshot and only future tail events for active tasks", async () => {
   const store = createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-active", state: "submitted" }));
@@ -294,12 +304,19 @@ test("prepareResubscribe returns the latest snapshot and only future tail events
     }),
   );
 
-  const prepared = await store.prepareResubscribe("task-active");
+  const prepared = await store.prepareResubscribe("task-active", {
+    allowLiveTail: true,
+  });
 
+  assert.equal(prepared?.kind, "live-tail");
   assert.equal(prepared?.snapshot.status.state, "working");
-  assert.ok(prepared?.subscription);
+  assert.ok(prepared && prepared.kind === "live-tail" && prepared.subscription);
 
-  const nextEventPromise = prepared!.subscription!.next();
+  if (!prepared || prepared.kind !== "live-tail") {
+    assert.fail("expected live-tail resubscribe preparation");
+  }
+
+  const nextEventPromise = prepared.subscription.next();
   const beforeCommit = await Promise.race([
     nextEventPromise.then(() => "event"),
     new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 25)),
@@ -317,7 +334,23 @@ test("prepareResubscribe returns the latest snapshot and only future tail events
   );
 
   assert.deepEqual(await nextEventPromise, committed);
-  prepared!.subscription!.close();
+  prepared.subscription.close();
+});
+
+test("prepareResubscribe with allowLiveTail=false returns snapshot-only for active tasks without creating a subscription", async () => {
+  const store = createTaskStore();
+
+  await store.save(createSnapshot({ taskId: "task-active", state: "working" }));
+
+  const subscriptionsBefore = readOpenSubscriptionCount(store);
+  const prepared = await store.prepareResubscribe("task-active", {
+    allowLiveTail: false,
+  });
+  const subscriptionsAfter = readOpenSubscriptionCount(store);
+
+  assert.equal(prepared?.kind, "snapshot-only");
+  assert.equal(prepared?.snapshot.status.state, "working");
+  assert.equal(subscriptionsAfter, subscriptionsBefore);
 });
 
 test("subscribeToCommittedTail subscribes only for active tasks and only yields committed tail events", async () => {

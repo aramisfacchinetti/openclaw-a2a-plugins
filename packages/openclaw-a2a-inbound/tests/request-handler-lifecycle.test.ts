@@ -14,6 +14,7 @@ import {
 import { createOpenClawA2AExecutor } from "../dist/openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "../dist/live-execution-registry.js";
 import { A2AInboundRequestHandler } from "../dist/request-handler.js";
+import { A2AResubscribePlanner } from "../dist/resubscribe-planner.js";
 import { createTaskSnapshot } from "../dist/response-mapping.js";
 import {
   createTaskStore,
@@ -121,6 +122,7 @@ function createHandlerHarness(
     agentExecutor,
     liveExecutions.eventBusManager,
   );
+  const resubscribePlanner = new A2AResubscribePlanner(taskRuntime, liveExecutions);
 
   return {
     liveExecutions,
@@ -129,6 +131,7 @@ function createHandlerHarness(
       base,
       taskRuntime,
       liveExecutions,
+      resubscribePlanner,
       agentExecutor,
       account.defaultOutputModes,
     ),
