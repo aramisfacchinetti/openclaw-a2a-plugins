@@ -93,6 +93,11 @@ test("sendSuccess exposes only conversation continuation for context-only messag
   );
 
   assert.equal(result.summary.response_kind, "message");
+  assert.equal(result.summary.context_id, "context-1");
+  assert.equal(result.summary.can_resume_send, true);
+  assert.equal(result.summary.can_status, false);
+  assert.equal(result.summary.can_cancel, false);
+  assert.equal(result.summary.can_watch, false);
   assert.deepEqual(result.summary.continuation, {
     conversation: {
       context_id: "context-1",
@@ -119,6 +124,13 @@ test("sendSuccess preserves task continuation when a message payload includes ta
   );
 
   assert.equal(result.summary.response_kind, "message");
+  assert.equal(result.summary.task_id, "task-1");
+  assert.equal(result.summary.task_handle, "rah_123");
+  assert.equal(result.summary.context_id, "context-1");
+  assert.equal(result.summary.can_resume_send, true);
+  assert.equal(result.summary.can_status, true);
+  assert.equal(result.summary.can_cancel, true);
+  assert.equal(result.summary.can_watch, true);
   assert.deepEqual(result.summary.continuation, {
     task: {
       task_handle: "rah_123",
@@ -127,7 +139,7 @@ test("sendSuccess preserves task continuation when a message payload includes ta
       can_send: true,
       can_status: true,
       can_cancel: true,
-      can_watch: false,
+      can_watch: true,
     },
     conversation: {
       context_id: "context-1",
@@ -153,6 +165,14 @@ test("statusSuccess exposes nested task and conversation continuations for raw t
   );
 
   assert.equal(result.summary.response_kind, "task");
+  assert.equal(result.summary.task_id, "task-1");
+  assert.equal(result.summary.task_handle, "rah_123");
+  assert.equal(result.summary.context_id, "context-1");
+  assert.equal(result.summary.status, "completed");
+  assert.equal(result.summary.can_resume_send, false);
+  assert.equal(result.summary.can_status, true);
+  assert.equal(result.summary.can_cancel, false);
+  assert.equal(result.summary.can_watch, true);
   assert.deepEqual(result.summary.continuation, {
     task: {
       task_handle: "rah_123",
@@ -162,7 +182,7 @@ test("statusSuccess exposes nested task and conversation continuations for raw t
       can_send: false,
       can_status: true,
       can_cancel: false,
-      can_watch: false,
+      can_watch: true,
     },
     conversation: {
       context_id: "context-1",
@@ -194,6 +214,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
   });
 
   assert.equal(status.summary.response_kind, "task");
+  assert.equal(status.summary.can_watch, true);
   assert.deepEqual(status.summary.continuation, {
     task: {
       task_id: "task-1",
@@ -216,7 +237,7 @@ test("streamUpdate exposes nested continuations for status and artifact events",
       can_send: true,
       can_status: true,
       can_cancel: true,
-      can_watch: false,
+      can_watch: true,
     },
     conversation: {
       context_id: "context-1",
@@ -269,7 +290,7 @@ test("streamUpdate summarizes accumulated task state instead of only the final e
     can_send: false,
     can_status: true,
     can_cancel: false,
-    can_watch: false,
+    can_watch: true,
   });
 });
 

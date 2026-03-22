@@ -114,7 +114,7 @@ test('README documents the nested continuation contract and migration rule', () 
   assert.ok(content.includes('Do not poll from conversation continuity.'))
   assert.ok(
     content.includes(
-      'The old flat `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch` fields are removed.',
+      'Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`.',
     ),
   )
 })
