@@ -21,6 +21,7 @@ import { CHANNEL_ID, PLUGIN_VERSION } from "./constants.js";
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
+import { A2AResubscribePlanner } from "./resubscribe-planner.js";
 import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
@@ -218,10 +219,15 @@ export function createA2AInboundServer(
     agentExecutor,
     liveExecutions.eventBusManager,
   );
+  const resubscribePlanner = new A2AResubscribePlanner(
+    taskStore,
+    liveExecutions,
+  );
   const requestHandler = new A2AInboundRequestHandler(
     defaultRequestHandler,
     taskStore,
     liveExecutions,
+    resubscribePlanner,
     agentExecutor,
     options.account.defaultOutputModes,
   );

@@ -41,6 +41,10 @@ import {
   A2ATaskRuntimeStore,
   type TaskJournalSubscriptionHandle,
 } from "./task-store.js";
+import {
+  A2AResubscribePlanner,
+  type PreparedResubscribePlan,
+} from "./resubscribe-planner.js";
 
 type StreamEvent = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Message;
 
@@ -73,11 +77,16 @@ function isFinalTaskEvent(event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent
   return event.kind === "status-update" && event.final === true;
 }
 
+function assertNeverResubscribePlan(plan: never): never {
+  throw new Error(`Unhandled resubscribe plan variant: ${JSON.stringify(plan)}`);
+}
+
 export class A2AInboundRequestHandler {
   constructor(
     private readonly base: DefaultRequestHandler,
     private readonly taskRuntime: A2ATaskRuntimeStore,
     private readonly liveExecutions: A2ALiveExecutionRegistry,
+    private readonly resubscribePlanner: A2AResubscribePlanner,
     private readonly agentExecutor: AgentExecutor,
     private readonly defaultOutputModes: readonly string[],
   ) {}
@@ -229,25 +238,23 @@ export class A2AInboundRequestHandler {
     params: TaskIdParams,
     context?: ServerCallContext,
   ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
-    const prepared = await this.taskRuntime.prepareResubscribe(params.id);
+    const prepared = await this.resubscribePlanner.prepare(params.id);
 
     if (!prepared) {
       throw A2AError.taskNotFound(params.id);
     }
 
-    const subscription = prepared.subscription;
-    const shouldTail =
-      typeof subscription !== "undefined" &&
-      this.liveExecutions.has(params.id);
-
     yield prepared.snapshot;
 
-    if (!shouldTail) {
-      subscription?.close();
-      return;
+    switch (prepared.kind) {
+      case "snapshot-only":
+        return;
+      case "live-tail":
+        yield* this.consumeCommittedTail(prepared.subscription);
+        return;
+      default:
+        assertNeverResubscribePlan(prepared satisfies PreparedResubscribePlan);
     }
-
-    yield* this.consumeCommittedTail(subscription);
   }
 
   private prepareParams(params: MessageSendParams): MessageSendParams {
