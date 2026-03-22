@@ -63,9 +63,10 @@ Send a request to a remote agent. Use it for:
 
 - `parts` (required): non-empty array of `text`, `file`, or `data` parts.
 - `target_alias`: configured target name. Omit when a default target exists.
-- `task_handle`: preferred continuation key for `send`, `watch`, `status`, and `cancel`.
-- `task_id`: optional continuation id for `send`; for follow-up actions it identifies the remote task when no `task_handle` is available. `task_id` continues an existing task.
-- `context_id`: optional conversation continuation id for `send`. Use it with `task_id`, or by itself to start a new task in the same conversation.
+- `continuation`: canonical persisted follow-up contract from `summary.continuation`. Round-trip this subtree verbatim for `send`, `watch`, `status`, and `cancel`.
+- `task_handle`: manual compatibility input for follow-up actions when you are not replaying a persisted `continuation`.
+- `task_id`: manual compatibility continuation id for `send`; for follow-up actions it identifies the remote task only when no `task_handle` is available inside a persisted `continuation`. `task_id` continues an existing task.
+- `context_id`: manual compatibility conversation continuation id for `send`. Use it with `task_id`, or by itself to start a new task in the same conversation, only when you are not replaying a persisted `continuation`.
 - `reference_task_ids`: optional related task ids for `send`. `reference_task_ids` references prior tasks without continuing them.
 - `task_requirement`: optional durability contract. `task_requirement="required"` forces explicit task creation or fails fast.
 - `follow_updates`: when `true`, streams updates and returns the full event log. `follow_updates=true` means “stream the initial send”; it does not guarantee task creation unless `task_requirement="required"`.
@@ -74,16 +75,18 @@ Send a request to a remote agent. Use it for:
 Preferred continuation forms:
 
 ```json
-{ "action": "send", "task_handle": "rah_abc123", "parts": [{ "kind": "text", "text": "Approved. Continue." }] }
+{ "action": "send", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "task": { "task_handle": "rah_abc123", "task_id": "task-123" } }, "parts": [{ "kind": "text", "text": "Approved. Continue." }] }
 ```
 
 ```json
-{ "action": "send", "target_alias": "my-agent", "task_id": "task-123", "parts": [{ "kind": "text", "text": "Continue the task." }] }
+{ "action": "send", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "task": { "task_id": "task-123" } }, "parts": [{ "kind": "text", "text": "Continue the task." }] }
 ```
 
 ```json
-{ "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "parts": [{ "kind": "text", "text": "Start a new task in the same conversation." }] }
+{ "action": "send", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "conversation": { "context_id": "ctx-123", "can_send": true } }, "parts": [{ "kind": "text", "text": "Start a new task in the same conversation." }] }
 ```
+
+Manual compatibility only:
 
 ```json
 { "action": "send", "target_alias": "my-agent", "context_id": "ctx-123", "reference_task_ids": ["task-1", "task-2"], "parts": [{ "kind": "text", "text": "Start related work without continuing those tasks." }] }
@@ -94,8 +97,10 @@ Preferred continuation forms:
 Interpret follow-up capability from `result.summary.continuation`, not from prompt text, message text, or other inferred context.
 
 - `response_kind` is descriptive only. Keep follow-up logic anchored to `summary.continuation`.
+- `summary.continuation.target`: canonical persisted routing contract. Persist `summary.continuation` verbatim and pass it back directly for machine follow-up.
 - `summary.continuation.task`: trackable task continuity. Use it for follow-up `send`, `watch`, `status`, and `cancel`.
 - `summary.continuation.conversation`: conversation continuity only. Use it only with `send` to start a new task in the same conversation.
+- `summary.target_*` is descriptive only and no longer part of the machine follow-up recipe.
 - Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action.
 - Never infer or synthesize `summary.continuation.task` from `summary.continuation.conversation`, session ids, run ids, prior prompts, or summary text.
 - Do not call `watch`, `status`, or `cancel` from a result that has only `summary.continuation.conversation`.
@@ -125,7 +130,7 @@ That is invalid because `status`, `watch`, and `cancel` require task continuity,
 Poll the current state of a delegated task.
 
 ```json
-{ "action": "status", "task_handle": "rah_abc123" }
+{ "action": "status", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "task": { "task_handle": "rah_abc123", "task_id": "task-123" } } }
 ```
 
 ### watch
@@ -133,7 +138,7 @@ Poll the current state of a delegated task.
 Subscribe to live updates from a running task.
 
 ```json
-{ "action": "watch", "task_handle": "rah_abc123" }
+{ "action": "watch", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "task": { "task_handle": "rah_abc123", "task_id": "task-123" } } }
 ```
 
 ### cancel
@@ -141,12 +146,12 @@ Subscribe to live updates from a running task.
 Cancel a running task.
 
 ```json
-{ "action": "cancel", "task_handle": "rah_abc123" }
+{ "action": "cancel", "continuation": { "target": { "target_url": "https://my-agent.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "my-agent" }, "task": { "task_handle": "rah_abc123", "task_id": "task-123" } } }
 ```
 
 ## Task handles
 
-After a successful `send`, the result usually includes `summary.continuation.task.task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. `task_handle` is returned only when the peer actually created a task. Always prefer `summary.continuation.task.task_handle` over `target_alias + summary.continuation.task.task_id` for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL. If a handle expires, fall back to `target_alias` + `summary.continuation.task.task_id`. Treat `send.task_id` as a continuation id for the remote peer, not as a replacement for `summary.continuation.task.task_handle`. If the result includes only `summary.continuation.conversation`, there is no task lifecycle to poll, watch, or cancel.
+After a successful `send`, the result usually includes `summary.continuation.task.task_handle` (prefixed `rah_`) when the remote peer exposes task continuity. `task_handle` is returned only when the peer actually created a task. Persist `summary.continuation` verbatim and pass it back directly for follow-up `send`/`watch`/`status`/`cancel` actions. Handles are process-local and expire after restart or TTL, but nested `continuation` still round-trips safely because it also carries durable `summary.continuation.target` plus `summary.continuation.task.task_id`. Treat flat `send.task_id`, `send.context_id`, and `target_alias` as manual compatibility inputs, not as a replacement for nested continuation round-tripping. If the result includes only `summary.continuation.conversation`, there is no task lifecycle to poll, watch, or cancel.
 
 ## watch vs status
 
@@ -154,6 +159,6 @@ Use `watch` when the remote agent supports streaming and you want live increment
 
 ## Errors
 
-- `UNKNOWN_TASK_HANDLE` — the handle is expired or invalid. Retry with `target_alias` + `task_id`, or re-send.
+- `UNKNOWN_TASK_HANDLE` — the handle is expired or invalid. Retry with the same nested `continuation`, or re-send. Manual callers may fall back to flat `task_id` plus target routing only when they do not have a persisted `continuation`.
 - `TARGET_RESOLUTION_ERROR` — the alias or URL did not resolve. Call `list_targets` to check available targets.
 - `VALIDATION_ERROR` — invalid parameters. Check required fields for the action.
