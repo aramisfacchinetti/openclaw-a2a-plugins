@@ -6,6 +6,7 @@ import type {
   TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 import type { ToolError } from "./errors.js";
+import type { A2ATransport } from "./constants.js";
 import type { RemoteAgentAction } from "./schemas.js";
 import type { ResolvedTarget } from "./sdk-client-pool.js";
 import type {
@@ -111,7 +112,15 @@ export interface ConversationContinuationSummary {
   can_send: true;
 }
 
+export interface ContinuationTargetSummary {
+  target_url: string;
+  card_path: string;
+  preferred_transports: A2ATransport[];
+  target_alias?: string;
+}
+
 export interface RemoteAgentContinuationSummary {
+  target: ContinuationTargetSummary;
   task?: TaskContinuationSummary;
   conversation?: ConversationContinuationSummary;
 }
@@ -266,6 +275,12 @@ function continuationSummary(
   }
 
   return {
+    target: {
+      target_url: target.baseUrl,
+      card_path: target.cardPath,
+      preferred_transports: [...target.preferredTransports],
+      ...(target.alias !== undefined ? { target_alias: target.alias } : {}),
+    },
     ...(task !== undefined ? { task } : {}),
     ...(conversation !== undefined ? { conversation } : {}),
   };

@@ -21,6 +21,17 @@ export interface TaskHandleRegistryOptions {
   now?: () => number;
 }
 
+function continuationTargetFromResolvedTarget(
+  target: ResolvedTarget,
+): Record<string, unknown> {
+  return {
+    target_url: target.baseUrl,
+    card_path: target.cardPath,
+    preferred_transports: [...target.preferredTransports],
+    ...(target.alias !== undefined ? { target_alias: target.alias } : {}),
+  };
+}
+
 function cloneTarget(target: ResolvedTarget): ResolvedTarget {
   return {
     baseUrl: target.baseUrl,
@@ -75,16 +86,33 @@ function unknownTaskHandleError(taskHandle: string): A2AOutboundError {
 }
 
 function expiredTaskHandleError(
-  taskHandle: string,
-  expiresAt: number,
+  record: TaskHandleRecord,
 ): A2AOutboundError {
   return new A2AOutboundError(
     ERROR_CODES.EXPIRED_TASK_HANDLE,
-    `task handle "${taskHandle}" has expired`,
-    recoveryDetails(taskHandle, {
-      expiresAt,
+    `task handle "${record.taskHandle}" has expired`,
+    recoveryDetails(record.taskHandle, {
+      expiresAt: record.expiresAt,
+      task_id: record.taskId,
+      ...(record.contextId !== undefined
+        ? { context_id: record.contextId }
+        : {}),
+      continuation: {
+        target: continuationTargetFromResolvedTarget(record.target),
+        task: {
+          task_id: record.taskId,
+        },
+        ...(record.contextId !== undefined
+          ? {
+              conversation: {
+                context_id: record.contextId,
+              },
+            }
+          : {}),
+      },
       suggested_actions: ["status", "send"],
-      hint: "Retry with target_alias + task_id, or send a new request.",
+      hint:
+        "Retry with the persisted continuation, or resend the original request after a restart to obtain a new handle.",
     }),
   );
 }
@@ -175,7 +203,7 @@ export class TaskHandleRegistry {
     this.pruneExpired(now);
 
     if (wasExpired && existing) {
-      throw expiredTaskHandleError(taskHandle, existing.expiresAt);
+      throw expiredTaskHandleError(existing);
     }
 
     const live = this.entries.get(taskHandle);
