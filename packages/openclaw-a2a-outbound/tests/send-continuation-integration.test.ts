@@ -45,6 +45,18 @@ function conversationContinuationFromSummary(
   return conversation;
 }
 
+function continuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<SuccessEnvelope["summary"]["continuation"]> {
+  const continuation = summary.continuation;
+
+  if (!continuation) {
+    throw new TypeError("expected continuation summary");
+  }
+
+  return continuation;
+}
+
 function taskHandleFromSummary(summary: SuccessEnvelope["summary"]): string {
   const task = taskContinuationFromSummary(summary);
 
@@ -231,6 +243,9 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   const taskId = taskIdFromSummary(firstSend.summary);
   const firstTask = taskContinuationFromSummary(firstSend.summary);
   const firstConversation = conversationContinuationFromSummary(firstSend.summary);
+  const persistedContinuation = structuredClone(
+    continuationFromSummary(firstSend.summary),
+  );
 
   assert.equal(firstSend.action, "send");
   assert.equal(firstTask.status, "input-required");
@@ -240,7 +255,7 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   const secondSend = asSuccess(
     await service.execute({
       action: "send",
-      task_handle: taskHandle,
+      continuation: persistedContinuation,
       parts: [{ kind: "text", text: "Approved. Continue and finish." }],
     }),
   );
@@ -256,7 +271,7 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   const status = asSuccess(
     await service.execute({
       action: "status",
-      task_handle: taskHandle,
+      continuation: persistedContinuation,
       history_length: 10,
     }),
   );

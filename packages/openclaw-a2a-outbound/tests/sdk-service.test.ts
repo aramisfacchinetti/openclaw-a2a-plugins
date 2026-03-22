@@ -134,6 +134,18 @@ function conversationContinuationFromSummary(
   return conversation;
 }
 
+function continuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<SuccessEnvelope["summary"]["continuation"]> {
+  const continuation = summary.continuation;
+
+  if (!continuation) {
+    throw new TypeError("expected continuation summary");
+  }
+
+  return continuation;
+}
+
 function targetContinuationFromSummary(
   summary: SuccessEnvelope["summary"],
 ): NonNullable<NonNullable<SuccessEnvelope["summary"]["continuation"]>["target"]> {
@@ -1570,6 +1582,275 @@ test("status and cancel both work from task_handle context", async (t) => {
   assert.equal(peer.state.cancelCalls, 1);
   assert.equal(peer.state.lastGetTaskParams?.id, "task-follow-up-1");
   assert.equal(peer.state.lastGetTaskParams?.historyLength, 2);
+});
+
+test("persisted summary.continuation round-trips through send, status, watch, and cancel", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendResult: {
+      kind: "task",
+      id: "task-persisted-roundtrip-1",
+      contextId: "ctx-persisted-roundtrip-1",
+      status: {
+        state: "input-required",
+      },
+    },
+    getTaskResult: {
+      kind: "task",
+      id: "task-persisted-roundtrip-1",
+      contextId: "ctx-persisted-roundtrip-1",
+      status: {
+        state: "working",
+      },
+    },
+    cancelTaskResult: {
+      kind: "task",
+      id: "task-persisted-roundtrip-1",
+      contextId: "ctx-persisted-roundtrip-1",
+      status: {
+        state: "canceled",
+      },
+    },
+    resubscribeResponses: [
+      {
+        result: {
+          kind: "task",
+          id: "task-persisted-roundtrip-1",
+          contextId: "ctx-persisted-roundtrip-1",
+          status: {
+            state: "working",
+          },
+        },
+      },
+      {
+        result: {
+          kind: "status-update",
+          taskId: "task-persisted-roundtrip-1",
+          contextId: "ctx-persisted-roundtrip-1",
+          status: {
+            state: "completed",
+          },
+          final: true,
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService({
+    targets: [configuredTarget(peer, { alias: "support", default: true })],
+  });
+
+  const firstSend = asSuccess(
+    await service.execute({
+      action: "send",
+      parts: [{ kind: "text", text: "start persisted continuation flow" }],
+    }),
+  );
+  const persistedContinuation = structuredClone(
+    continuationFromSummary(firstSend.summary),
+  );
+  const originalHandle = taskHandleFromSummary(firstSend.summary);
+  const updates: StreamUpdateEnvelope<"watch">[] = [];
+
+  const resumedSend = asSuccess(
+    await service.execute({
+      action: "send",
+      continuation: persistedContinuation,
+      parts: [{ kind: "text", text: "continue from persisted continuation" }],
+    }),
+  );
+  const status = asSuccess(
+    await service.execute({
+      action: "status",
+      continuation: persistedContinuation,
+      history_length: 3,
+    }),
+  );
+  const watch = asSuccess(
+    await service.execute(
+      {
+        action: "watch",
+        continuation: persistedContinuation,
+      },
+      {
+        onUpdate(update) {
+          updates.push(update as StreamUpdateEnvelope<"watch">);
+        },
+      },
+    ),
+  );
+  const cancel = asSuccess(
+    await service.execute({
+      action: "cancel",
+      continuation: persistedContinuation,
+    }),
+  );
+
+  const resumedTask = taskContinuationFromSummary(resumedSend.summary);
+  const statusTask = taskContinuationFromSummary(status.summary);
+  const watchTask = taskContinuationFromSummary(watch.summary);
+  const cancelTask = taskContinuationFromSummary(cancel.summary);
+  const resumedMessage = asRecord(asRecord(peer.state.lastSendParams ?? {}).message);
+
+  assert.equal(peer.state.sendCalls, 2);
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.resubscribeCalls, 1);
+  assert.equal(peer.state.cancelCalls, 1);
+  assert.equal(resumedMessage.taskId, "task-persisted-roundtrip-1");
+  assert.equal(resumedMessage.contextId, "ctx-persisted-roundtrip-1");
+  assert.equal(resumedTask.task_id, "task-persisted-roundtrip-1");
+  assert.equal(resumedTask.task_handle, originalHandle);
+  assert.equal(statusTask.task_id, "task-persisted-roundtrip-1");
+  assert.equal(statusTask.task_handle, originalHandle);
+  assert.equal(watchTask.task_id, "task-persisted-roundtrip-1");
+  assert.equal(watchTask.task_handle, originalHandle);
+  assert.equal(cancelTask.task_id, "task-persisted-roundtrip-1");
+  assert.equal(cancelTask.task_handle, originalHandle);
+  assert.equal(conversationContinuationFromSummary(status.summary).context_id, "ctx-persisted-roundtrip-1");
+  assert.equal(conversationContinuationFromSummary(watch.summary).context_id, "ctx-persisted-roundtrip-1");
+  assert.equal(conversationContinuationFromSummary(cancel.summary).context_id, "ctx-persisted-roundtrip-1");
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0]?.summary.continuation?.task?.task_handle, originalHandle);
+  assert.equal(updates[1]?.summary.continuation?.task?.task_handle, originalHandle);
+});
+
+test("persisted summary.continuation recovers send, status, watch, and cancel after handle expiry", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    sendResult: {
+      kind: "task",
+      id: "task-persisted-expired-1",
+      contextId: "ctx-persisted-expired-1",
+      status: {
+        state: "input-required",
+      },
+    },
+    getTaskResult: {
+      kind: "task",
+      id: "task-persisted-expired-1",
+      contextId: "ctx-persisted-expired-1",
+      status: {
+        state: "working",
+      },
+    },
+    cancelTaskResult: {
+      kind: "task",
+      id: "task-persisted-expired-1",
+      contextId: "ctx-persisted-expired-1",
+      status: {
+        state: "canceled",
+      },
+    },
+    resubscribeResponses: [
+      {
+        result: {
+          kind: "task",
+          id: "task-persisted-expired-1",
+          contextId: "ctx-persisted-expired-1",
+          status: {
+            state: "working",
+          },
+        },
+      },
+      {
+        result: {
+          kind: "status-update",
+          taskId: "task-persisted-expired-1",
+          contextId: "ctx-persisted-expired-1",
+          status: {
+            state: "completed",
+          },
+          final: true,
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
+
+  let now = 10_000;
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 100,
+    maxEntries: 100,
+    now: () => now,
+  });
+
+  const { service } = buildService(
+    {
+      targets: [configuredTarget(peer, { alias: "support", default: true })],
+    },
+    { taskHandleRegistry },
+  );
+
+  const firstSend = asSuccess(
+    await service.execute({
+      action: "send",
+      parts: [{ kind: "text", text: "start expiring continuation flow" }],
+    }),
+  );
+  const persistedContinuation = structuredClone(
+    continuationFromSummary(firstSend.summary),
+  );
+  const expiredHandle = taskHandleFromSummary(firstSend.summary);
+  const updates: StreamUpdateEnvelope<"watch">[] = [];
+  now = 10_500;
+
+  const resumedSend = asSuccess(
+    await service.execute({
+      action: "send",
+      continuation: persistedContinuation,
+      parts: [{ kind: "text", text: "recover from expired continuation handle" }],
+    }),
+  );
+  const status = asSuccess(
+    await service.execute({
+      action: "status",
+      continuation: persistedContinuation,
+    }),
+  );
+  const watch = asSuccess(
+    await service.execute(
+      {
+        action: "watch",
+        continuation: persistedContinuation,
+      },
+      {
+        onUpdate(update) {
+          updates.push(update as StreamUpdateEnvelope<"watch">);
+        },
+      },
+    ),
+  );
+  const cancel = asSuccess(
+    await service.execute({
+      action: "cancel",
+      continuation: persistedContinuation,
+    }),
+  );
+
+  const resumedTask = taskContinuationFromSummary(resumedSend.summary);
+  const statusTask = taskContinuationFromSummary(status.summary);
+  const watchTask = taskContinuationFromSummary(watch.summary);
+  const cancelTask = taskContinuationFromSummary(cancel.summary);
+  const resumedMessage = asRecord(asRecord(peer.state.lastSendParams ?? {}).message);
+
+  assert.equal(peer.state.sendCalls, 2);
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.resubscribeCalls, 1);
+  assert.equal(peer.state.cancelCalls, 1);
+  assert.equal(resumedMessage.taskId, "task-persisted-expired-1");
+  assert.equal(resumedMessage.contextId, "ctx-persisted-expired-1");
+  assert.equal(resumedTask.task_id, "task-persisted-expired-1");
+  assert.notEqual(resumedTask.task_handle, expiredHandle);
+  assert.equal(statusTask.task_id, "task-persisted-expired-1");
+  assert.equal(watchTask.task_id, "task-persisted-expired-1");
+  assert.equal(cancelTask.task_id, "task-persisted-expired-1");
+  assert.equal(conversationContinuationFromSummary(status.summary).context_id, "ctx-persisted-expired-1");
+  assert.equal(conversationContinuationFromSummary(watch.summary).context_id, "ctx-persisted-expired-1");
+  assert.equal(conversationContinuationFromSummary(cancel.summary).context_id, "ctx-persisted-expired-1");
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0]?.summary.continuation?.task?.task_id, "task-persisted-expired-1");
+  assert.equal(updates[1]?.summary.continuation?.task?.task_id, "task-persisted-expired-1");
 });
 
 test("send with context_id only starts a new task in an existing conversation", async (t) => {
