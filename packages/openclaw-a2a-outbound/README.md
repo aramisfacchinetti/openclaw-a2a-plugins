@@ -105,43 +105,45 @@ Failed `send` and `sendStream` calls include `error.details.capability_diagnosti
 Supported `send` modes:
 
 - new task: `send` with `target_alias`/`target_url` or a configured default target, and no continuation fields
-- existing task continuation: `send` with `task_handle`, or `task_id` plus `target_alias`/`target_url` or a configured default target
+- existing task continuation: `send` with a persisted `continuation`; flat `task_handle`, or `task_id` plus `target_alias`/`target_url`, remain manual compatibility inputs only
 - related new task: `send` with `reference_task_ids`, optionally plus `context_id`, plus `target_alias`/`target_url` or a configured default target
-- new task in an existing conversation: `send` with `context_id` plus `target_alias`/`target_url` or a configured default target
+- new task in an existing conversation: `send` with a persisted conversation-only `continuation`; flat `context_id` plus `target_alias`/`target_url` remains manual compatibility only
 
-When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Prefer `task_handle` first. If the handle is expired or unavailable, fall back to `target_alias` + `task_id`.
+When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Persist `summary.continuation` verbatim and pass that subtree back directly. If the nested `task_handle` is expired or unavailable, the plugin automatically falls back within that nested contract to `continuation.target` + `continuation.task.task_id`; callers should not flatten persisted follow-up state back into `target_alias`/`task_id`.
 
 ## Reading Output Continuations
 
 This package returns continuation metadata under `summary.continuation`.
 
+- `summary.continuation.target`: the canonical persisted routing contract for machine follow-up. Persist `target_url`, `card_path`, and `preferred_transports` verbatim; `target_alias` is optional descriptive metadata.
 - `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, `can_resume_send`, `can_watch`, and the deprecated alias `can_send` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
 - `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`.
 - `response_kind`: descriptive wire-shape classification only. `response_kind="message"` means the peer returned a `Message`; `response_kind="task"` means a task-bearing response or event appeared. `response_kind` does not replace `summary.continuation`.
 - Do not poll from conversation continuity.
 - Message-only follow-up uses `context_id`, not task actions.
 - `task_handle` is returned only when the peer actually created a task.
-- Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`.
+- `summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.
+- Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`. Treat them as descriptive/manual compatibility only, not as the primary persisted API.
 
 Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
 
 ```ts
-const task = result.summary.continuation?.task
-const conversation = result.summary.continuation?.conversation
+const continuation = result.summary.continuation
+const task = continuation?.task
+const conversation = continuation?.conversation
 
 if (task) {
-  const followUp = task.task_handle
-    ? { action: "status", task_handle: task.task_handle }
-    : { action: "status", target_alias: "support", task_id: task.task_id }
+  const followUp = { action: "status", continuation }
 } else if (conversation) {
   const followUp = {
     action: "send",
-    target_alias: "support",
-    context_id: conversation.context_id,
+    continuation,
     parts: [{ kind: "text", text: "Start a related task in the same conversation." }],
   }
 }
 ```
+
+For persisted caller or wrapper state, save continuation data atomically from one result envelope and round-trip `summary.continuation` verbatim. That subtree already carries the canonical persisted follow-up contract: `target`, plus `task` and/or `conversation`. Do not reconstruct persisted follow-up state from prompt text, `message_text`, `response_kind`, or top-level compatibility aliases alone. Default-target fallback is acceptable for ad hoc manual calls, but persisted production follow-up must not depend on whichever target happens to be configured as default later. Conversation-only continuation remains send-only.
 
 ## Examples
 
@@ -349,6 +351,12 @@ If one target is marked `"default": true`, `send` can omit `target_alias`:
     "target_url": "https://support.example/",
     "response_kind": "task",
     "continuation": {
+      "target": {
+        "target_url": "https://support.example/",
+        "card_path": "/.well-known/agent-card.json",
+        "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+        "target_alias": "support"
+      },
       "task": {
         "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
         "task_id": "task-456",
@@ -415,12 +423,27 @@ const followUpContext = conversation?.context_id
 
 ### Continue An Existing Remote Task With `task_handle`
 
-Use `summary.continuation.task.task_handle` from the prior result when a delegated task reaches `input-required` or asks for approval:
+Prefer passing the persisted continuation subtree back directly when a delegated task reaches `input-required` or asks for approval:
 
 ```json
 {
   "action": "send",
-  "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+  "continuation": {
+    "target": {
+      "target_url": "https://support.example/",
+      "card_path": "/.well-known/agent-card.json",
+      "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+      "target_alias": "support"
+    },
+    "task": {
+      "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+      "task_id": "task-456"
+    },
+    "conversation": {
+      "context_id": "ctx-456",
+      "can_send": true
+    }
+  },
   "parts": [
     {
       "kind": "text",
@@ -432,14 +455,26 @@ Use `summary.continuation.task.task_handle` from the prior result when a delegat
 
 ### Continue An Existing Remote Task With `task_id`
 
-If `summary.continuation.task.task_handle` is unavailable, use `summary.continuation.task.task_id` plus target routing:
+If `summary.continuation.task.task_handle` is unavailable, omit it and keep using the persisted nested target contract:
 
 ```json
 {
   "action": "send",
-  "target_alias": "support",
-  "task_id": "task-456",
-  "context_id": "ctx-456",
+  "continuation": {
+    "target": {
+      "target_url": "https://support.example/",
+      "card_path": "/.well-known/agent-card.json",
+      "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+      "target_alias": "support"
+    },
+    "task": {
+      "task_id": "task-456"
+    },
+    "conversation": {
+      "context_id": "ctx-456",
+      "can_send": true
+    }
+  },
   "parts": [
     {
       "kind": "text",
@@ -456,8 +491,18 @@ Use `summary.continuation.conversation.context_id` when the prior result has con
 ```json
 {
   "action": "send",
-  "target_alias": "support",
-  "context_id": "ctx-456",
+  "continuation": {
+    "target": {
+      "target_url": "https://support.example/",
+      "card_path": "/.well-known/agent-card.json",
+      "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+      "target_alias": "support"
+    },
+    "conversation": {
+      "context_id": "ctx-456",
+      "can_send": true
+    }
+  },
   "parts": [
     {
       "kind": "text",
@@ -478,6 +523,12 @@ Use `summary.continuation.conversation.context_id` when the prior result has con
     "response_kind": "message",
     "message_text": "Conversation continued. Start the next task when ready.",
     "continuation": {
+      "target": {
+        "target_url": "https://support.example/",
+        "card_path": "/.well-known/agent-card.json",
+        "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+        "target_alias": "support"
+      },
       "conversation": {
         "context_id": "ctx-456",
         "can_send": true
@@ -501,8 +552,7 @@ if (task) {
 if (conversation) {
   const followUp = {
     action: "send",
-    target_alias: "support",
-    context_id: conversation.context_id,
+    continuation: result.summary.continuation,
     parts: [{ kind: "text", text: "Start the next task in this conversation." }],
   }
 }
@@ -515,7 +565,22 @@ Do not poll from conversation continuity.
 ```json
 {
   "action": "status",
-  "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+  "continuation": {
+    "target": {
+      "target_url": "https://support.example/",
+      "card_path": "/.well-known/agent-card.json",
+      "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+      "target_alias": "support"
+    },
+    "task": {
+      "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+      "task_id": "task-456"
+    },
+    "conversation": {
+      "context_id": "ctx-456",
+      "can_send": true
+    }
+  },
   "history_length": 2
 }
 ```
@@ -530,6 +595,12 @@ Do not poll from conversation continuity.
     "target_url": "https://support.example/",
     "response_kind": "task",
     "continuation": {
+      "target": {
+        "target_url": "https://support.example/",
+        "card_path": "/.well-known/agent-card.json",
+        "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+        "target_alias": "support"
+      },
       "task": {
         "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
         "task_id": "task-456",
@@ -565,32 +636,42 @@ if (!task) {
 }
 
 const nextStatus = task.task_handle
-  ? { action: "status", task_handle: task.task_handle }
-  : { action: "status", target_alias: "support", task_id: task.task_id }
+  ? { action: "status", continuation: result.summary.continuation }
+  : { action: "status", continuation: result.summary.continuation }
 
 const nextSend = conversation
-  ? { action: "send", target_alias: "support", context_id: conversation.context_id }
+  ? { action: "send", continuation: result.summary.continuation }
   : undefined
 ```
 
-When `summary.continuation.task.task_handle` is expired or unavailable, retry with `target_alias` + `summary.continuation.task.task_id`:
+When `summary.continuation.task.task_handle` is expired or unavailable, retry with the same persisted `continuation`; the plugin automatically falls back to `continuation.target` + `summary.continuation.task.task_id`:
 
 ```json
 {
   "action": "status",
-  "target_alias": "support",
-  "task_id": "task-456"
+  "continuation": {
+    "target": {
+      "target_url": "https://support.example/",
+      "card_path": "/.well-known/agent-card.json",
+      "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+      "target_alias": "support"
+    },
+    "task": {
+      "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
+      "task_id": "task-456"
+    }
+  }
 }
 ```
 
 `watch` and `cancel` use the same follow-up targeting rules, and both require `summary.continuation.task` from a prior result:
 
 ```json
-{ "action": "watch", "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0" }
+{ "action": "watch", "continuation": { "target": { "target_url": "https://support.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "support" }, "task": { "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0", "task_id": "task-456" } } }
 ```
 
 ```json
-{ "action": "cancel", "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0" }
+{ "action": "cancel", "continuation": { "target": { "target_url": "https://support.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "support" }, "task": { "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0", "task_id": "task-456" } } }
 ```
 
 ## Validation And Actionable Errors
@@ -632,10 +713,10 @@ Expired handles return an actionable recovery envelope:
     "message": "task handle \"rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0\" has expired",
     "details": {
       "taskHandle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0",
-      "retryHint": "Retry with explicit target plus taskId, or resend the original request after a restart to obtain a new handle.",
+      "retryHint": "Retry with the same nested continuation so the plugin can fall back to the persisted target plus taskId, or resend the original request after a restart to obtain a new handle.",
       "restartInvalidatesHandles": true,
       "suggested_actions": ["status", "send"],
-      "hint": "Retry with target_alias + task_id, or send a new request."
+      "hint": "Retry with the same nested continuation, or use flat target_alias + task_id only as manual compatibility."
     }
   }
 }
