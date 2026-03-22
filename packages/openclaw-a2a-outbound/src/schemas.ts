@@ -140,6 +140,101 @@ const PUSH_NOTIFICATION_CONFIG_SCHEMA = {
   required: ["url"],
 } as const;
 
+const CONTINUATION_TARGET_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    target_url: {
+      type: "string",
+      minLength: 1,
+      format: "uri",
+      pattern: "^https?://",
+      description: "Persisted remote target base URL for durable follow-up routing.",
+    },
+    card_path: {
+      type: "string",
+      minLength: 1,
+      description: "Persisted remote agent-card path for durable follow-up routing.",
+    },
+    preferred_transports: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "string",
+        enum: ALL_TRANSPORTS,
+      },
+      description: "Persisted preferred transport order for durable follow-up routing.",
+    },
+    target_alias: {
+      type: "string",
+      minLength: 1,
+      description: "Optional descriptive alias emitted by the plugin.",
+    },
+  },
+  required: ["target_url", "card_path", "preferred_transports"],
+} as const;
+
+const CONTINUATION_TASK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    task_handle: TASK_HANDLE_SCHEMA,
+    task_id: {
+      type: "string",
+      minLength: 1,
+      description: "Persisted remote task id for durable follow-up routing.",
+    },
+    status: {
+      type: "string",
+      minLength: 1,
+    },
+    can_resume_send: {
+      type: "boolean",
+    },
+    can_send: {
+      type: "boolean",
+    },
+    can_status: {
+      type: "boolean",
+    },
+    can_cancel: {
+      type: "boolean",
+    },
+    can_watch: {
+      type: "boolean",
+    },
+  },
+  required: ["task_id"],
+} as const;
+
+const CONTINUATION_CONVERSATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    context_id: {
+      type: "string",
+      minLength: 1,
+      description: "Persisted remote context id for send-only conversation continuity.",
+    },
+    can_send: {
+      type: "boolean",
+      const: true,
+    },
+  },
+  required: ["context_id"],
+} as const;
+
+const CONTINUATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    target: CONTINUATION_TARGET_SCHEMA,
+    task: CONTINUATION_TASK_SCHEMA,
+    conversation: CONTINUATION_CONVERSATION_SCHEMA,
+  },
+  required: ["target"],
+} as const;
+
 export interface A2ATargetInput {
   baseUrl: string;
   cardPath?: string;
@@ -184,11 +279,41 @@ export interface RemoteAgentPushNotificationConfigInput {
   authentication?: RemoteAgentPushNotificationAuthenticationInput;
 }
 
+export interface RemoteAgentContinuationTargetInput {
+  target_url: string;
+  card_path: string;
+  preferred_transports: A2ATransport[];
+  target_alias?: string;
+}
+
+export interface RemoteAgentContinuationTaskInput {
+  task_handle?: string;
+  task_id: string;
+  status?: string;
+  can_resume_send?: boolean;
+  can_send?: boolean;
+  can_status?: boolean;
+  can_cancel?: boolean;
+  can_watch?: boolean;
+}
+
+export interface RemoteAgentContinuationConversationInput {
+  context_id: string;
+  can_send?: true;
+}
+
+export interface RemoteAgentContinuationInput {
+  target: RemoteAgentContinuationTargetInput;
+  task?: RemoteAgentContinuationTaskInput;
+  conversation?: RemoteAgentContinuationConversationInput;
+}
+
 interface RemoteAgentBaseInput {
   target_alias?: string;
   target_url?: string;
   task_handle?: string;
   task_id?: string;
+  continuation?: RemoteAgentContinuationInput;
   timeout_ms?: number;
   service_parameters?: Record<string, string>;
 }
@@ -253,6 +378,7 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "target_alias",
       "target_url",
       "task_handle",
+      "continuation",
       "parts",
       "message_id",
       "task_id",
@@ -273,6 +399,7 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "target_alias",
       "target_url",
       "task_handle",
+      "continuation",
       "task_id",
       "timeout_ms",
       "service_parameters",
@@ -282,6 +409,7 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "target_alias",
       "target_url",
       "task_handle",
+      "continuation",
       "task_id",
       "history_length",
       "timeout_ms",
@@ -292,6 +420,7 @@ const ACTION_ALLOWED_FIELDS: Readonly<Record<RemoteAgentAction, Set<string>>> =
       "target_alias",
       "target_url",
       "task_handle",
+      "continuation",
       "task_id",
       "timeout_ms",
       "service_parameters",
@@ -388,6 +517,11 @@ export function buildRemoteAgentParametersSchema(
         },
       },
       task_handle: TASK_HANDLE_SCHEMA,
+      continuation: {
+        ...CONTINUATION_SCHEMA,
+        description:
+          "Canonical persisted follow-up contract emitted in summary.continuation. Prefer round-tripping this subtree verbatim for send/status/watch/cancel.",
+      },
       message_id: {
         type: "string",
         minLength: 1,
@@ -563,12 +697,52 @@ function validateExplicitTargetFields(
   return errors;
 }
 
+const FLAT_CONTINUATION_MIXED_FIELDS = [
+  "task_handle",
+  "task_id",
+  "context_id",
+  "target_alias",
+  "target_url",
+] as const;
+
+function validateContinuationMixing(
+  input: RemoteAgentToolInput,
+): ErrorObject[] {
+  if (input.action === "list_targets" || input.continuation === undefined) {
+    return [];
+  }
+
+  const errors: ErrorObject[] = [];
+  const recordInput = input as unknown as Record<string, unknown>;
+
+  for (const property of FLAT_CONTINUATION_MIXED_FIELDS) {
+    if (recordInput[property] !== undefined) {
+      errors.push(
+        makeError(
+          `/${property}`,
+          "not",
+          `action=${input.action} does not allow "${property}" when continuation is present`,
+          {
+            property,
+            action: input.action,
+          },
+        ),
+      );
+    }
+  }
+
+  return errors;
+}
+
 function validateSendInput(
   input: SendActionInput,
   summary: TargetResolutionSummary,
   config: A2AOutboundPluginConfig,
 ): ErrorObject[] {
-  const errors = validateExplicitTargetFields(input, summary, config);
+  const errors =
+    input.continuation !== undefined
+      ? []
+      : validateExplicitTargetFields(input, summary, config);
 
   if (input.parts === undefined) {
     errors.push(
@@ -588,11 +762,31 @@ function validateSendInput(
     );
   }
 
+  if (
+    input.continuation !== undefined &&
+    input.continuation.task === undefined &&
+    input.continuation.conversation === undefined
+  ) {
+    errors.push(
+      makeError(
+        "/continuation",
+        "anyOf",
+        "send requires continuation.task, continuation.conversation, or both when continuation is present",
+      ),
+    );
+  }
+
   const hasExplicitTarget =
     input.target_alias !== undefined || input.target_url !== undefined;
   const hasTaskHandle = input.task_handle !== undefined;
+  const hasContinuation = input.continuation !== undefined;
 
-  if (!hasTaskHandle && !hasExplicitTarget && !summary.hasDefaultTarget) {
+  if (
+    !hasContinuation &&
+    !hasTaskHandle &&
+    !hasExplicitTarget &&
+    !summary.hasDefaultTarget
+  ) {
     errors.push(
       makeError(
         "",
@@ -610,6 +804,21 @@ function validateFollowUpInput(
   summary: TargetResolutionSummary,
   config: A2AOutboundPluginConfig,
 ): ErrorObject[] {
+  if (input.continuation !== undefined) {
+    return input.continuation.task?.task_id === undefined
+      ? [
+          makeError(
+            "/continuation",
+            "required",
+            `${input.action} requires continuation.task.task_id when continuation is present`,
+            {
+              missingProperty: "task",
+            },
+          ),
+        ]
+      : [];
+  }
+
   const errors = validateExplicitTargetFields(input, summary, config);
   const hasTaskHandle = input.task_handle !== undefined;
   const hasTaskId = input.task_id !== undefined;
@@ -649,7 +858,10 @@ function validateActionSpecificRules(
   config: A2AOutboundPluginConfig,
 ): ErrorObject[] {
   const recordInput = input as unknown as Record<string, unknown>;
-  const errors = disallowedFieldErrors(input.action, recordInput);
+  const errors = [
+    ...disallowedFieldErrors(input.action, recordInput),
+    ...validateContinuationMixing(input),
+  ];
 
   switch (input.action) {
     case "list_targets":

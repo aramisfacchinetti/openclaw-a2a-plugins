@@ -99,6 +99,7 @@ test("task handle registry rejects expired handles with suggested_actions", () =
   const created = registry.create({
     target: target(),
     taskId: "task-3",
+    contextId: "context-3",
   });
 
   now = 3_100;
@@ -110,10 +111,29 @@ test("task handle registry rejects expired handles with suggested_actions", () =
       return (
         e.code === "EXPIRED_TASK_HANDLE" &&
         e.details?.taskHandle === created.taskHandle &&
+        e.details?.task_id === "task-3" &&
+        e.details?.context_id === "context-3" &&
         Array.isArray(e.details?.suggested_actions) &&
         (e.details.suggested_actions as string[]).includes("status") &&
         (e.details.suggested_actions as string[]).includes("send") &&
-        typeof e.details?.hint === "string"
+        typeof e.details?.hint === "string" &&
+        typeof e.details?.continuation === "object" &&
+        e.details.continuation !== null &&
+        (e.details.continuation as { task?: { task_id?: string } }).task?.task_id === "task-3" &&
+        (
+          e.details.continuation as { conversation?: { context_id?: string } }
+        ).conversation?.context_id === "context-3" &&
+        (
+          e.details.continuation as {
+            target?: { target_alias?: string; target_url?: string };
+          }
+        ).target?.target_alias === "peer" &&
+        (
+          e.details.continuation as {
+            target?: { target_alias?: string; target_url?: string };
+          }
+        ).target?.target_url === "https://peer.example/" &&
+        !(e.details.hint as string).includes("target_alias + task_id")
       );
     },
   );

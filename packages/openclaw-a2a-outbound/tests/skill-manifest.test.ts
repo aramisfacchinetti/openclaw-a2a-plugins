@@ -44,6 +44,7 @@ test('SKILL.md teaches target_alias and task_handle preference', () => {
   const content = readFileSync(skillPath, 'utf8')
   assert.ok(content.includes('target_alias'))
   assert.ok(content.includes('task_handle'))
+  assert.ok(content.includes('`continuation`'))
 })
 
 test('SKILL.md documents conditional task creation and strict durable mode', () => {
@@ -67,6 +68,7 @@ test('SKILL.md documents task_id versus reference_task_ids', () => {
 
 test('SKILL.md documents summary.continuation task vs conversation branching', () => {
   const content = readFileSync(skillPath, 'utf8')
+  assert.ok(content.includes('`summary.continuation.target`'))
   assert.ok(content.includes('`summary.continuation.task`'))
   assert.ok(content.includes('`summary.continuation.conversation`'))
   assert.ok(
@@ -106,12 +108,20 @@ test('SKILL.md documents fail-fast behavior for non-trackable continuations', ()
 
 test('README documents the nested continuation contract and migration rule', () => {
   const content = readFileSync(readmePath, 'utf8')
+  assert.ok(content.includes('Persist `summary.continuation` verbatim'))
+  assert.ok(content.includes('`summary.continuation.target`'))
   assert.ok(content.includes('`summary.continuation.task`'))
   assert.ok(content.includes('`summary.continuation.conversation`'))
   assert.ok(content.includes('`response_kind`'))
   assert.ok(content.includes('`task_requirement="required"`'))
   assert.ok(content.includes('`reference_task_ids`'))
   assert.ok(content.includes('Do not poll from conversation continuity.'))
+  assert.ok(
+    content.includes(
+      '`summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.',
+    ),
+  )
+  assert.ok(content.includes('Conversation-only continuation remains send-only.'))
   assert.ok(
     content.includes(
       'Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`.',

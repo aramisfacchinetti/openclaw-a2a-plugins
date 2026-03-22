@@ -58,6 +58,8 @@ import {
   buildRemoteAgentToolDefinition,
   createRemoteAgentInputValidator,
   type CancelActionInput,
+  type RemoteAgentContinuationInput,
+  type RemoteAgentContinuationTargetInput,
   type RemoteAgentAction,
   type RemoteAgentToolInput,
   type SendActionInput,
@@ -97,6 +99,7 @@ type PreparedSend = {
 type TargetContextInput = {
   target_alias?: string;
   target_url?: string;
+  continuation?: RemoteAgentContinuationInput;
 };
 
 type FollowUpActionInput = WatchActionInput | StatusActionInput | CancelActionInput;
@@ -105,7 +108,13 @@ type TaskAwareActionInput =
   | FollowUpActionInput
   | Pick<
       SendActionInput,
-      "action" | "target_alias" | "target_url" | "task_handle" | "task_id" | "context_id"
+      | "action"
+      | "target_alias"
+      | "target_url"
+      | "task_handle"
+      | "task_id"
+      | "context_id"
+      | "continuation"
     >;
 
 type ResolvedClientContext = {
@@ -587,9 +596,115 @@ export class A2AOutboundService {
     return undefined;
   }
 
+  private resolveTrustedContinuationTarget(
+    target: RemoteAgentContinuationTargetInput,
+  ): ResolvedTarget {
+    return this.clientPool.normalizeTarget({
+      baseUrl: target.target_url,
+      cardPath: target.card_path,
+      preferredTransports: target.preferred_transports,
+      ...(target.target_alias !== undefined
+        ? { alias: target.target_alias }
+        : {}),
+    });
+  }
+
   private async resolveTaskContext(
     input: TaskAwareActionInput,
   ): Promise<ResolvedTaskContext> {
+    if (input.continuation !== undefined) {
+      const continuationTarget = this.resolveTrustedContinuationTarget(
+        input.continuation.target,
+      );
+      const continuationTask = input.continuation.task;
+      const continuationContextId = input.continuation.conversation?.context_id;
+
+      if (continuationTask?.task_handle !== undefined) {
+        try {
+          const handleRecord = this.taskHandleRegistry.resolve(
+            continuationTask.task_handle,
+          );
+
+          if (continuationTask.task_id !== handleRecord.taskId) {
+            throw taskHandleTaskIdMismatchError(
+              continuationTask.task_handle,
+              handleRecord.taskId,
+              continuationTask.task_id,
+            );
+          }
+
+          if (
+            targetIdentity(continuationTarget) !==
+            targetIdentity(handleRecord.target)
+          ) {
+            throw taskHandleTargetMismatchError(
+              continuationTask.task_handle,
+              handleRecord.target,
+              continuationTarget,
+            );
+          }
+
+          if (
+            continuationContextId !== undefined &&
+            handleRecord.contextId !== undefined &&
+            continuationContextId !== handleRecord.contextId
+          ) {
+            throw taskHandleContextIdMismatchError(
+              continuationTask.task_handle,
+              handleRecord.contextId,
+              continuationContextId,
+            );
+          }
+
+          const clientResolution = await this.resolveClient(handleRecord.target);
+
+          return {
+            target: clientResolution.target,
+            clientEntry: clientResolution.clientEntry,
+            taskId: handleRecord.taskId,
+            ...(continuationContextId !== undefined
+              ? { contextId: continuationContextId }
+              : handleRecord.contextId !== undefined
+                ? { contextId: handleRecord.contextId }
+                : {}),
+            taskHandle: continuationTask.task_handle,
+          };
+        } catch (error) {
+          if (
+            error instanceof A2AOutboundError &&
+            (error.code === ERROR_CODES.UNKNOWN_TASK_HANDLE ||
+              error.code === ERROR_CODES.EXPIRED_TASK_HANDLE)
+          ) {
+            const clientResolution = await this.resolveClient(continuationTarget);
+
+            return {
+              target: clientResolution.target,
+              clientEntry: clientResolution.clientEntry,
+              taskId: continuationTask.task_id,
+              ...(continuationContextId !== undefined
+                ? { contextId: continuationContextId }
+                : {}),
+            };
+          }
+
+          throw error;
+        }
+      }
+
+      const clientResolution = await this.resolveClient(continuationTarget);
+
+      return {
+        target: clientResolution.target,
+        clientEntry: clientResolution.clientEntry,
+        ...(continuationTask !== undefined
+          ? { taskId: continuationTask.task_id }
+          : {}),
+        ...(continuationContextId !== undefined
+          ? { contextId: continuationContextId }
+          : {}),
+      };
+    }
+
     if (input.task_handle !== undefined) {
       const handleRecord = this.taskHandleRegistry.resolve(input.task_handle);
 

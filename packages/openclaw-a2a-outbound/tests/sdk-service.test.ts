@@ -134,6 +134,18 @@ function conversationContinuationFromSummary(
   return conversation;
 }
 
+function targetContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<NonNullable<SuccessEnvelope["summary"]["continuation"]>["target"]> {
+  const target = summary.continuation?.target;
+
+  if (!target) {
+    throw new TypeError("expected target continuation");
+  }
+
+  return target;
+}
+
 function taskHandleFromSummary(summary: SuccessEnvelope["summary"]): string {
   const task = taskContinuationFromSummary(summary);
 
@@ -549,6 +561,32 @@ function resolvedTarget(
     cardPath: peer.cardPath,
     preferredTransports: ["JSONRPC", "HTTP+JSON"],
     ...overrides,
+  };
+}
+
+function continuationFromTarget(
+  target: ResolvedTarget,
+  overrides: {
+    task?: { task_handle?: string; task_id: string };
+    conversation?: { context_id: string; can_send?: true };
+  } = {},
+) {
+  return {
+    target: {
+      target_url: target.baseUrl,
+      card_path: target.cardPath,
+      preferred_transports: [...target.preferredTransports],
+      ...(target.alias !== undefined ? { target_alias: target.alias } : {}),
+    },
+    ...(overrides.task !== undefined ? { task: overrides.task } : {}),
+    ...(overrides.conversation !== undefined
+      ? {
+          conversation: {
+            can_send: true,
+            ...overrides.conversation,
+          },
+        }
+      : {}),
   };
 }
 
@@ -1569,6 +1607,323 @@ test("send with context_id only starts a new task in an existing conversation", 
   assert.equal("taskId" in message, false);
 });
 
+test("send accepts a round-tripped nested continuation contract", async (t) => {
+  const peer = await startPeer({
+    sendResult: {
+      kind: "message",
+      messageId: "message-continuation-1",
+      role: "agent",
+      taskId: "task-continuation-1",
+      contextId: "ctx-continuation-1",
+      parts: [{ kind: "text", text: "continued" }],
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService();
+  const continuation = continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+    task: {
+      task_id: "task-continuation-1",
+    },
+    conversation: {
+      context_id: "ctx-continuation-1",
+    },
+  });
+
+  const result = await service.execute({
+    action: "send",
+    continuation,
+    parts: [{ kind: "text", text: "continue the task" }],
+  });
+
+  const success = asSuccess(result);
+  const params = asRecord(peer.state.lastSendParams ?? {});
+  const message = asRecord(params.message);
+  const task = taskContinuationFromSummary(success.summary);
+  const conversation = conversationContinuationFromSummary(success.summary);
+  const target = targetContinuationFromSummary(success.summary);
+
+  assert.equal(success.action, "send");
+  assert.equal(success.summary.response_kind, "message");
+  assert.equal(message.taskId, "task-continuation-1");
+  assert.equal(message.contextId, "ctx-continuation-1");
+  assert.equal(task.task_id, "task-continuation-1");
+  assert.equal(conversation.context_id, "ctx-continuation-1");
+  assert.equal(target.target_url, `${peer.baseUrl}/`);
+  assert.equal(target.card_path, peer.cardPath);
+  assert.deepEqual(target.preferred_transports, ["JSONRPC", "HTTP+JSON"]);
+});
+
+test("status, watch, and cancel accept nested continuation without configured targets or raw target_url overrides", async (t) => {
+  const peer = await startPeer({
+    streaming: true,
+    getTaskResult: {
+      kind: "task",
+      id: "task-nested-follow-up-1",
+      contextId: "ctx-nested-follow-up-1",
+      status: {
+        state: "working",
+      },
+    },
+    cancelTaskResult: {
+      kind: "task",
+      id: "task-nested-follow-up-1",
+      contextId: "ctx-nested-follow-up-1",
+      status: {
+        state: "canceled",
+      },
+    },
+    resubscribeResponses: [
+      {
+        result: {
+          kind: "task",
+          id: "task-nested-follow-up-1",
+          contextId: "ctx-nested-follow-up-1",
+          status: {
+            state: "working",
+          },
+        },
+      },
+      {
+        result: {
+          kind: "status-update",
+          taskId: "task-nested-follow-up-1",
+          contextId: "ctx-nested-follow-up-1",
+          status: {
+            state: "completed",
+          },
+          final: true,
+        },
+      },
+    ],
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService();
+  const continuation = continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+    task: {
+      task_id: "task-nested-follow-up-1",
+    },
+    conversation: {
+      context_id: "ctx-nested-follow-up-1",
+    },
+  });
+  const updates: StreamUpdateEnvelope<"watch">[] = [];
+
+  const statusResult = await service.execute({
+    action: "status",
+    continuation,
+  });
+  const watchResult = await service.execute(
+    {
+      action: "watch",
+      continuation,
+    },
+    {
+      onUpdate(update) {
+        updates.push(update as StreamUpdateEnvelope<"watch">);
+      },
+    },
+  );
+  const cancelResult = await service.execute({
+    action: "cancel",
+    continuation,
+  });
+
+  const status = asSuccess(statusResult);
+  const watch = asSuccess(watchResult);
+  const cancel = asSuccess(cancelResult);
+
+  assert.equal(taskContinuationFromSummary(status.summary).task_id, "task-nested-follow-up-1");
+  assert.equal(taskContinuationFromSummary(watch.summary).task_id, "task-nested-follow-up-1");
+  assert.equal(taskContinuationFromSummary(cancel.summary).task_id, "task-nested-follow-up-1");
+  assert.equal(conversationContinuationFromSummary(status.summary).context_id, "ctx-nested-follow-up-1");
+  assert.equal(targetContinuationFromSummary(status.summary).target_url, `${peer.baseUrl}/`);
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.resubscribeCalls, 1);
+  assert.equal(peer.state.cancelCalls, 1);
+  assert.equal(updates.length, 2);
+});
+
+test("nested continuation with an unknown task_handle falls back to durable target and task_id", async (t) => {
+  const peer = await startPeer({
+    getTaskResult: {
+      kind: "task",
+      id: "task-fallback-unknown-1",
+      contextId: "ctx-fallback-unknown-1",
+      status: {
+        state: "completed",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  const { service } = buildService();
+
+  const result = await service.execute({
+    action: "status",
+    continuation: continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+      task: {
+        task_handle: "rah_missing-handle",
+        task_id: "task-fallback-unknown-1",
+      },
+      conversation: {
+        context_id: "ctx-fallback-unknown-1",
+      },
+    }),
+  });
+
+  const success = asSuccess(result);
+
+  assert.equal(success.action, "status");
+  assert.equal(taskContinuationFromSummary(success.summary).task_id, "task-fallback-unknown-1");
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.lastGetTaskParams?.id, "task-fallback-unknown-1");
+});
+
+test("nested continuation with an expired task_handle falls back to durable target and task_id", async (t) => {
+  const peer = await startPeer({
+    getTaskResult: {
+      kind: "task",
+      id: "task-fallback-expired-1",
+      contextId: "ctx-fallback-expired-1",
+      status: {
+        state: "completed",
+      },
+    },
+  });
+  t.after(() => peer.server.close());
+
+  let now = 5_000;
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 100,
+    maxEntries: 100,
+    now: () => now,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-fallback-expired-1",
+    contextId: "ctx-fallback-expired-1",
+  }).taskHandle;
+  now = 5_200;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+
+  const result = await service.execute({
+    action: "status",
+    continuation: continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+      task: {
+        task_handle: handle,
+        task_id: "task-fallback-expired-1",
+      },
+      conversation: {
+        context_id: "ctx-fallback-expired-1",
+      },
+    }),
+  });
+
+  const success = asSuccess(result);
+
+  assert.equal(success.action, "status");
+  assert.equal(taskContinuationFromSummary(success.summary).task_id, "task-fallback-expired-1");
+  assert.equal(peer.state.getCalls, 1);
+  assert.equal(peer.state.lastGetTaskParams?.id, "task-fallback-expired-1");
+});
+
+test("nested continuation rejects live-handle task mismatches", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-live-1",
+    contextId: "ctx-live-1",
+  }).taskHandle;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+  const result = await service.execute({
+    action: "status",
+    continuation: continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+      task: {
+        task_handle: handle,
+        task_id: "task-other",
+      },
+      conversation: {
+        context_id: "ctx-live-1",
+      },
+    }),
+  });
+
+  const failure = asFailure(result);
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+});
+
+test("nested continuation rejects live-handle context mismatches", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peer, { alias: "support" }),
+    taskId: "task-live-2",
+    contextId: "ctx-live-2",
+  }).taskHandle;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+  const result = await service.execute({
+    action: "status",
+    continuation: continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+      task: {
+        task_handle: handle,
+        task_id: "task-live-2",
+      },
+      conversation: {
+        context_id: "ctx-other",
+      },
+    }),
+  });
+
+  const failure = asFailure(result);
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+});
+
+test("nested continuation rejects live-handle target mismatches", async (t) => {
+  const peerOne = await startPeer();
+  const peerTwo = await startPeer();
+  t.after(() => peerOne.server.close());
+  t.after(() => peerTwo.server.close());
+
+  const taskHandleRegistry = createTaskHandleRegistry({
+    ttlMs: 60_000,
+    maxEntries: 100,
+  });
+  const handle = taskHandleRegistry.create({
+    target: resolvedTarget(peerOne, { alias: "support" }),
+    taskId: "task-live-3",
+  }).taskHandle;
+
+  const { service } = buildService({}, { taskHandleRegistry });
+  const result = await service.execute({
+    action: "status",
+    continuation: continuationFromTarget(resolvedTarget(peerTwo, { alias: "billing" }), {
+      task: {
+        task_handle: handle,
+        task_id: "task-live-3",
+      },
+    }),
+  });
+
+  const failure = asFailure(result);
+  assert.equal(failure.error.code, "VALIDATION_ERROR");
+});
+
 test("list_targets hydrates card metadata automatically", async (t) => {
   const peer = await startPeer({
     streaming: true,
@@ -1929,6 +2284,7 @@ test("status with expired task_handle returns EXPIRED_TASK_HANDLE with recovery 
       alias: "support",
     },
     taskId: "task-expired-1",
+    contextId: "ctx-expired-1",
   }).taskHandle;
 
   now = 10_200;
@@ -1945,10 +2301,28 @@ test("status with expired task_handle returns EXPIRED_TASK_HANDLE with recovery 
 
   assert.equal(failure.action, "status");
   assert.equal(failure.error.code, "EXPIRED_TASK_HANDLE");
+  assert.equal(details.task_id, "task-expired-1");
+  assert.equal(details.context_id, "ctx-expired-1");
   assert.ok(Array.isArray(details.suggested_actions));
   assert.ok((details.suggested_actions as string[]).includes("status"));
   assert.ok((details.suggested_actions as string[]).includes("send"));
-  assert.equal(typeof details.hint, "string");
+  assert.equal(
+    details.hint,
+    "Retry with the persisted continuation, or resend the original request after a restart to obtain a new handle.",
+  );
+  const continuation = asRecord(details.continuation);
+  assert.deepEqual(continuation.task, {
+    task_id: "task-expired-1",
+  });
+  assert.deepEqual(continuation.conversation, {
+    context_id: "ctx-expired-1",
+  });
+  assert.deepEqual(continuation.target, {
+    target_url: "https://peer.example/",
+    card_path: "/.well-known/agent-card.json",
+    preferred_transports: ["JSONRPC", "HTTP+JSON"],
+    target_alias: "support",
+  });
 });
 
 test("send with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hint", async () => {
@@ -1966,6 +2340,7 @@ test("send with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hi
       alias: "support",
     },
     taskId: "task-expired-2",
+    contextId: "ctx-expired-2",
   }).taskHandle;
 
   now = 20_200;
@@ -1983,10 +2358,28 @@ test("send with expired task_handle returns EXPIRED_TASK_HANDLE with recovery hi
 
   assert.equal(failure.action, "send");
   assert.equal(failure.error.code, "EXPIRED_TASK_HANDLE");
+  assert.equal(details.task_id, "task-expired-2");
+  assert.equal(details.context_id, "ctx-expired-2");
   assert.ok(Array.isArray(details.suggested_actions));
   assert.ok((details.suggested_actions as string[]).includes("status"));
   assert.ok((details.suggested_actions as string[]).includes("send"));
-  assert.equal(typeof details.hint, "string");
+  assert.equal(
+    details.hint,
+    "Retry with the persisted continuation, or resend the original request after a restart to obtain a new handle.",
+  );
+  const continuation = asRecord(details.continuation);
+  assert.deepEqual(continuation.task, {
+    task_id: "task-expired-2",
+  });
+  assert.deepEqual(continuation.conversation, {
+    context_id: "ctx-expired-2",
+  });
+  assert.deepEqual(continuation.target, {
+    target_url: "https://peer.example/",
+    card_path: "/.well-known/agent-card.json",
+    preferred_transports: ["JSONRPC", "HTTP+JSON"],
+    target_alias: "support",
+  });
 });
 
 test("list_targets with unreachable peer still returns entries with lastRefreshError", async (t) => {
