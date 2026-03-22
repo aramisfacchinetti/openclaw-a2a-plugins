@@ -78,7 +78,7 @@ Call `list_targets` first to discover configured aliases and refreshed peer-card
 - `message_id`: optional client-supplied message id for `send`.
 - `task_handle`: opaque delegated-task handle. `send`, `watch`, `status`, and `cancel` all accept it.
 - `task_id`: for `send`, continue an existing remote task when no `task_handle` is available; for `watch`/`status`/`cancel`, fallback follow-up key when no live `task_handle` is available.
-- `context_id`: optional remote conversation context id for `send`. Use it either with `task_id` or by itself to start a new task inside an existing conversation.
+- `context_id`: optional remote conversation context id for `send` only. Use it either with `task_id` or by itself to start a new task inside an existing conversation. Flat `context_id` must not be used for `watch`, `status`, or `cancel`.
 - `reference_task_ids`: optional related task ids for `send`. `task_id` continues an existing task; `reference_task_ids` references prior tasks without continuing them.
 - `task_requirement`: optional `send` contract. Defaults to `"optional"`; set `task_requirement="required"` to require a real task.
 - `follow_updates`: stream the initial `send`. `follow_updates=true` means “stream the initial send”; it does not guarantee task creation unless `task_requirement="required"`.
@@ -117,13 +117,14 @@ This package returns continuation metadata under `summary.continuation`.
 
 - `summary.continuation.target`: the canonical persisted routing contract for machine follow-up. Persist `target_url`, `card_path`, and `preferred_transports` verbatim; `target_alias` is optional descriptive metadata.
 - `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, `can_resume_send`, `can_watch`, and the deprecated alias `can_send` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
-- `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`.
+- `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`. Do not use it to infer task continuity.
 - `response_kind`: descriptive wire-shape classification only. `response_kind="message"` means the peer returned a `Message`; `response_kind="task"` means a task-bearing response or event appeared. `response_kind` does not replace `summary.continuation`.
 - Do not poll from conversation continuity.
+- `watch`, `status`, and `cancel` require `summary.continuation.task`.
 - Message-only follow-up uses `context_id`, not task actions.
 - `task_handle` is returned only when the peer actually created a task.
 - `summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.
-- Read task and conversation continuity from `summary.continuation`.
+- Top-level compatibility aliases are descriptive only. Read task and conversation continuity from `summary.continuation`, and do not infer lifecycle continuity from flat `task_id`, flat `context_id`, or other top-level fields.
 
 Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
 
@@ -142,6 +143,8 @@ if (task) {
   }
 }
 ```
+
+Persist `summary.continuation` verbatim and branch on `summary.continuation.task` versus `summary.continuation.conversation`. `summary.continuation.task` is the only machine-readable authority for lifecycle follow-up. Conversation-only continuation remains send-only, and `watch`, `status`, and `cancel` require `summary.continuation.task`.
 
 ## Examples
 
@@ -556,7 +559,7 @@ if (conversation) {
 }
 ```
 
-Do not poll from conversation continuity.
+Do not poll from conversation continuity. `watch`, `status`, and `cancel` require `summary.continuation.task`.
 
 ### Check Task Status With `task_handle`
 
@@ -662,7 +665,7 @@ When `summary.continuation.task.task_handle` is expired or unavailable, retry wi
 }
 ```
 
-`watch` and `cancel` use the same follow-up targeting rules, and both require `summary.continuation.task` from a prior result:
+`watch` and `cancel` use the same follow-up targeting rules, and both require `summary.continuation.task` from a prior result. Conversation continuity by itself is never enough for lifecycle actions:
 
 ```json
 { "action": "watch", "continuation": { "target": { "target_url": "https://support.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "support" }, "task": { "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0", "task_id": "task-456" } } }
