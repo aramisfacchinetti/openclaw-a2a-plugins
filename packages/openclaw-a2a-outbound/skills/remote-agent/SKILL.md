@@ -101,9 +101,11 @@ Interpret follow-up capability from `result.summary.continuation`, not from prom
 - `summary.continuation.task`: trackable task continuity. Use it for follow-up `send`, `watch`, `status`, and `cancel`.
 - `summary.continuation.conversation`: conversation continuity only. Use it only with `send` to start a new task in the same conversation.
 - `summary.target_*` is descriptive only and no longer part of the machine follow-up recipe.
+- Top-level compatibility aliases stay descriptive only. Do not infer task continuity from flat `task_id`, flat `context_id`, or other top-level summary fields.
 - Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action.
 - Never infer or synthesize `summary.continuation.task` from `summary.continuation.conversation`, session ids, run ids, prior prompts, or summary text.
 - Do not call `watch`, `status`, or `cancel` from a result that has only `summary.continuation.conversation`.
+- Do not poll from conversation continuity.
 - If lifecycle tracking is required, fail fast when the peer returns only `summary.continuation.conversation`.
 
 ```ts

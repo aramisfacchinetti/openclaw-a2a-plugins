@@ -90,6 +90,7 @@ test('SKILL.md forbids inferring task continuity from conversation-only results'
       'Do not call `watch`, `status`, or `cancel` from a result that has only `summary.continuation.conversation`.',
     ),
   )
+  assert.ok(content.includes('Do not poll from conversation continuity.'))
 })
 
 test('SKILL.md documents fail-fast behavior for non-trackable continuations', () => {
@@ -118,13 +119,18 @@ test('README documents the nested continuation contract and migration rule', () 
   assert.ok(content.includes('Do not poll from conversation continuity.'))
   assert.ok(
     content.includes(
+      '`watch`, `status`, and `cancel` require `summary.continuation.task`.',
+    ),
+  )
+  assert.ok(
+    content.includes(
       '`summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.',
     ),
   )
   assert.ok(content.includes('Conversation-only continuation remains send-only.'))
   assert.ok(
     content.includes(
-      'Top-level task lifecycle aliases were removed. Read task and conversation continuity only from `summary.continuation`.',
+      'Top-level compatibility aliases are descriptive only. Read task and conversation continuity from `summary.continuation`, and do not infer lifecycle continuity from flat `task_id`, flat `context_id`, or other top-level fields.',
     ),
   )
 })
