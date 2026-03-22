@@ -123,7 +123,7 @@ This package returns continuation metadata under `summary.continuation`.
 - Message-only follow-up uses `context_id`, not task actions.
 - `task_handle` is returned only when the peer actually created a task.
 - `summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.
-- Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`. Treat them as descriptive/manual compatibility only, not as the primary persisted API.
+- Read task and conversation continuity from `summary.continuation`.
 
 Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
 
@@ -142,8 +142,6 @@ if (task) {
   }
 }
 ```
-
-For persisted caller or wrapper state, save continuation data atomically from one result envelope and round-trip `summary.continuation` verbatim. That subtree already carries the canonical persisted follow-up contract: `target`, plus `task` and/or `conversation`. Do not reconstruct persisted follow-up state from prompt text, `message_text`, `response_kind`, or top-level compatibility aliases alone. Default-target fallback is acceptable for ad hoc manual calls, but persisted production follow-up must not depend on whichever target happens to be configured as default later. Conversation-only continuation remains send-only.
 
 ## Examples
 

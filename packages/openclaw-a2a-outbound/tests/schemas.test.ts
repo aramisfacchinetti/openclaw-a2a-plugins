@@ -280,6 +280,34 @@ test("createRemoteAgentInputValidator rejects follow-up continuation with only c
   }
 });
 
+test("createRemoteAgentInputValidator rejects flat context_id on lifecycle actions", () => {
+  const config = parseA2AOutboundPluginConfig({
+    enabled: true,
+  });
+  const validate = createRemoteAgentInputValidator(config);
+
+  for (const action of ["status", "watch", "cancel"] as const) {
+    assert.throws(
+      () =>
+        validate({
+          action,
+          target_url: "https://support.example/",
+          context_id: "context-1",
+          task_id: "task-1",
+        }),
+      (error: unknown) =>
+        isValidationError(error) &&
+        hasAjvError(
+          error,
+          (entry) =>
+            entry.keyword === "not" &&
+            entry.instancePath === "" &&
+            String(entry.message).includes('"context_id" is not supported'),
+        ),
+    );
+  }
+});
+
 test("createRemoteAgentInputValidator rejects mixed flat and nested continuation routing", () => {
   const config = parseA2AOutboundPluginConfig({
     enabled: true,

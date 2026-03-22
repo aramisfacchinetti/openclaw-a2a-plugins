@@ -182,7 +182,8 @@ const CONTINUATION_TASK_SCHEMA = {
     task_id: {
       type: "string",
       minLength: 1,
-      description: "Persisted remote task id for durable follow-up routing.",
+      description:
+        "Persisted remote task id for durable task lifecycle follow-up routing. This is the machine-readable authority for send/status/watch/cancel continuity when task continuity exists.",
     },
     status: {
       type: "string",
@@ -214,7 +215,8 @@ const CONTINUATION_CONVERSATION_SCHEMA = {
     context_id: {
       type: "string",
       minLength: 1,
-      description: "Persisted remote context id for send-only conversation continuity.",
+      description:
+        "Persisted remote context id for send-only conversation continuity. It must not be used to infer task continuity or to drive status/watch/cancel.",
     },
     can_send: {
       type: "boolean",
@@ -520,7 +522,7 @@ export function buildRemoteAgentParametersSchema(
       continuation: {
         ...CONTINUATION_SCHEMA,
         description:
-          "Canonical persisted follow-up contract emitted in summary.continuation. Prefer round-tripping this subtree verbatim for send/status/watch/cancel.",
+          "Canonical persisted follow-up contract emitted in summary.continuation. Round-trip this subtree verbatim. summary.continuation.task is the only machine-readable authority for lifecycle follow-up; summary.continuation.conversation is send-only.",
       },
       message_id: {
         type: "string",
@@ -532,13 +534,13 @@ export function buildRemoteAgentParametersSchema(
         type: "string",
         minLength: 1,
         description:
-          "Remote task id. For action=send this continues an existing task; for watch/status/cancel it identifies the delegated task when no task_handle is available.",
+          "Remote task id. For action=send this continues an existing task; for watch/status/cancel it identifies the delegated task only when no task_handle is available. Flat task_id is a manual compatibility input, not a replacement for persisted summary.continuation.",
       },
       context_id: {
         type: "string",
         minLength: 1,
         description:
-          "Optional remote context id for action=send to continue an existing conversation context.",
+          "Optional remote context id for action=send only. Use it to continue an existing conversation context or start a new task in that conversation. Flat context_id must not be used for status/watch/cancel.",
       },
       reference_task_ids: {
         type: "array",
