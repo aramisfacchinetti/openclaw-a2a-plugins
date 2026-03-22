@@ -315,6 +315,15 @@ function missingTargetContextError(action: "send" | "watch" | "status" | "cancel
   return new A2AOutboundError(ERROR_CODES.VALIDATION_ERROR, message);
 }
 
+function conversationOnlyLifecycleContinuationError(
+  action: "watch" | "status" | "cancel",
+) {
+  return new A2AOutboundError(
+    ERROR_CODES.VALIDATION_ERROR,
+    `${action} requires task continuity; summary.continuation.conversation.context_id is send-only`,
+  );
+}
+
 function streamingNotSupportedError(
   target: ResolvedTarget,
   taskId: string,
@@ -618,6 +627,14 @@ export class A2AOutboundService {
       );
       const continuationTask = input.continuation.task;
       const continuationContextId = input.continuation.conversation?.context_id;
+
+      if (
+        input.action !== "send" &&
+        continuationTask === undefined &&
+        continuationContextId !== undefined
+      ) {
+        throw conversationOnlyLifecycleContinuationError(input.action);
+      }
 
       if (continuationTask?.task_handle !== undefined) {
         try {

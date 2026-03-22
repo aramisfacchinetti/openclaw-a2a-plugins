@@ -680,7 +680,75 @@ test("send falls back to the configured default target", async (t) => {
   assert.equal(peer.state.sendCalls, 1);
 });
 
-test("send forwards blocking, accepted output modes, and continuation ids on message/send", async (t) => {
+test("lifecycle actions reject conversation-only continuation during normal validation", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const { service } = buildService();
+  const continuation = continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+    conversation: {
+      context_id: "ctx-conversation-only-1",
+    },
+  });
+
+  for (const action of ["status", "watch", "cancel"] as const) {
+    const result = await service.execute({
+      action,
+      continuation,
+    });
+
+    const failure = asFailure(result);
+    assert.equal(failure.action, action);
+    assert.equal(failure.error.code, "VALIDATION_ERROR");
+  }
+
+  assert.equal(peer.state.cardRequests, 0);
+  assert.equal(peer.state.getCalls, 0);
+  assert.equal(peer.state.resubscribeCalls, 0);
+  assert.equal(peer.state.cancelCalls, 0);
+});
+
+test("lifecycle actions reject conversation-only continuation before target resolution when validation is bypassed", async (t) => {
+  const peer = await startPeer();
+  t.after(() => peer.server.close());
+
+  const { service } = buildService();
+  const continuation = continuationFromTarget(resolvedTarget(peer, { alias: "support" }), {
+    conversation: {
+      context_id: "ctx-conversation-only-2",
+    },
+  });
+  const serviceInternals = service as unknown as {
+    validateInput: (input: unknown) => unknown;
+  };
+  const originalValidateInput = serviceInternals.validateInput;
+  serviceInternals.validateInput = (input) => input;
+  t.after(() => {
+    serviceInternals.validateInput = originalValidateInput;
+  });
+
+  for (const action of ["status", "watch", "cancel"] as const) {
+    const result = await service.execute({
+      action,
+      continuation,
+    });
+
+    const failure = asFailure(result);
+    assert.equal(failure.action, action);
+    assert.equal(failure.error.code, "VALIDATION_ERROR");
+    assert.match(
+      failure.error.message,
+      /requires task continuity; summary\.continuation\.conversation\.context_id is send-only/,
+    );
+  }
+
+  assert.equal(peer.state.cardRequests, 0);
+  assert.equal(peer.state.getCalls, 0);
+  assert.equal(peer.state.resubscribeCalls, 0);
+  assert.equal(peer.state.cancelCalls, 0);
+});
+
+test("send forwards blocking, accepted output modes, and preserves explicit continuation ids on message/send", async (t) => {
   const peer = await startPeer();
   t.after(() => peer.server.close());
 
@@ -713,12 +781,14 @@ test("send forwards blocking, accepted output modes, and continuation ids on mes
   const success = asSuccess(result);
   const params = asRecord(peer.state.lastSendParams ?? {});
   const message = asRecord(params.message);
+  const task = taskContinuationFromSummary(success.summary);
   const configuration = asRecord(params.configuration);
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
   assert.equal(success.summary.response_kind, "message");
-  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(task.task_id, "task-continue-1");
+  assert.match(String(task.task_handle), /^rah_/);
   assert.equal(conversation.context_id, "context-continue-1");
   assert.equal(peer.state.sendCalls, 1);
   assert.equal(peer.state.streamCalls, 0);
@@ -1058,11 +1128,13 @@ test("send with task_handle resolves target, task, and context from the handle",
   const success = asSuccess(result);
   const params = asRecord(peer.state.lastSendParams ?? {});
   const message = asRecord(params.message);
+  const task = taskContinuationFromSummary(success.summary);
   const conversation = conversationContinuationFromSummary(success.summary);
 
   assert.equal(success.action, "send");
   assert.equal(success.summary.response_kind, "message");
-  assert.equal(success.summary.continuation?.task, undefined);
+  assert.equal(task.task_id, "task-handle-1");
+  assert.equal(task.task_handle, handle);
   assert.equal(conversation.context_id, "ctx-handle-1");
   assert.equal(message.taskId, "task-handle-1");
   assert.equal(message.contextId, "ctx-handle-1");
@@ -1894,8 +1966,6 @@ test("send accepts a round-tripped nested continuation contract", async (t) => {
       kind: "message",
       messageId: "message-continuation-1",
       role: "agent",
-      taskId: "task-continuation-1",
-      contextId: "ctx-continuation-1",
       parts: [{ kind: "text", text: "continued" }],
     },
   });

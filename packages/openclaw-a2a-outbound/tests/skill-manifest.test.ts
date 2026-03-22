@@ -124,7 +124,7 @@ test('README documents the nested continuation contract and migration rule', () 
   assert.ok(content.includes('Conversation-only continuation remains send-only.'))
   assert.ok(
     content.includes(
-      'Compatibility aliases remain available at the top level: `summary.task_handle`, `summary.task_id`, `summary.context_id`, `summary.status`, and `summary.can_watch`.',
+      'Top-level task lifecycle aliases were removed. Read task and conversation continuity only from `summary.continuation`.',
     ),
   )
 })

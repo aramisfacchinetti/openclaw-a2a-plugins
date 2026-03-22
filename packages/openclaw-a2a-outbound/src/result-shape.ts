@@ -80,15 +80,7 @@ export interface RemoteAgentSummary {
   target_alias?: string;
   target_name?: string;
   target_url?: string;
-  task_id?: string;
-  task_handle?: string;
-  context_id?: string;
-  status?: string;
   response_kind?: ResponseKind;
-  can_resume_send?: boolean;
-  can_status?: boolean;
-  can_cancel?: boolean;
-  can_watch?: boolean;
   message_text?: string;
   artifacts?: Artifact[];
   continuation?: RemoteAgentContinuationSummary;
@@ -292,37 +284,9 @@ function withContinuationContext(
   context: SummaryTaskContext & { status?: string },
 ): RemoteAgentSummary {
   const continuation = continuationSummary(target, context);
-  const taskContinuation = continuation?.task;
-  const conversationContinuation = continuation?.conversation;
 
   return {
     ...summary,
-    ...(taskContinuation !== undefined
-      ? {
-          task_id: taskContinuation.task_id,
-          ...(taskContinuation.task_handle !== undefined
-            ? { task_handle: taskContinuation.task_handle }
-            : {}),
-          ...(taskContinuation.status !== undefined
-            ? { status: taskContinuation.status }
-            : {}),
-          can_resume_send: taskContinuation.can_resume_send,
-          can_status: taskContinuation.can_status,
-          can_cancel: taskContinuation.can_cancel,
-          can_watch: taskContinuation.can_watch,
-        }
-      : {
-          can_resume_send:
-            conversationContinuation !== undefined ? true : undefined,
-          can_status: false,
-          can_cancel: false,
-          can_watch: false,
-        }),
-    ...(conversationContinuation !== undefined
-      ? { context_id: conversationContinuation.context_id }
-      : context.contextId !== undefined
-        ? { context_id: context.contextId }
-        : {}),
     ...(continuation !== undefined ? { continuation } : {}),
   };
 }
@@ -333,6 +297,7 @@ function messageSummary(
   context: SummaryTaskContext = {},
 ): RemoteAgentSummary {
   const messageText = extractMessageText(raw);
+  const taskId = raw.taskId ?? context.taskId;
 
   return withContinuationContext(
     target,
@@ -342,9 +307,9 @@ function messageSummary(
       ...(messageText !== undefined ? { message_text: messageText } : {}),
     },
     {
-      ...(raw.taskId !== undefined ? { taskId: raw.taskId } : {}),
+      ...(taskId !== undefined ? { taskId } : {}),
       contextId: raw.contextId ?? context.contextId,
-      ...(raw.taskId !== undefined && context.taskHandle !== undefined
+      ...(taskId !== undefined && context.taskHandle !== undefined
         ? { taskHandle: context.taskHandle }
         : {}),
     },
@@ -582,6 +547,7 @@ export function summarizeStreamEvents(
       events.length === 1 && latestEvent.kind === "message"
         ? "message"
         : undefined;
+    const taskId = latestEvent.taskId ?? context.taskId;
 
     return withContinuationContext(
       target,
@@ -591,9 +557,9 @@ export function summarizeStreamEvents(
         ...(messageText !== undefined ? { message_text: messageText } : {}),
       },
       {
-        ...(latestEvent.taskId !== undefined ? { taskId: latestEvent.taskId } : {}),
+        ...(taskId !== undefined ? { taskId } : {}),
         contextId: latestEvent.contextId ?? context.contextId,
-        ...(latestEvent.taskId !== undefined && context.taskHandle !== undefined
+        ...(taskId !== undefined && context.taskHandle !== undefined
           ? { taskHandle: context.taskHandle }
           : {}),
       },
