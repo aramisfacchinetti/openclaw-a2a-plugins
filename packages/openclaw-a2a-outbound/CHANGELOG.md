@@ -1,5 +1,21 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 3.0.0
+
+### Major Changes
+
+- Make `summary.continuation` the canonical persisted follow-up contract by adding
+  `summary.continuation.target` and accepting the same nested `continuation` subtree as the
+  preferred machine-readable input for `send`, `watch`, `status`, and `cancel`.
+
+  Treat `summary.continuation.task` as the only machine-readable task lifecycle authority and keep
+  conversation continuity send-only; `watch`, `status`, and `cancel` now require task continuity
+  instead of inferring lifecycle follow-up from conversation state or descriptive top-level fields.
+
+  Fall back from expired or unknown nested task handles to the persisted durable target plus
+  `task_id`, preserve conversation context in that persisted continuation, and return the full
+  continuation recovery contract in expired-handle errors.
+
 ## 2.0.0
 
 ### Major Changes
