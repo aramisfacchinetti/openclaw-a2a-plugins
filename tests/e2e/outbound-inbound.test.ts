@@ -377,8 +377,10 @@ describe("persisted continuation", () => {
     assert.equal(rawTask.status.state, "completed");
     assert.equal(rawTask.id, firstTask.task_id);
     assert.equal(rawTask.contextId, firstConversation.context_id);
+    const statusMessage = rawTask.status?.message;
+    assert.ok(statusMessage);
     assert.match(
-      readMessageText(rawTask.status.message),
+      readMessageText(statusMessage),
       new RegExp(scenario.expectedResumedFinalText),
     );
     assert.notEqual(resumedTask.task_handle, firstTask.task_handle);

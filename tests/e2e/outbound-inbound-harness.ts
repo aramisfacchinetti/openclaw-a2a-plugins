@@ -826,9 +826,10 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
   const service = await createOutboundService(scenarioConfig);
 
   const closeCurrentInbound = async () => {
+    // Model a process restart: close the HTTP surface, then drop the old runtime
+    // without waiting for in-flight script promises to finish.
     currentInbound?.server.close();
     inboundServer = undefined;
-    await currentInbound?.waitForPending();
     currentInbound = undefined;
   };
 
