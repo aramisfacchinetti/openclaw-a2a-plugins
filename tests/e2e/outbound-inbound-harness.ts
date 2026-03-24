@@ -82,6 +82,11 @@ export type DurableWatchScenario = StartedScenario & {
   createFreshService: () => Promise<A2AOutboundService>;
 };
 
+type StartedInboundRuntime = {
+  server: A2AInboundServer;
+  waitForPending: () => Promise<void>;
+};
+
 const REPO_ROOT = resolve(process.cwd());
 const INBOUND_DIST_PATH = join(
   REPO_ROOT,
@@ -781,9 +786,7 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
 
   const startInbound = async (
     script: RuntimeScript,
-  ): Promise<{
-    server: A2AInboundServer;
-  }> => {
+  ): Promise<StartedInboundRuntime> => {
     const runtimeHarness = createMinimalPluginRuntime(script, tempDir);
     const server = inboundModule.createA2AInboundServer({
       accountId: account.accountId,
@@ -795,6 +798,7 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
 
     return {
       server,
+      waitForPending: runtimeHarness.waitForPending,
     };
   };
 
@@ -817,12 +821,15 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
     await waitForAbort();
   });
 
+  let currentInbound: StartedInboundRuntime | undefined = initialInbound;
   inboundServer = initialInbound.server;
   const service = await createOutboundService(scenarioConfig);
 
   const closeCurrentInbound = async () => {
-    inboundServer?.close();
+    currentInbound?.server.close();
     inboundServer = undefined;
+    await currentInbound?.waitForPending();
+    currentInbound = undefined;
   };
 
   return {
@@ -839,6 +846,7 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
     restartInbound: async () => {
       await closeCurrentInbound();
       const restartedInbound = await startInbound(async () => {});
+      currentInbound = restartedInbound;
       inboundServer = restartedInbound.server;
     },
     createFreshService: async () => createOutboundService(scenarioConfig),
