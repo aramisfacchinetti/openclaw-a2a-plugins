@@ -61,6 +61,11 @@ export type PromotedStreamingScenario = StartedScenario & {
   expectedFinalText: string;
 };
 
+export type PersistedContinuationScenario = StartedScenario & {
+  expectedPausePromptText: string;
+  expectedResumedFinalText: string;
+};
+
 const REPO_ROOT = resolve(process.cwd());
 const INBOUND_DIST_PATH = join(
   REPO_ROOT,
@@ -558,6 +563,85 @@ export async function promotedStreamingScenario(): Promise<PromotedStreamingScen
     ...scenario,
     expectedToolText,
     expectedFinalText,
+  };
+}
+
+export async function persistedContinuationScenario(): Promise<PersistedContinuationScenario> {
+  const expectedPausePromptText = "Approve the delegated action?";
+  const expectedResumedFinalText = "Approved and completed through resumed send.";
+  const firstPromptText = "Please request approval first.";
+  const resumedPromptText = "Approved. Continue and finish.";
+  let approvalIssued = false;
+
+  const scenario = await startScenario({
+    accountOverrides: {
+      label: "Persisted Continuation Agent",
+      description:
+        "Approval-pause fixture that resumes the same inbound task through persisted continuation.",
+    },
+    script: async ({ params, emit }) => {
+      const ctx = params.ctx as { BodyForAgent?: unknown };
+      const bodyForAgent =
+        typeof ctx.BodyForAgent === "string" ? ctx.BodyForAgent : undefined;
+      const runId = `run-${approvalIssued ? "resume" : "initial"}`;
+
+      params.replyOptions?.onAgentRunStart?.(runId);
+      emit({
+        runId,
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+
+      if (approvalIssued && bodyForAgent === resumedPromptText) {
+        await params.dispatcherOptions.deliver(
+          { text: expectedResumedFinalText },
+          { kind: "final" },
+        );
+        emit({
+          runId,
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+        return;
+      }
+
+      if (!approvalIssued && bodyForAgent === firstPromptText) {
+        approvalIssued = true;
+        emit({
+          runId,
+          stream: "tool",
+          data: {
+            phase: "result",
+            name: "exec",
+            toolCallId: "exec/1",
+            isError: false,
+            result: {
+              status: "approval-pending",
+              requiresApproval: {
+                type: "approval_request",
+                prompt: expectedPausePromptText,
+              },
+              command: "echo approved",
+            },
+          },
+        });
+        emit({
+          runId,
+          stream: "lifecycle",
+          data: { phase: "end" },
+        });
+        return;
+      }
+      throw new Error(
+        `unexpected persisted continuation scenario body: ${String(bodyForAgent)}`,
+      );
+    },
+  });
+
+  return {
+    ...scenario,
+    expectedPausePromptText,
+    expectedResumedFinalText,
   };
 }
 

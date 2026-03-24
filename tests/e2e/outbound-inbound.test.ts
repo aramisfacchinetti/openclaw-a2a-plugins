@@ -9,8 +9,10 @@ import type {
 import type { TargetCatalogEntry } from "../../packages/openclaw-a2a-outbound/src/target-catalog.js";
 import {
   directReplyScenario,
+  persistedContinuationScenario,
   promotedStreamingScenario,
   type DirectReplyScenario,
+  type PersistedContinuationScenario,
   type PromotedStreamingScenario,
 } from "./outbound-inbound-harness.js";
 
@@ -47,6 +49,20 @@ function taskContinuationFromSummary(
   }
 
   return task;
+}
+
+function conversationContinuationFromSummary(
+  summary: SuccessEnvelope["summary"],
+): NonNullable<
+  NonNullable<SuccessEnvelope["summary"]["continuation"]>["conversation"]
+> {
+  const conversation = summary.continuation?.conversation;
+
+  if (!conversation) {
+    throw new TypeError("expected conversation continuation");
+  }
+
+  return conversation;
 }
 
 function asStreamRaw(
@@ -177,5 +193,93 @@ describe("promoted streaming", () => {
       ),
     );
     assert.match(success.summary.message_text ?? "", /Promoted final answer/);
+  });
+});
+
+describe("persisted continuation", () => {
+  let scenario: PersistedContinuationScenario;
+
+  before(async () => {
+    scenario = await persistedContinuationScenario();
+  });
+
+  after(async () => {
+    await scenario.cleanup();
+  });
+
+  it("round-trips persisted summary.continuation through send and status against the real inbound server", async () => {
+    const firstSend = asSuccess(
+      await scenario.service.execute({
+        action: "send",
+        target_alias: scenario.alias,
+        parts: [{ kind: "text", text: "Please request approval first." }],
+      }),
+    );
+    const firstTask = taskContinuationFromSummary(firstSend.summary);
+    const firstConversation = conversationContinuationFromSummary(firstSend.summary);
+
+    assert.equal(firstSend.action, "send");
+    assert.equal(firstSend.summary.response_kind, "task");
+    assert.equal(firstTask.status, "input-required");
+    assert.match(firstSend.summary.message_text ?? "", new RegExp(scenario.expectedPausePromptText));
+    assert.equal(typeof firstTask.task_id, "string");
+    assert.equal(typeof firstTask.task_handle, "string");
+    assert.equal(typeof firstConversation.context_id, "string");
+
+    const persistedContinuation = structuredClone(firstSend.summary.continuation);
+    if (!persistedContinuation) {
+      assert.fail("expected continuation");
+    }
+
+    const resumedSend = asSuccess(
+      await scenario.service.execute({
+        action: "send",
+        continuation: persistedContinuation,
+        parts: [{ kind: "text", text: "Approved. Continue and finish." }],
+      }),
+    );
+    const resumedTask = taskContinuationFromSummary(resumedSend.summary);
+    const resumedConversation = conversationContinuationFromSummary(resumedSend.summary);
+
+    assert.equal(resumedSend.action, "send");
+    assert.equal(resumedSend.summary.response_kind, "task");
+    assert.equal(resumedTask.task_id, firstTask.task_id);
+    assert.equal(resumedTask.task_handle, firstTask.task_handle);
+    assert.equal(resumedTask.status, "completed");
+    assert.equal(resumedConversation.context_id, firstConversation.context_id);
+    assert.match(
+      resumedSend.summary.message_text ?? "",
+      new RegExp(scenario.expectedResumedFinalText),
+    );
+
+    const status = asSuccess(
+      await scenario.service.execute({
+        action: "status",
+        continuation: persistedContinuation,
+      }),
+    );
+    const statusTask = taskContinuationFromSummary(status.summary);
+    const statusConversation = conversationContinuationFromSummary(status.summary);
+    const rawTask = status.raw as Task;
+
+    assert.equal(status.action, "status");
+    assert.equal(status.summary.response_kind, "task");
+    assert.equal(statusTask.task_id, firstTask.task_id);
+    assert.equal(statusTask.task_handle, firstTask.task_handle);
+    assert.equal(statusTask.status, "completed");
+    assert.equal(statusConversation.context_id, firstConversation.context_id);
+    assert.equal(rawTask.kind, "task");
+    assert.equal(rawTask.status.state, "completed");
+    assert.equal(rawTask.id, firstTask.task_id);
+    assert.equal(rawTask.contextId, firstConversation.context_id);
+    assert.match(
+      readMessageText(rawTask.status.message),
+      new RegExp(scenario.expectedResumedFinalText),
+    );
+    assert.deepEqual(status.summary.continuation?.task, resumedSend.summary.continuation?.task);
+    assert.deepEqual(
+      status.summary.continuation?.conversation,
+      resumedSend.summary.continuation?.conversation,
+    );
   });
 });
