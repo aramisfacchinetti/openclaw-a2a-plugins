@@ -169,6 +169,7 @@ Persist `summary.continuation` verbatim and branch on `summary.continuation.task
         "examples": ["Summarize this incident and propose next steps."],
         "target_name": "Support Agent",
         "description": "Primary support lane",
+        "streaming_supported": true,
         "peer_card": {
           "preferred_transport": "JSONRPC",
           "additional_interfaces": [

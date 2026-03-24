@@ -2375,10 +2375,7 @@ test("list_targets hydrates card metadata automatically", async (t) => {
     targets[0]?.peer_card,
     rawTargets[0] ? peerCardSummaryFromRaw(rawTargets[0]) : undefined,
   );
-  assert.equal(
-    "streaming_supported" in (targets[0] as unknown as Record<string, unknown>),
-    false,
-  );
+  assert.equal(targets[0]?.streaming_supported, true);
   assert.equal(
     "preferred_transport" in (targets[0] as unknown as Record<string, unknown>),
     false,

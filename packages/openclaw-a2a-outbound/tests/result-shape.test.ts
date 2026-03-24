@@ -380,7 +380,7 @@ test("streamUpdate summarizes accumulated task state instead of only the final e
   });
 });
 
-test("listTargetsSuccess nests peer-card data under peer_card without flat capability mirrors", () => {
+test("listTargetsSuccess includes streaming availability and nests hydrated peer-card data", () => {
   const entry: TargetCatalogEntry = {
     target: {
       ...target(),
@@ -435,10 +435,7 @@ test("listTargetsSuccess nests peer-card data under peer_card without flat capab
 
   assert.ok(summaryEntry);
   assert.ok(rawEntry);
-  assert.equal(
-    "streaming_supported" in (summaryEntry as unknown as Record<string, unknown>),
-    false,
-  );
+  assert.equal(summaryEntry?.streaming_supported, true);
   assert.equal(
     "preferred_transport" in (summaryEntry as unknown as Record<string, unknown>),
     false,

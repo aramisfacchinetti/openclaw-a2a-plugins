@@ -5,18 +5,23 @@
   "packageManager": "pnpm@10.17.1",
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false",
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.tests.json --pretty false",
     "test:root": "node --test tests/*.test.js",
+    "test:e2e:build": "tsc -b",
+    "test:e2e": "corepack pnpm run test:e2e:build && node --import tsx --test \"tests/e2e/**/*.test.ts\"",
     "test:packages": "corepack pnpm -r --filter \"./packages/*\" --if-present run test",
-    "test": "corepack pnpm run test:root && corepack pnpm run test:packages",
+    "test": "corepack pnpm run test:root && corepack pnpm run test:packages && corepack pnpm run test:e2e",
     "clean": "corepack pnpm -r run clean",
     "changeset": "changeset",
     "version-packages": "node ./scripts/version-packages.cjs",
     "release": "node ./scripts/run-release.cjs"
   },
   "devDependencies": {
+    "@a2a-js/sdk": "^0.3.10",
     "@changesets/cli": "^2.29.6",
     "@types/node": "^20.0.0",
+    "openclaw": "2026.3.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }
