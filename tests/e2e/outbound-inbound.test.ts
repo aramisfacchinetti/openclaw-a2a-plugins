@@ -281,12 +281,12 @@ describe("persisted continuation", () => {
     await scenario.cleanup();
   });
 
-  it("round-trips persisted summary.continuation through send and status against the real inbound server", async () => {
+  it("recovers persisted summary.continuation through send and status after outbound restart", async () => {
     const firstSend = asSuccess(
       await scenario.service.execute({
         action: "send",
         target_alias: scenario.alias,
-        parts: [{ kind: "text", text: "Please request approval first." }],
+        parts: [{ kind: "text", text: scenario.initialPromptText }],
       }),
     );
     const firstTask = taskContinuationFromSummary(firstSend.summary);
@@ -305,11 +305,13 @@ describe("persisted continuation", () => {
       assert.fail("expected continuation");
     }
 
+    const restartedService = await scenario.createFreshService();
+
     const resumedSend = asSuccess(
-      await scenario.service.execute({
+      await restartedService.execute({
         action: "send",
         continuation: persistedContinuation,
-        parts: [{ kind: "text", text: "Approved. Continue and finish." }],
+        parts: [{ kind: "text", text: scenario.resumedPromptText }],
       }),
     );
     const resumedTask = taskContinuationFromSummary(resumedSend.summary);
@@ -318,7 +320,7 @@ describe("persisted continuation", () => {
     assert.equal(resumedSend.action, "send");
     assert.equal(resumedSend.summary.response_kind, "task");
     assert.equal(resumedTask.task_id, firstTask.task_id);
-    assert.equal(resumedTask.task_handle, firstTask.task_handle);
+    assert.equal(typeof resumedTask.task_handle, "string");
     assert.equal(resumedTask.status, "completed");
     assert.equal(resumedConversation.context_id, firstConversation.context_id);
     assert.match(
@@ -327,9 +329,10 @@ describe("persisted continuation", () => {
     );
 
     const status = asSuccess(
-      await scenario.service.execute({
+      await restartedService.execute({
         action: "status",
         continuation: persistedContinuation,
+        history_length: 10,
       }),
     );
     const statusTask = taskContinuationFromSummary(status.summary);
@@ -339,7 +342,7 @@ describe("persisted continuation", () => {
     assert.equal(status.action, "status");
     assert.equal(status.summary.response_kind, "task");
     assert.equal(statusTask.task_id, firstTask.task_id);
-    assert.equal(statusTask.task_handle, firstTask.task_handle);
+    assert.equal(typeof statusTask.task_handle, "string");
     assert.equal(statusTask.status, "completed");
     assert.equal(statusConversation.context_id, firstConversation.context_id);
     assert.equal(rawTask.kind, "task");
@@ -350,10 +353,13 @@ describe("persisted continuation", () => {
       readMessageText(rawTask.status.message),
       new RegExp(scenario.expectedResumedFinalText),
     );
-    assert.deepEqual(status.summary.continuation?.task, resumedSend.summary.continuation?.task);
+    assert.notEqual(resumedTask.task_handle, firstTask.task_handle);
+    assert.notEqual(statusTask.task_handle, firstTask.task_handle);
     assert.deepEqual(
-      status.summary.continuation?.conversation,
-      resumedSend.summary.continuation?.conversation,
+      (rawTask.history ?? [])
+        .filter((message) => message.role === "user")
+        .map(readMessageText),
+      [scenario.initialPromptText, scenario.resumedPromptText],
     );
   });
 });
