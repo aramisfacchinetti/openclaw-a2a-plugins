@@ -9,9 +9,11 @@ import type {
 import type { TargetCatalogEntry } from "../../packages/openclaw-a2a-outbound/src/target-catalog.js";
 import {
   directReplyScenario,
+  directStreamingScenario,
   persistedContinuationScenario,
   promotedStreamingScenario,
   type DirectReplyScenario,
+  type DirectStreamingScenario,
   type PersistedContinuationScenario,
   type PromotedStreamingScenario,
 } from "./outbound-inbound-harness.js";
@@ -80,6 +82,16 @@ function asStreamRaw(
   return raw as {
     events: Array<Message | Task | TaskArtifactUpdateEvent | TaskStatusUpdateEvent>;
   };
+}
+
+function isTaskBearingEvent(
+  event: Message | Task | TaskArtifactUpdateEvent | TaskStatusUpdateEvent | undefined,
+): event is Task | TaskArtifactUpdateEvent | TaskStatusUpdateEvent {
+  return (
+    event?.kind === "task" ||
+    event?.kind === "artifact-update" ||
+    event?.kind === "status-update"
+  );
 }
 
 describe("direct + card discovery", () => {
@@ -193,6 +205,68 @@ describe("promoted streaming", () => {
       ),
     );
     assert.match(success.summary.message_text ?? "", /Promoted final answer/);
+  });
+});
+
+describe("direct streaming", () => {
+  let scenario: DirectStreamingScenario;
+
+  before(async () => {
+    scenario = await directStreamingScenario();
+  });
+
+  after(async () => {
+    await scenario.cleanup();
+  });
+
+  it("send with follow_updates=true preserves a real inbound message-only SSE stream as a direct message", async () => {
+    const updates: StreamUpdateEnvelope<"send">[] = [];
+    const startingJsonRpcCount = scenario.requestCounts.jsonRpc;
+    const result = await scenario.service.execute(
+      {
+        action: "send",
+        target_alias: scenario.alias,
+        parts: [{ kind: "text", text: "Stream a direct reply only." }],
+        follow_updates: true,
+      },
+      {
+        onUpdate(update) {
+          updates.push(update as StreamUpdateEnvelope<"send">);
+        },
+      },
+    );
+    const success = asSuccess(result);
+    const raw = asStreamRaw(success.raw);
+    const conversation = conversationContinuationFromSummary(success.summary);
+    const onlyRaw = raw.events[0];
+
+    assert.equal(success.action, "send");
+    assert.equal(success.summary.response_kind, "message");
+    assert.equal(success.summary.message_text, scenario.expectedReplyText);
+    assert.equal(success.summary.continuation?.task, undefined);
+    assert.equal(typeof conversation.context_id, "string");
+    assert.ok(conversation.context_id.length > 0);
+    assert.equal(raw.events.length, 1);
+    assert.equal(onlyRaw?.kind, "message");
+    assert.equal(isTaskBearingEvent(onlyRaw), false);
+    if (!onlyRaw || onlyRaw.kind !== "message") {
+      assert.fail("expected a single raw message event");
+    }
+    assert.equal(readMessageText(onlyRaw), scenario.expectedReplyText);
+    assert.ok(updates.length >= 1);
+    for (const update of updates) {
+      assert.equal(update.action, "send");
+      assert.equal(update.phase, "update");
+      assert.equal(update.summary.response_kind, "message");
+      assert.equal(update.summary.continuation?.task, undefined);
+      assert.equal(
+        update.summary.continuation?.conversation?.context_id,
+        conversation.context_id,
+      );
+      assert.equal(update.raw.kind, "message");
+      assert.equal(isTaskBearingEvent(update.raw), false);
+    }
+    assert.ok(scenario.requestCounts.jsonRpc > startingJsonRpcCount);
   });
 });
 

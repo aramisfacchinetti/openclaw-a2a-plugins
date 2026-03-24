@@ -56,6 +56,10 @@ export type DirectReplyScenario = StartedScenario & {
   expectedReplyText: string;
 };
 
+export type DirectStreamingScenario = StartedScenario & {
+  expectedReplyText: string;
+};
+
 export type PromotedStreamingScenario = StartedScenario & {
   expectedToolText: string;
   expectedFinalText: string;
@@ -514,6 +518,39 @@ export async function directReplyScenario(): Promise<DirectReplyScenario> {
       );
       emit({
         runId: "run-direct-e2e",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  return {
+    ...scenario,
+    expectedReplyText,
+  };
+}
+
+export async function directStreamingScenario(): Promise<DirectStreamingScenario> {
+  const expectedReplyText = "Direct streamed e2e reply from the inbound server.";
+  const scenario = await startScenario({
+    accountOverrides: {
+      label: "Direct Streaming Agent",
+      description:
+        "Hybrid direct-stream fixture backed by the real inbound HTTP server.",
+    },
+    script: async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-direct-stream-e2e");
+      emit({
+        runId: "run-direct-stream-e2e",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: expectedReplyText },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-direct-stream-e2e",
         stream: "lifecycle",
         data: { phase: "end" },
       });
