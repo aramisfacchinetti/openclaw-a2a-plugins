@@ -10,8 +10,10 @@ import type { TargetCatalogEntry } from "../../packages/openclaw-a2a-outbound/sr
 import {
   directReplyScenario,
   directStreamingScenario,
+  durableWatchScenario,
   persistedContinuationScenario,
   promotedStreamingScenario,
+  type DurableWatchScenario,
   type DirectReplyScenario,
   type DirectStreamingScenario,
   type PersistedContinuationScenario,
@@ -92,6 +94,32 @@ function isTaskBearingEvent(
     event?.kind === "artifact-update" ||
     event?.kind === "status-update"
   );
+}
+
+function isTerminalTaskState(state: string): boolean {
+  return (
+    state === "completed" ||
+    state === "failed" ||
+    state === "canceled" ||
+    state === "rejected"
+  );
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
 describe("direct + card discovery", () => {
@@ -361,5 +389,139 @@ describe("persisted continuation", () => {
         .map(readMessageText),
       [scenario.initialPromptText, scenario.resumedPromptText],
     );
+  });
+});
+
+describe("durable watch", () => {
+  let scenario: DurableWatchScenario;
+
+  before(async () => {
+    scenario = await durableWatchScenario();
+  });
+
+  after(async () => {
+    await scenario.cleanup();
+  });
+
+  it("watch live-tails an owned durable task, then returns one snapshot after inbound restart orphans it", async () => {
+    const firstSend = asSuccess(
+      await scenario.service.execute({
+        action: "send",
+        target_alias: scenario.alias,
+        parts: [{ kind: "text", text: scenario.initialPromptText }],
+        blocking: false,
+      }),
+    );
+    const initialRawTask = firstSend.raw as Task;
+    const initialTask = taskContinuationFromSummary(firstSend.summary);
+    const initialConversation = conversationContinuationFromSummary(firstSend.summary);
+    const persistedContinuation = structuredClone(firstSend.summary.continuation);
+
+    if (!persistedContinuation) {
+      assert.fail("expected continuation");
+    }
+
+    assert.equal(firstSend.action, "send");
+    assert.equal(firstSend.summary.response_kind, "task");
+    assert.equal(isTerminalTaskState(initialRawTask.status.state), false);
+    assert.equal(initialTask.status, initialRawTask.status.state);
+    assert.equal(typeof initialTask.task_handle, "string");
+    assert.equal(typeof initialConversation.context_id, "string");
+
+    const liveUpdates: StreamUpdateEnvelope<"watch">[] = [];
+    const liveWatchAbortController = new AbortController();
+    const liveWatchPromise = scenario.service.execute(
+      {
+        action: "watch",
+        continuation: persistedContinuation,
+      },
+      {
+        signal: liveWatchAbortController.signal,
+        onUpdate(update) {
+          liveUpdates.push(update as StreamUpdateEnvelope<"watch">);
+        },
+      },
+    );
+    void liveWatchPromise.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    await waitForCondition(() => liveUpdates.length >= 1);
+    assert.equal(liveUpdates[0]?.action, "watch");
+    assert.equal(liveUpdates[0]?.raw.kind, "task");
+    assert.equal(
+      liveUpdates[0]?.summary.continuation?.task?.task_id,
+      initialTask.task_id,
+    );
+    assert.equal(
+      liveUpdates[0]?.summary.continuation?.conversation?.context_id,
+      initialConversation.context_id,
+    );
+
+    scenario.releaseLiveUpdate();
+    await waitForCondition(() =>
+      liveUpdates.some(
+        (update) =>
+          update.raw.kind === "artifact-update" &&
+          update.raw.artifact.parts.some(
+            (part) => part.kind === "text" && part.text.includes(scenario.expectedToolText),
+          ),
+      ),
+    );
+
+    const liveArtifactUpdate = liveUpdates.find(
+      (update) =>
+        update.raw.kind === "artifact-update" &&
+        update.raw.artifact.parts.some(
+          (part) => part.kind === "text" && part.text.includes(scenario.expectedToolText),
+        ),
+    );
+
+    assert.equal(liveArtifactUpdate?.summary.continuation?.task?.task_id, initialTask.task_id);
+    assert.equal(
+      liveArtifactUpdate?.summary.continuation?.conversation?.context_id,
+      initialConversation.context_id,
+    );
+    assert.ok(
+      liveUpdates.some(
+        (update) =>
+          update.raw.kind === "artifact-update" &&
+          update.raw.artifact.parts.some(
+            (part) => part.kind === "text" && part.text.includes(scenario.expectedToolText),
+          ),
+      ),
+    );
+    const latestObservedTaskStatus =
+      liveUpdates.at(-1)?.summary.continuation?.task?.status ?? initialRawTask.status.state;
+
+    liveWatchAbortController.abort();
+    await scenario.restartInbound();
+
+    const restartedService = await scenario.createFreshService();
+    const orphanedWatch = asSuccess(
+      await restartedService.execute({
+        action: "watch",
+        continuation: persistedContinuation,
+      }),
+    );
+    const orphanedRaw = asStreamRaw(orphanedWatch.raw);
+    const orphanedTask = taskContinuationFromSummary(orphanedWatch.summary);
+    const orphanedConversation = conversationContinuationFromSummary(
+      orphanedWatch.summary,
+    );
+
+    assert.equal(orphanedWatch.action, "watch");
+    assert.equal(orphanedWatch.summary.response_kind, "task");
+    assert.equal(orphanedRaw.events.length, 1);
+    assert.equal(orphanedRaw.events[0]?.kind, "task");
+    if (!orphanedRaw.events[0] || orphanedRaw.events[0].kind !== "task") {
+      assert.fail("expected single orphaned snapshot");
+    }
+
+    assert.equal(orphanedRaw.events[0].id, initialTask.task_id);
+    assert.equal(orphanedRaw.events[0].status.state, latestObservedTaskStatus);
+    assert.equal(orphanedTask.task_id, initialTask.task_id);
+    assert.equal(orphanedConversation.context_id, initialConversation.context_id);
   });
 });

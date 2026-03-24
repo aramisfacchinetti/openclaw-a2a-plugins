@@ -74,6 +74,14 @@ export type PersistedContinuationScenario = StartedScenario & {
   createFreshService: () => Promise<A2AOutboundService>;
 };
 
+export type DurableWatchScenario = StartedScenario & {
+  expectedToolText: string;
+  initialPromptText: string;
+  releaseLiveUpdate: () => void;
+  restartInbound: () => Promise<void>;
+  createFreshService: () => Promise<A2AOutboundService>;
+};
+
 const REPO_ROOT = resolve(process.cwd());
 const INBOUND_DIST_PATH = join(
   REPO_ROOT,
@@ -90,6 +98,27 @@ let outboundServiceModulePromise: Promise<OutboundServiceModule> | undefined;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+function createDeferred() {
+  let settled = false;
+  let resolvePromise!: () => void;
+
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve();
+    };
+  });
+
+  return {
+    promise,
+    resolve: resolvePromise,
+  };
 }
 
 async function listen(server: Server): Promise<string> {
@@ -701,6 +730,123 @@ export async function persistedContinuationScenario(): Promise<PersistedContinua
     initialPromptText,
     resumedPromptText,
     createFreshService: async () => createOutboundService(scenarioConfig),
+  };
+}
+
+export async function durableWatchScenario(): Promise<DurableWatchScenario> {
+  const initialToolText = "Initial durable watch artifact.";
+  const expectedToolText = "Durable watch update from the inbound server.";
+  const initialPromptText = "Start the durable watch workflow.";
+  const tempDir = await mkdtemp(join(tmpdir(), "openclaw-a2a-e2e-watch-"));
+  const requestCounts: E2EScenarioRequestCounts = {
+    agentCard: 0,
+    jsonRpc: 0,
+  };
+  const releaseLiveUpdateGate = createDeferred();
+  let inboundServer: A2AInboundServer | undefined;
+
+  const routeServer = createServer((req, res) => {
+    if (req.url?.startsWith("/.well-known/agent-card.json")) {
+      requestCounts.agentCard += 1;
+    }
+
+    if (req.url?.startsWith("/a2a/jsonrpc")) {
+      requestCounts.jsonRpc += 1;
+    }
+
+    if (!inboundServer) {
+      res.statusCode = 503;
+      res.end("inbound server not ready");
+      return;
+    }
+
+    void inboundServer.handle(req, res).catch((error: unknown) => {
+      if (res.writableEnded) {
+        return;
+      }
+
+      res.statusCode = 500;
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  const baseUrl = await listen(routeServer);
+  const account = createAccount(baseUrl, tempDir, {
+    label: "Durable Watch Agent",
+    description:
+      "Restartable durable-task fixture that exercises live and orphaned watch semantics.",
+  });
+  const scenarioConfig = createOutboundConfig(account, baseUrl);
+  const inboundModule = await loadInboundServerModule();
+
+  const startInbound = async (
+    script: RuntimeScript,
+  ): Promise<{
+    server: A2AInboundServer;
+  }> => {
+    const runtimeHarness = createMinimalPluginRuntime(script, tempDir);
+    const server = inboundModule.createA2AInboundServer({
+      accountId: account.accountId,
+      account,
+      cfg: {},
+      channelRuntime: runtimeHarness.pluginRuntime.channel,
+      pluginRuntime: runtimeHarness.pluginRuntime,
+    });
+
+    return {
+      server,
+    };
+  };
+
+  const initialInbound = await startInbound(async ({ params, emit, waitForAbort }) => {
+    params.replyOptions?.onAgentRunStart?.("run-durable-watch-e2e");
+    emit({
+      runId: "run-durable-watch-e2e",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: initialToolText },
+      { kind: "tool" },
+    );
+    await releaseLiveUpdateGate.promise;
+    await params.dispatcherOptions.deliver(
+      { text: expectedToolText },
+      { kind: "tool" },
+    );
+    await waitForAbort();
+  });
+
+  inboundServer = initialInbound.server;
+  const service = await createOutboundService(scenarioConfig);
+
+  const closeCurrentInbound = async () => {
+    inboundServer?.close();
+    inboundServer = undefined;
+  };
+
+  return {
+    service,
+    alias: TARGET_ALIAS,
+    account,
+    baseUrl,
+    requestCounts,
+    expectedToolText,
+    initialPromptText,
+    releaseLiveUpdate: () => {
+      releaseLiveUpdateGate.resolve();
+    },
+    restartInbound: async () => {
+      await closeCurrentInbound();
+      const restartedInbound = await startInbound(async () => {});
+      inboundServer = restartedInbound.server;
+    },
+    createFreshService: async () => createOutboundService(scenarioConfig),
+    cleanup: async () => {
+      await closeCurrentInbound();
+      await closeHttpServer(routeServer);
+      await rm(tempDir, { recursive: true, force: true });
+    },
   };
 }
 
