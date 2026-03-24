@@ -71,6 +71,7 @@ export interface TargetListSummary {
   examples: string[];
   target_name?: string;
   description?: string;
+  streaming_supported?: boolean;
   peer_card: TargetListPeerCardSummary;
   last_refreshed_at?: string;
   last_refresh_error?: ToolError;
@@ -700,6 +701,9 @@ function listTargetSummary(entry: TargetCatalogEntry): TargetListSummary {
       : {}),
     ...(entry.target.description !== undefined
       ? { description: entry.target.description }
+      : {}),
+    ...(entry.target.streamingSupported !== undefined
+      ? { streaming_supported: entry.target.streamingSupported }
       : {}),
     peer_card: peerCard,
     ...(entry.card.lastRefreshedAt !== undefined
