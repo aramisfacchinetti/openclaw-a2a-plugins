@@ -8,6 +8,7 @@ import type { Message } from "@a2a-js/sdk";
 import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "../../packages/openclaw-a2a-inbound/src/config.js";
 import type { A2AInboundServer } from "../../packages/openclaw-a2a-inbound/src/a2a-server.js";
+import type { A2AOutboundPluginConfig } from "../../packages/openclaw-a2a-outbound/src/config.js";
 import type { A2AOutboundService } from "../../packages/openclaw-a2a-outbound/src/service.js";
 
 type InboundServerModule = typeof import("../../packages/openclaw-a2a-inbound/src/a2a-server.js");
@@ -68,6 +69,9 @@ export type PromotedStreamingScenario = StartedScenario & {
 export type PersistedContinuationScenario = StartedScenario & {
   expectedPausePromptText: string;
   expectedResumedFinalText: string;
+  initialPromptText: string;
+  resumedPromptText: string;
+  createFreshService: () => Promise<A2AOutboundService>;
 };
 
 const REPO_ROOT = resolve(process.cwd());
@@ -392,6 +396,58 @@ function createAccount(
   };
 }
 
+function createOutboundConfig(
+  account: A2AInboundAccountConfig,
+  baseUrl: string,
+): A2AOutboundPluginConfig {
+  return {
+    enabled: true,
+    defaults: {
+      timeoutMs: 5_000,
+      cardPath: account.agentCardPath,
+      preferredTransports: ["JSONRPC", "HTTP+JSON"],
+      serviceParameters: {},
+    },
+    targets: [
+      {
+        alias: TARGET_ALIAS,
+        baseUrl,
+        description: account.description,
+        tags: ["e2e"],
+        cardPath: account.agentCardPath,
+        preferredTransports: ["JSONRPC", "HTTP+JSON"],
+        examples: ["Use the local e2e peer."],
+        default: true,
+      },
+    ],
+    taskHandles: {
+      ttlMs: 60_000,
+      maxEntries: 100,
+    },
+    policy: {
+      acceptedOutputModes: ["text/plain", "application/json"],
+      normalizeBaseUrl: true,
+      enforceSupportedTransports: true,
+      allowTargetUrlOverride: false,
+    },
+  };
+}
+
+async function createOutboundService(
+  config: A2AOutboundPluginConfig,
+): Promise<A2AOutboundService> {
+  const outboundModule = await loadOutboundServiceModule();
+
+  return new outboundModule.A2AOutboundService({
+    config,
+    logger: {
+      info() {},
+      warn() {},
+      error() {},
+    },
+  });
+}
+
 async function startScenario(params: {
   accountOverrides?: Partial<A2AInboundAccountConfig>;
   script: RuntimeScript;
@@ -434,7 +490,6 @@ async function startScenario(params: {
     tempDir,
   );
   const inboundModule = await loadInboundServerModule();
-  const outboundModule = await loadOutboundServiceModule();
 
   inboundServer = inboundModule.createA2AInboundServer({
     accountId: account.accountId,
@@ -443,45 +498,8 @@ async function startScenario(params: {
     channelRuntime: pluginRuntime.channel,
     pluginRuntime,
   });
-
-  const service = new outboundModule.A2AOutboundService({
-    config: {
-      enabled: true,
-      defaults: {
-        timeoutMs: 5_000,
-        cardPath: account.agentCardPath,
-        preferredTransports: ["JSONRPC", "HTTP+JSON"],
-        serviceParameters: {},
-      },
-      targets: [
-        {
-          alias: TARGET_ALIAS,
-          baseUrl,
-          description: account.description,
-          tags: ["e2e"],
-          cardPath: account.agentCardPath,
-          preferredTransports: ["JSONRPC", "HTTP+JSON"],
-          examples: ["Use the local e2e peer."],
-          default: true,
-        },
-      ],
-      taskHandles: {
-        ttlMs: 60_000,
-        maxEntries: 100,
-      },
-      policy: {
-        acceptedOutputModes: ["text/plain", "application/json"],
-        normalizeBaseUrl: true,
-        enforceSupportedTransports: true,
-        allowTargetUrlOverride: false,
-      },
-    },
-    logger: {
-      info() {},
-      warn() {},
-      error() {},
-    },
-  });
+  const config = createOutboundConfig(account, baseUrl);
+  const service = await createOutboundService(config);
 
   return {
     service,
@@ -606,7 +624,7 @@ export async function promotedStreamingScenario(): Promise<PromotedStreamingScen
 export async function persistedContinuationScenario(): Promise<PersistedContinuationScenario> {
   const expectedPausePromptText = "Approve the delegated action?";
   const expectedResumedFinalText = "Approved and completed through resumed send.";
-  const firstPromptText = "Please request approval first.";
+  const initialPromptText = "Please request approval first.";
   const resumedPromptText = "Approved. Continue and finish.";
   let approvalIssued = false;
 
@@ -642,7 +660,7 @@ export async function persistedContinuationScenario(): Promise<PersistedContinua
         return;
       }
 
-      if (!approvalIssued && bodyForAgent === firstPromptText) {
+      if (!approvalIssued && bodyForAgent === initialPromptText) {
         approvalIssued = true;
         emit({
           runId,
@@ -674,11 +692,15 @@ export async function persistedContinuationScenario(): Promise<PersistedContinua
       );
     },
   });
+  const scenarioConfig = createOutboundConfig(scenario.account, scenario.baseUrl);
 
   return {
     ...scenario,
     expectedPausePromptText,
     expectedResumedFinalText,
+    initialPromptText,
+    resumedPromptText,
+    createFreshService: async () => createOutboundService(scenarioConfig),
   };
 }
 
