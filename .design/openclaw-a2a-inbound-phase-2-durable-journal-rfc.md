@@ -6,7 +6,7 @@ Date: 2026-03-11
 
 ## Summary
 
-Phase 2 extends the phase 1 single-runtime model by persisting a durable committed journal beside the latest committed task snapshot inside the same per-task record.
+The runtime persists a durable committed journal beside the latest committed task snapshot inside the same per-task record.
 
 The public A2A surface stays unchanged:
 
@@ -14,13 +14,13 @@ The public A2A surface stays unchanged:
 - `taskStore` config stays `{ kind: "memory" } | { kind: "json-file"; path: string }`
 - `tasks/resubscribe` stays `latest snapshot + optional live committed tail`
 
-This phase does not expose stored backlog replay yet.
+The runtime does not expose stored backlog replay.
 
 ## Decision
 
-The runtime should preserve enough committed history for a future replay phase without shipping a non-monotonic public contract now.
+The runtime should preserve enough committed history without shipping a non-monotonic public contract.
 
-The committed journal is therefore internal-only in phase 2. Persisted `sequence` values are storage-only and must not appear in:
+The committed journal is therefore internal-only. Persisted `sequence` values are storage-only and must not appear in:
 
 - A2A payload metadata
 - A2A request params
@@ -98,11 +98,11 @@ This keeps snapshot loading and live-tail attachment from racing with committed 
 - attach a live committed tail only when the task is still active and owned by a live execution in the current process
 - close after the snapshot for terminal tasks, quiescent tasks, and restart-orphaned active tasks
 
-This phase does not emit stored journal backlog from `tasks/resubscribe`.
+The runtime does not emit stored journal backlog from `tasks/resubscribe`.
 
-## Deferred Replay
+## Replay Constraint
 
-Full no-cursor replay remains deferred because the current metadata-free public contract cannot distinguish replayed events from live events.
+Full no-cursor replay is not part of the current contract because the metadata-free public surface cannot distinguish replayed events from live events.
 
 Emitting:
 
@@ -112,4 +112,4 @@ Emitting:
 
 would not be a monotonic state stream once the latest snapshot already folds earlier committed status and artifact updates.
 
-Any future replay phase must introduce a monotonic public replay contract before exposing stored backlog.
+Any replay design must introduce a monotonic public replay contract before exposing stored backlog.

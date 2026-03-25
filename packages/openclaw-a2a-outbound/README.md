@@ -48,7 +48,7 @@ The ClawHub skill is an optional guided setup helper for installing, enabling, c
       "baseUrl": "https://support.example",
       "description": "Primary support lane",
       "tags": ["support"],
-      "examples": ["Summarize this incident and propose next steps."],
+      "examples": ["Summarize this incident and propose immediate actions."],
       "default": true
     }
   ],
@@ -102,6 +102,18 @@ Snake_case tool fields are translated internally to the A2A SDK camelCase reques
 
 Failed `send` and `sendStream` calls include `error.details.capability_diagnostics` so remote validation or content-type rejections can be compared against the stored peer card without blocking permissive runtime sends.
 
+## Continuation Rules
+
+This package returns continuation metadata under `summary.continuation`. Persist that subtree verbatim and use it to choose the next action.
+
+- `summary.continuation.target`: the canonical persisted routing contract for machine follow-up. Persist `target_url`, `card_path`, and `preferred_transports` verbatim; `target_alias` is optional descriptive metadata.
+- `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, `can_resume_send`, `can_watch`, and the deprecated alias `can_send` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
+- `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`.
+- `response_kind`: descriptive wire-shape classification only. `response_kind="message"` means the peer returned a `Message`; `response_kind="task"` means a task-bearing response or event appeared. `response_kind` does not replace `summary.continuation`.
+- `summary.target_*` and other top-level compatibility aliases are descriptive only. Do not infer lifecycle continuity from flat `task_id`, flat `context_id`, or other top-level fields.
+- `watch`, `status`, and `cancel` require `summary.continuation.task`.
+- Conversation-only follow-up uses `context_id`, not task actions.
+
 Supported `send` modes:
 
 - new task: `send` with `target_alias`/`target_url` or a configured default target, and no continuation fields
@@ -109,24 +121,9 @@ Supported `send` modes:
 - related new task: `send` with `reference_task_ids`, optionally plus `context_id`, plus `target_alias`/`target_url` or a configured default target
 - new task in an existing conversation: `send` with a persisted conversation-only `continuation`; flat `context_id` plus `target_alias`/`target_url` remains manual compatibility only
 
-When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. Persist `summary.continuation` verbatim and pass that subtree back directly. If the nested `task_handle` is expired or unavailable, the plugin automatically falls back within that nested contract to `continuation.target` + `continuation.task.task_id`; callers should not flatten persisted follow-up state back into `target_alias`/`task_id`.
+When a delegated task pauses in `input-required` or an approval workflow, resume it with `send` again. If the nested `task_handle` is expired or unavailable, the plugin automatically falls back within that nested contract to `continuation.target` + `continuation.task.task_id`; callers should not flatten persisted follow-up state back into `target_alias`/`task_id`.
 
-## Reading Output Continuations
-
-This package returns continuation metadata under `summary.continuation`.
-
-- `summary.continuation.target`: the canonical persisted routing contract for machine follow-up. Persist `target_url`, `card_path`, and `preferred_transports` verbatim; `target_alias` is optional descriptive metadata.
-- `summary.continuation.task`: the only machine-readable signal that a real remote task exists. Read `task_handle`, `task_id`, `status`, `can_resume_send`, `can_watch`, and the deprecated alias `can_send` from here, and use it for follow-up `send`, `watch`, `status`, and `cancel`.
-- `summary.continuation.conversation`: send-only conversation continuity. Read `context_id` from here and use it only for follow-up `send`. Do not use it to infer task continuity.
-- `response_kind`: descriptive wire-shape classification only. `response_kind="message"` means the peer returned a `Message`; `response_kind="task"` means a task-bearing response or event appeared. `response_kind` does not replace `summary.continuation`.
-- Do not poll from conversation continuity.
-- `watch`, `status`, and `cancel` require `summary.continuation.task`.
-- Message-only follow-up uses `context_id`, not task actions.
-- `task_handle` is returned only when the peer actually created a task.
-- `summary.target_*` is descriptive only for humans and logs; it is no longer part of the machine follow-up recipe.
-- Top-level compatibility aliases are descriptive only. Read task and conversation continuity from `summary.continuation`, and do not infer lifecycle continuity from flat `task_id`, flat `context_id`, or other top-level fields.
-
-Branch on `summary.continuation.task` vs `summary.continuation.conversation` before choosing the next action:
+Choose the next action based on the continuation shape:
 
 ```ts
 const continuation = result.summary.continuation
@@ -143,8 +140,6 @@ if (task) {
   }
 }
 ```
-
-Persist `summary.continuation` verbatim and branch on `summary.continuation.task` versus `summary.continuation.conversation`. `summary.continuation.task` is the only machine-readable authority for lifecycle follow-up. Conversation-only continuation remains send-only, and `watch`, `status`, and `cancel` require `summary.continuation.task`.
 
 ## Examples
 
@@ -166,7 +161,7 @@ Persist `summary.continuation` verbatim and branch on `summary.continuation.task
         "target_url": "https://support.example/",
         "default": true,
         "tags": ["support"],
-        "examples": ["Summarize this incident and propose next steps."],
+        "examples": ["Summarize this incident and propose immediate actions."],
         "target_name": "Support Agent",
         "description": "Primary support lane",
         "streaming_supported": true,
@@ -195,7 +190,7 @@ Persist `summary.continuation` verbatim and branch on `summary.continuation.task
               "name": "Incident Triage",
               "description": "Summarize incidents and propose next actions.",
               "tags": ["support"],
-              "examples": ["Summarize this incident and propose next steps."],
+              "examples": ["Summarize this incident and propose immediate actions."],
               "input_modes": ["application/json"],
               "output_modes": ["application/pdf"]
             }
@@ -218,7 +213,7 @@ Persist `summary.continuation` verbatim and branch on `summary.continuation.task
       "configuredDescription": "Primary support lane",
       "default": true,
       "tags": ["support"],
-      "examples": ["Summarize this incident and propose next steps."],
+      "examples": ["Summarize this incident and propose immediate actions."],
       "card": {
         "displayName": "Support Agent",
         "description": "Summarize incidents and propose next actions.",
@@ -246,7 +241,7 @@ Persist `summary.continuation` verbatim and branch on `summary.continuation.task
             "name": "Incident Triage",
             "description": "Summarize incidents and propose next actions.",
             "tags": ["support"],
-            "examples": ["Summarize this incident and propose next steps."],
+            "examples": ["Summarize this incident and propose immediate actions."],
             "inputModes": ["application/json"],
             "outputModes": ["application/pdf"]
           }
@@ -425,7 +420,7 @@ const followUpContext = conversation?.context_id
 
 ### Continue An Existing Remote Task With `task_handle`
 
-Prefer passing the persisted continuation subtree back directly when a delegated task reaches `input-required` or asks for approval:
+Resend the persisted continuation subtree:
 
 ```json
 {
@@ -457,7 +452,7 @@ Prefer passing the persisted continuation subtree back directly when a delegated
 
 ### Continue An Existing Remote Task With `task_id`
 
-If `summary.continuation.task.task_handle` is unavailable, omit it and keep using the persisted nested target contract:
+Use the persisted continuation without `task_handle`:
 
 ```json
 {
@@ -488,7 +483,7 @@ If `summary.continuation.task.task_handle` is unavailable, omit it and keep usin
 
 ### Start A New Task In An Existing Conversation
 
-Use `summary.continuation.conversation.context_id` when the prior result has conversation continuity without task continuity:
+Use `summary.continuation.conversation.context_id` when only conversation continuity exists:
 
 ```json
 {
@@ -560,7 +555,7 @@ if (conversation) {
 }
 ```
 
-Do not poll from conversation continuity. `watch`, `status`, and `cancel` require `summary.continuation.task`.
+Conversation continuity is send-only. `watch`, `status`, and `cancel` require `summary.continuation.task`.
 
 ### Check Task Status With `task_handle`
 
@@ -646,7 +641,7 @@ const nextSend = conversation
   : undefined
 ```
 
-When `summary.continuation.task.task_handle` is expired or unavailable, retry with the same persisted `continuation`; the plugin automatically falls back to `continuation.target` + `summary.continuation.task.task_id`:
+If `summary.continuation.task.task_handle` is expired or unavailable, retry with the same persisted `continuation`:
 
 ```json
 {
@@ -666,7 +661,7 @@ When `summary.continuation.task.task_handle` is expired or unavailable, retry wi
 }
 ```
 
-`watch` and `cancel` use the same follow-up targeting rules, and both require `summary.continuation.task` from a prior result. Conversation continuity by itself is never enough for lifecycle actions:
+`watch` and `cancel` require `summary.continuation.task` from a prior result:
 
 ```json
 { "action": "watch", "continuation": { "target": { "target_url": "https://support.example/", "card_path": "/.well-known/agent-card.json", "preferred_transports": ["JSONRPC", "HTTP+JSON"], "target_alias": "support" }, "task": { "task_handle": "rah_0a3ff8c2-4a6d-48cb-a57d-4ae6f3c589d0", "task_id": "task-456" } } }

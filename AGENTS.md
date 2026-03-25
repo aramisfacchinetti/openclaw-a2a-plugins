@@ -1,0 +1,23 @@
+# AGENTS.md
+
+- This project is greenfield with no external users. Backward compatibility is not required. Breaking changes to APIs, schemas, interfaces, and assumptions are acceptable while we iterate on structure.
+- Do not assume non trivial or non obvious things. Ask the developer/user/human working with you for which assumptions hold. If anything is ambiguous or you have questions, ask.
+- Code and official documentation are the primary sources of truth.
+- If you make a mistake, detect an ambiguous instruction, or find a recurring failure mode, update `AGENTS.md` (or `CLAUDE.md`) in the same change so future agents do not repeat it. Add only concrete, repository-specific guidance that cannot be deduced in this repository. Keep it concise and direct.
+- Repository-internal design and RFC documents live under root `.design/`.
+- Git commit messages must be one-line, one-sentence statements of the code change. They must not contain footers, co-author mentions, or additional description lines.
+- For OpenClaw plugin packages in this repo, keep the unscoped npm package name identical to `openclaw.plugin.json.id` to avoid plugin discovery id-mismatch warnings.
+- For OpenClaw plugin packages in this repo, keep `openclaw.plugin.json.version` synced with the package version before publishing.
+- In `packages/openclaw-a2a-inbound`, keep the plugin/package/manifest id as `openclaw-a2a-inbound`, but keep the OpenClaw channel id separate as `a2a`.
+- Keep both `@aramisfa/openclaw-a2a-inbound` and `@aramisfa/openclaw-a2a-outbound` public and release-managed through Changesets plus `.github/workflows/release.yml`.
+- Real npm publishes and GitHub Releases in this repo must come from `.github/workflows/release.yml`; local `pnpm release` and direct `npm publish` are for `--dry-run` verification only.
+- Release PR maintenance runs from pushes to `master` in `.github/workflows/release.yml`, but real npm publishes and GitHub Releases must come only from merged `changeset-release/master` PRs via `.github/workflows/publish.yml`; local `pnpm release` and direct `npm publish` are for `--dry-run` verification only.
+- Standalone skills for this repo live under root `skills/` and are published manually, separately from npm package releases and Changesets.
+- In `packages/openclaw-a2a-outbound`, downstream callers must use `summary.continuation.task` for trackable tasks and must never treat `summary.continuation.conversation` as task continuity; conversation continuity authorizes only `send` with `context_id`.
+- In `packages/openclaw-a2a-outbound`, callers that persist delegated follow-up state must atomically replace it from one result envelope and persist the full `summary.continuation` subtree verbatim; never rely on prompt text, top-level compatibility aliases alone, or default-target fallback for persisted follow-ups.
+- In `packages/openclaw-a2a-outbound`, if a request explicitly continues a task via `task_handle`, `task_id`, or `summary.continuation.task`, preserve that task continuity in the returned `summary.continuation.task` even when a message reply omits `taskId`; only truly context-only continuations should return conversation-only follow-up state.
+- In `packages/openclaw-a2a-inbound`, treat A2A `taskId`/`contextId`, OpenClaw `SessionKey`, and OpenClaw `runId` as independent identifiers; never derive `runId` from session ids or rely on current OpenClaw fallback behavior.
+- In `packages/openclaw-a2a-inbound`, decide `tasks/resubscribe` live-tail eligibility before the first `yield`; checking `liveExecutions.has(taskId)` after yielding the snapshot can close a subscription that already buffered final committed events.
+- In `tests/e2e/outbound-inbound-harness.ts`, the durable-watch `restartInbound()` path must model a hard process restart: close the HTTP server and replace the inbound runtime without waiting for the old script promises to settle.
+- Do not commit manual package/changelog version bumps while leaving the matching `.changeset/*.md` file pending; consume version intent through Changesets exactly once or the release PR will duplicate unpublished versions and stale notes.
+- Every change must represent the "Gold Standard" for this codebase, strictly adhering to SOLID, DRY, and KISS principles. If a request is suboptimal, introduces technical debt, or requires a tactical workaround, you must stop and seek clarification. Do not implement "stopgap" or "band-aid" fixes even if explicitly instructed. Prioritize the long-term maintainability of the system over immediate task completion.

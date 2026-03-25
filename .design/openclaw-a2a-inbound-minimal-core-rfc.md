@@ -1,4 +1,4 @@
-# RFC: Restore `openclaw-a2a-inbound` To A Phase 1 Committed Runtime
+# RFC: Restore `openclaw-a2a-inbound` To A Committed Runtime
 
 Status: Complete
 
@@ -8,7 +8,7 @@ Last Updated: 2026-03-11
 
 ## Summary
 
-This RFC now describes the restored phase 1 shape for `openclaw-a2a-inbound`.
+This RFC describes the committed shape for `openclaw-a2a-inbound`.
 
 The package restores:
 
@@ -28,7 +28,7 @@ The implementation uses the official A2A SDK for transport, SSE framing, queues,
 
 ## Decision
 
-The package should stabilize on a phase 1 contract with:
+The package should stabilize on a committed contract with:
 
 - JSON-RPC plus agent-card transport only
 - one committed task runtime
@@ -203,7 +203,7 @@ Durable storage is split behind two backends only:
 - memory backend
 - json-file backend
 
-Each task persists one phase 1 record containing:
+Each task persists one record containing:
 
 - the latest committed task snapshot
 - the stored binding
@@ -226,7 +226,7 @@ Snapshot loading and live-tail subscription are separate operations.
   - the task is still active
   - `liveExecutions.has(taskId)` is true in the current process
 - terminal, quiescent, and restart-orphaned active tasks emit the snapshot and close
-- live tails stream only future committed `status-update` and `artifact-update` events
+- live tails stream committed `status-update` and `artifact-update` events that arrive after subscription
 
 `tasks/cancel` semantics:
 
@@ -235,9 +235,9 @@ Snapshot loading and live-tail subscription are separate operations.
 - active tasks only cancel live in-process executions
 - restart-orphaned active tasks return the existing unsupported-operation error instead of pretending a live tail exists
 
-## Deferred To Phase 2
+## Not Implemented
 
-Phase 1 still does not implement:
+The runtime does not implement:
 
 - durable committed-journal replay
 - backlog replay
@@ -248,7 +248,7 @@ Phase 1 still does not implement:
 
 ## Acceptance Criteria
 
-The current codebase satisfies the intended phase 1 criteria:
+The current codebase satisfies the committed criteria:
 
 - `message/stream` and `tasks/resubscribe` are restored through the SDK JSON-RPC/SSE transport
 - push notifications remain disabled and rejected
