@@ -4,7 +4,7 @@ Native OpenClaw inbound A2A channel plugin.
 
 This package serves an A2A agent card plus a JSON-RPC endpoint and routes inbound A2A requests into OpenClaw through one committed task runtime. The runtime is the single source of truth for `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and `tasks/resubscribe`.
 
-Phase 2 keeps the public A2A contract unchanged while persisting an internal durable committed journal beside the latest committed task snapshot.
+The runtime keeps the public A2A contract unchanged while persisting an internal durable committed journal beside the latest committed task snapshot.
 
 ## Installation
 
@@ -93,18 +93,18 @@ If `taskStore` is omitted, it defaults to:
 
 `json-file.path` must be a non-empty absolute path.
 
-Phase 2 persistence stores one durable schema v2 record per task containing:
+The durable json-file store keeps one schema v2 record per task containing:
 
 - the latest committed task snapshot
 - the stored OpenClaw binding
 - `currentSequence`
 - the ordered committed journal of `status-update` and `artifact-update` events
 
-The initial `Task` snapshot is not journaled. The durable journal is internal-only in this phase and is used only to preserve committed history for future replay work.
+The initial `Task` snapshot is not journaled. The durable journal is internal-only and is used only to preserve committed history.
 
 Existing schema v1 snapshot-only json-file records load through a lazy one-way upgrade in memory and persist as schema v2 on the next write.
 
-Phase 2 still does not expose:
+The runtime does not expose:
 
 - public committed journal replay
 - public backlog replay
@@ -172,7 +172,7 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 - `tasks/resubscribe`
   - emits the latest committed task snapshot first
   - attaches a live tail only when the task is still active and the execution is live in the current process
-  - does not replay stored journal backlog in this phase
+  - does not replay stored journal backlog
   - terminal, quiescent, and restart-orphaned active tasks emit the snapshot and close
 
 `tasks/cancel` keeps the same committed semantics:
