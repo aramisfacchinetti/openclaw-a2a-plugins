@@ -13,6 +13,12 @@
   Document the networking prerequisites around `publicBaseUrl` and externally reachable gateway
   binding so inbound deployments fail less opaquely.
 
+## 1.0.1
+
+### Patch Changes
+
+- 7d9e318: Follow-up release to align with the official publish workflow.
+
 ## 1.0.0
 
 ### Major Changes
