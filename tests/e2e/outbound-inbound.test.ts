@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import type { Message, Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from "@a2a-js/sdk";
 import type {
   A2AToolResult,
+  FailureEnvelope,
   StreamUpdateEnvelope,
   SuccessEnvelope,
 } from "../../packages/openclaw-a2a-outbound/src/result-shape.js";
@@ -13,16 +14,26 @@ import {
   durableWatchScenario,
   persistedContinuationScenario,
   promotedStreamingScenario,
+  taskRequirementFailureScenario,
   type DurableWatchScenario,
   type DirectReplyScenario,
   type DirectStreamingScenario,
   type PersistedContinuationScenario,
   type PromotedStreamingScenario,
+  type TaskRequirementFailureScenario,
 } from "./outbound-inbound-harness.js";
 
 function asSuccess(result: A2AToolResult): SuccessEnvelope {
   if (result.ok !== true) {
     throw new TypeError("expected success result");
+  }
+
+  return result;
+}
+
+function asFailure(result: A2AToolResult): FailureEnvelope {
+  if (result.ok !== false) {
+    throw new TypeError("expected failure result");
   }
 
   return result;
@@ -120,6 +131,33 @@ async function waitForCondition(
   }
 
   throw new Error(`condition not met within ${timeoutMs}ms`);
+}
+
+async function waitForCompletedTask(
+  scenario: { service: DirectReplyScenario["service"] },
+  continuation: NonNullable<SuccessEnvelope["summary"]["continuation"]>,
+  timeoutMs = 2_000,
+): Promise<SuccessEnvelope<"status">> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = asSuccess(
+      await scenario.service.execute({
+        action: "status",
+        continuation,
+        history_length: 10,
+      }),
+    );
+    const task = taskContinuationFromSummary(result.summary);
+
+    if (task.status === "completed") {
+      return result as SuccessEnvelope<"status">;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`task did not complete within ${timeoutMs}ms`);
 }
 
 describe("direct + card discovery", () => {
@@ -233,6 +271,82 @@ describe("promoted streaming", () => {
       ),
     );
     assert.match(success.summary.message_text ?? "", /Promoted final answer/);
+  });
+});
+
+describe("strict task requirement", () => {
+  let successScenario: DirectReplyScenario;
+  let failureScenario: TaskRequirementFailureScenario;
+
+  before(async () => {
+    successScenario = await directReplyScenario();
+    failureScenario = await taskRequirementFailureScenario();
+  });
+
+  after(async () => {
+    await Promise.all([successScenario.cleanup(), failureScenario.cleanup()]);
+  });
+
+  it("send with task_requirement=required forces a real inbound direct reply onto the durable task path", async () => {
+    const result = await successScenario.service.execute({
+      action: "send",
+      target_alias: successScenario.alias,
+      task_requirement: "required",
+      blocking: true,
+      parts: [{ kind: "text", text: "Require a durable task for this direct reply." }],
+    });
+    const success = asSuccess(result);
+    const rawTask = success.raw as Task;
+    const task = taskContinuationFromSummary(success.summary);
+    const conversation = conversationContinuationFromSummary(success.summary);
+    const continuation = structuredClone(success.summary.continuation);
+
+    if (!continuation) {
+      assert.fail("expected continuation");
+    }
+
+    const completedStatus = await waitForCompletedTask(
+      successScenario,
+      continuation,
+    );
+    const completedRawTask = completedStatus.raw as Task;
+
+    assert.equal(success.action, "send");
+    assert.equal(success.summary.response_kind, "task");
+    assert.equal(rawTask.kind, "task");
+    assert.equal(task.task_id, rawTask.id);
+    assert.equal(task.status, rawTask.status.state);
+    assert.equal(task.can_resume_send, true);
+    assert.match(String(task.task_handle), /^rah_/);
+    assert.equal(conversation.context_id, rawTask.contextId);
+    assert.equal(completedStatus.action, "status");
+    assert.equal(completedRawTask.kind, "task");
+    assert.equal(completedRawTask.id, task.task_id);
+    assert.equal(completedRawTask.status.state, "completed");
+    assert.match(
+      completedStatus.summary.message_text ?? "",
+      new RegExp(successScenario.expectedReplyText),
+    );
+  });
+
+  it("send with task_requirement=required fails when a real inbound direct reply is forced back to a Message", async () => {
+    const result = await failureScenario.service.execute({
+      action: "send",
+      target_alias: failureScenario.alias,
+      task_requirement: "required",
+      parts: [{ kind: "text", text: "Require a durable task for this proxy-routed reply." }],
+    });
+    const failure = asFailure(result);
+    const details =
+      typeof failure.error.details === "object" && failure.error.details !== null
+        ? (failure.error.details as Record<string, unknown>)
+        : undefined;
+
+    assert.equal(failure.action, "send");
+    assert.equal(failure.error.code, "TASK_REQUIRED_BUT_MESSAGE_RETURNED");
+    assert.equal(details?.response_kind, "message");
+    assert.ok(failureScenario.requestCounts.agentCard >= 1);
+    assert.ok(failureScenario.requestCounts.jsonRpc >= 1);
   });
 });
 

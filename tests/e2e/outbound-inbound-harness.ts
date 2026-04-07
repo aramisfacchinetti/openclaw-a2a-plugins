@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -82,6 +82,10 @@ export type DurableWatchScenario = StartedScenario & {
   createFreshService: () => Promise<A2AOutboundService>;
 };
 
+export type TaskRequirementFailureScenario = StartedScenario & {
+  expectedReplyText: string;
+};
+
 type StartedInboundRuntime = {
   server: A2AInboundServer;
   waitForPending: () => Promise<void>;
@@ -151,6 +155,49 @@ async function closeHttpServer(server: Server): Promise<void> {
       resolvePromise();
     });
   });
+}
+
+async function readRequestBody(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of req as AsyncIterable<string | Buffer>) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+
+  return Buffer.concat(chunks);
+}
+
+function removeFalseBlockingConfiguration(payload: unknown): unknown {
+  if (Array.isArray(payload)) {
+    return payload.map((entry) => removeFalseBlockingConfiguration(entry));
+  }
+
+  if (typeof payload !== "object" || payload === null) {
+    return payload;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const clone: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(record)) {
+    clone[key] =
+      key === "configuration" &&
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value)
+        ? (() => {
+            const configuration = { ...(value as Record<string, unknown>) };
+
+            if (configuration.blocking === false) {
+              delete configuration.blocking;
+            }
+
+            return removeFalseBlockingConfiguration(configuration);
+          })()
+        : removeFalseBlockingConfiguration(value);
+  }
+
+  return clone;
 }
 
 async function loadInboundServerModule(): Promise<InboundServerModule> {
@@ -854,6 +901,152 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
     cleanup: async () => {
       await closeCurrentInbound();
       await closeHttpServer(routeServer);
+      await rm(tempDir, { recursive: true, force: true });
+    },
+  };
+}
+
+export async function taskRequirementFailureScenario(): Promise<TaskRequirementFailureScenario> {
+  const expectedReplyText = "Direct e2e reply from the inbound server.";
+  const tempDir = await mkdtemp(join(tmpdir(), "openclaw-a2a-e2e-required-"));
+  const requestCounts: E2EScenarioRequestCounts = {
+    agentCard: 0,
+    jsonRpc: 0,
+  };
+  const account = createAccount("http://127.0.0.1:0", tempDir, {
+    label: "Task Requirement Failure Agent",
+    description:
+      "Proxy-backed direct reply fixture for strict task_requirement failure coverage.",
+  });
+  const { pluginRuntime, waitForPending } = createMinimalPluginRuntime(
+    async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-task-required-failure-e2e");
+      emit({
+        runId: "run-task-required-failure-e2e",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: expectedReplyText },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-task-required-failure-e2e",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+    tempDir,
+  );
+  const inboundModule = await loadInboundServerModule();
+
+  let inboundServer = inboundModule.createA2AInboundServer({
+    accountId: account.accountId,
+    account,
+    cfg: {},
+    channelRuntime: pluginRuntime.channel,
+    pluginRuntime,
+  });
+
+  const innerServer = createServer((req, res) => {
+    void inboundServer.handle(req, res).catch((error: unknown) => {
+      if (res.writableEnded) {
+        return;
+      }
+
+      res.statusCode = 500;
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+  const innerBaseUrl = await listen(innerServer);
+
+  const proxyServer = createServer((req, res) => {
+    void (async () => {
+      if (req.url?.startsWith("/.well-known/agent-card.json")) {
+        requestCounts.agentCard += 1;
+      }
+
+      if (req.url?.startsWith("/a2a/jsonrpc")) {
+        requestCounts.jsonRpc += 1;
+      }
+
+      const targetUrl = new URL(req.url ?? "/", innerBaseUrl);
+      const headers = new Headers();
+
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (value === undefined || name.toLowerCase() === "host") {
+          continue;
+        }
+
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            headers.append(name, entry);
+          }
+          continue;
+        }
+
+        headers.set(name, value);
+      }
+
+      let body: Buffer | undefined;
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        body = await readRequestBody(req);
+      }
+
+      if (body && req.url?.startsWith("/a2a/jsonrpc")) {
+        const parsed = JSON.parse(body.toString("utf8"));
+        const rewritten = removeFalseBlockingConfiguration(parsed);
+        body = Buffer.from(JSON.stringify(rewritten));
+        headers.set("content-length", String(body.byteLength));
+      }
+
+      const response = await fetch(targetUrl, {
+        method: req.method,
+        headers,
+        body,
+      });
+
+      res.statusCode = response.status;
+      response.headers.forEach((value, name) => {
+        res.setHeader(name, value);
+      });
+      res.end(Buffer.from(await response.arrayBuffer()));
+    })().catch((error: unknown) => {
+      if (res.writableEnded) {
+        return;
+      }
+
+      res.statusCode = 500;
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  const baseUrl = await listen(proxyServer);
+  account.publicBaseUrl = baseUrl;
+  inboundServer.close();
+  inboundServer = inboundModule.createA2AInboundServer({
+    accountId: account.accountId,
+    account,
+    cfg: {},
+    channelRuntime: pluginRuntime.channel,
+    pluginRuntime,
+  });
+
+  const config = createOutboundConfig(account, baseUrl);
+  const service = await createOutboundService(config);
+
+  return {
+    service,
+    alias: TARGET_ALIAS,
+    account,
+    baseUrl,
+    requestCounts,
+    expectedReplyText,
+    cleanup: async () => {
+      inboundServer.close();
+      await waitForPending();
+      await closeHttpServer(proxyServer);
+      await closeHttpServer(innerServer);
       await rm(tempDir, { recursive: true, force: true });
     },
   };
