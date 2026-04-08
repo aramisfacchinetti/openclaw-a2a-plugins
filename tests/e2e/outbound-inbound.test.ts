@@ -12,14 +12,18 @@ import {
   directReplyScenario,
   directStreamingScenario,
   durableWatchScenario,
+  liveCancelScenario,
   persistedContinuationScenario,
   promotedStreamingScenario,
+  quiescentCancelScenario,
   taskRequirementFailureScenario,
   type DurableWatchScenario,
   type DirectReplyScenario,
   type DirectStreamingScenario,
+  type LiveCancelScenario,
   type PersistedContinuationScenario,
   type PromotedStreamingScenario,
+  type QuiescentCancelScenario,
   type TaskRequirementFailureScenario,
 } from "./outbound-inbound-harness.js";
 
@@ -133,9 +137,10 @@ async function waitForCondition(
   throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
-async function waitForCompletedTask(
+async function waitForTaskStatus(
   scenario: { service: DirectReplyScenario["service"] },
   continuation: NonNullable<SuccessEnvelope["summary"]["continuation"]>,
+  expectedStatus: string,
   timeoutMs = 2_000,
 ): Promise<SuccessEnvelope<"status">> {
   const deadline = Date.now() + timeoutMs;
@@ -150,14 +155,14 @@ async function waitForCompletedTask(
     );
     const task = taskContinuationFromSummary(result.summary);
 
-    if (task.status === "completed") {
+    if (task.status === expectedStatus) {
       return result as SuccessEnvelope<"status">;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
-  throw new Error(`task did not complete within ${timeoutMs}ms`);
+  throw new Error(`task did not reach status ${expectedStatus} within ${timeoutMs}ms`);
 }
 
 describe("direct + card discovery", () => {
@@ -305,9 +310,10 @@ describe("strict task requirement", () => {
       assert.fail("expected continuation");
     }
 
-    const completedStatus = await waitForCompletedTask(
+    const completedStatus = await waitForTaskStatus(
       successScenario,
       continuation,
+      "completed",
     );
     const completedRawTask = completedStatus.raw as Task;
 
@@ -575,6 +581,158 @@ describe("persisted continuation", () => {
         .map(readMessageText),
       [scenario.initialPromptText, scenario.resumedPromptText],
     );
+  });
+});
+
+describe("cancel semantics", () => {
+  let quiescentScenario: QuiescentCancelScenario;
+  let liveScenario: LiveCancelScenario;
+
+  before(async () => {
+    quiescentScenario = await quiescentCancelScenario();
+    liveScenario = await liveCancelScenario();
+  });
+
+  after(async () => {
+    await Promise.all([quiescentScenario.cleanup(), liveScenario.cleanup()]);
+  });
+
+  it("cancel immediately terminates a quiescent input-required task", async () => {
+    const firstSend = asSuccess(
+      await quiescentScenario.service.execute({
+        action: "send",
+        target_alias: quiescentScenario.alias,
+        parts: [{ kind: "text", text: quiescentScenario.initialPromptText }],
+      }),
+    );
+    const initialTask = taskContinuationFromSummary(firstSend.summary);
+    const initialConversation = conversationContinuationFromSummary(firstSend.summary);
+    const persistedContinuation = structuredClone(firstSend.summary.continuation);
+
+    if (!persistedContinuation) {
+      assert.fail("expected continuation");
+    }
+
+    assert.equal(firstSend.action, "send");
+    assert.equal(firstSend.summary.response_kind, "task");
+    assert.equal(initialTask.status, "input-required");
+    assert.match(
+      firstSend.summary.message_text ?? "",
+      new RegExp(quiescentScenario.expectedPausePromptText),
+    );
+
+    const canceled = asSuccess(
+      await quiescentScenario.service.execute({
+        action: "cancel",
+        continuation: persistedContinuation,
+      }),
+    );
+    const canceledTask = taskContinuationFromSummary(canceled.summary);
+    const canceledConversation = conversationContinuationFromSummary(canceled.summary);
+    const canceledRawTask = canceled.raw as Task;
+
+    assert.equal(canceled.action, "cancel");
+    assert.equal(canceled.summary.response_kind, "task");
+    assert.equal(canceledTask.task_id, initialTask.task_id);
+    assert.equal(canceledTask.status, "canceled");
+    assert.equal(canceledTask.can_resume_send, false);
+    assert.equal(canceledTask.can_send, false);
+    assert.equal(canceledTask.can_cancel, false);
+    assert.equal(canceledConversation.context_id, initialConversation.context_id);
+    assert.equal(canceledRawTask.kind, "task");
+    assert.equal(canceledRawTask.id, initialTask.task_id);
+    assert.equal(canceledRawTask.status.state, "canceled");
+
+    const status = asSuccess(
+      await quiescentScenario.service.execute({
+        action: "status",
+        continuation: persistedContinuation,
+        history_length: 10,
+      }),
+    );
+    const statusTask = taskContinuationFromSummary(status.summary);
+    const statusRawTask = status.raw as Task;
+
+    assert.equal(status.action, "status");
+    assert.equal(statusTask.task_id, initialTask.task_id);
+    assert.equal(statusTask.status, "canceled");
+    assert.equal(statusRawTask.status.state, "canceled");
+  });
+
+  it("cancel on a live working task waits for committed cancellation", async () => {
+    const firstSend = asSuccess(
+      await liveScenario.service.execute({
+        action: "send",
+        target_alias: liveScenario.alias,
+        parts: [{ kind: "text", text: liveScenario.initialPromptText }],
+        blocking: false,
+      }),
+    );
+    const initialTask = taskContinuationFromSummary(firstSend.summary);
+    const initialConversation = conversationContinuationFromSummary(firstSend.summary);
+    const persistedContinuation = structuredClone(firstSend.summary.continuation);
+
+    if (!persistedContinuation) {
+      assert.fail("expected continuation");
+    }
+
+    const workingStatus = await waitForTaskStatus(
+      liveScenario,
+      persistedContinuation,
+      "working",
+    );
+    const workingTask = taskContinuationFromSummary(workingStatus.summary);
+
+    assert.equal(firstSend.action, "send");
+    assert.equal(firstSend.summary.response_kind, "task");
+    assert.equal(workingTask.task_id, initialTask.task_id);
+    assert.equal(workingTask.status, "working");
+
+    let cancelResolved = false;
+    const cancelPromise = liveScenario.service
+      .execute({
+        action: "cancel",
+        continuation: persistedContinuation,
+      })
+      .then((result) => {
+        cancelResolved = true;
+        return result;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(cancelResolved, false);
+
+    const pendingStatus = asSuccess(
+      await liveScenario.service.execute({
+        action: "status",
+        continuation: persistedContinuation,
+        history_length: 10,
+      }),
+    );
+    const pendingTask = taskContinuationFromSummary(pendingStatus.summary);
+
+    assert.equal(pendingTask.task_id, initialTask.task_id);
+    assert.equal(pendingTask.status, "working");
+
+    liveScenario.releaseAfterAbort();
+
+    const canceled = asSuccess(await cancelPromise);
+    const canceledTask = taskContinuationFromSummary(canceled.summary);
+    const canceledConversation = conversationContinuationFromSummary(canceled.summary);
+    const canceledRawTask = canceled.raw as Task;
+
+    assert.equal(canceled.action, "cancel");
+    assert.equal(canceled.summary.response_kind, "task");
+    assert.equal(canceledTask.task_id, initialTask.task_id);
+    assert.equal(canceledTask.status, "canceled");
+    assert.equal(canceledTask.can_resume_send, false);
+    assert.equal(canceledTask.can_send, false);
+    assert.equal(canceledTask.can_cancel, false);
+    assert.equal(canceledConversation.context_id, initialConversation.context_id);
+    assert.equal(canceledRawTask.kind, "task");
+    assert.equal(canceledRawTask.id, initialTask.task_id);
+    assert.equal(canceledRawTask.status.state, "canceled");
   });
 });
 

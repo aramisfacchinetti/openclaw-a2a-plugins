@@ -61,6 +61,17 @@ export type DirectStreamingScenario = StartedScenario & {
   expectedReplyText: string;
 };
 
+export type QuiescentCancelScenario = StartedScenario & {
+  expectedPausePromptText: string;
+  initialPromptText: string;
+};
+
+export type LiveCancelScenario = StartedScenario & {
+  initialPromptText: string;
+  initialToolText: string;
+  releaseAfterAbort: () => void;
+};
+
 export type PromotedStreamingScenario = StartedScenario & {
   expectedToolText: string;
   expectedFinalText: string;
@@ -659,6 +670,107 @@ export async function directStreamingScenario(): Promise<DirectStreamingScenario
   return {
     ...scenario,
     expectedReplyText,
+  };
+}
+
+export async function quiescentCancelScenario(): Promise<QuiescentCancelScenario> {
+  const expectedPausePromptText = "Approve the cancelable delegated action?";
+  const initialPromptText = "Pause for approval so cancel can terminate the task.";
+  const scenario = await startScenario({
+    accountOverrides: {
+      label: "Quiescent Cancel Agent",
+      description:
+        "Approval-pause fixture that leaves a task quiescent until it is canceled.",
+    },
+    script: async ({ params, emit }) => {
+      const ctx = params.ctx as { BodyForAgent?: unknown };
+      const bodyForAgent =
+        typeof ctx.BodyForAgent === "string" ? ctx.BodyForAgent : undefined;
+
+      params.replyOptions?.onAgentRunStart?.("run-quiescent-cancel-e2e");
+      emit({
+        runId: "run-quiescent-cancel-e2e",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+
+      if (bodyForAgent !== initialPromptText) {
+        throw new Error(
+          `unexpected quiescent cancel scenario body: ${String(bodyForAgent)}`,
+        );
+      }
+
+      emit({
+        runId: "run-quiescent-cancel-e2e",
+        stream: "tool",
+        data: {
+          phase: "result",
+          name: "exec",
+          toolCallId: "exec/1",
+          isError: false,
+          result: {
+            status: "approval-pending",
+            requiresApproval: {
+              type: "approval_request",
+              prompt: expectedPausePromptText,
+            },
+            command: "echo pending-approval",
+          },
+        },
+      });
+      emit({
+        runId: "run-quiescent-cancel-e2e",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  return {
+    ...scenario,
+    expectedPausePromptText,
+    initialPromptText,
+  };
+}
+
+export async function liveCancelScenario(): Promise<LiveCancelScenario> {
+  const initialPromptText = "Start a working task that will be canceled live.";
+  const initialToolText = "Live cancel task is working.";
+  const releaseAfterAbortGate = createDeferred();
+  const scenario = await startScenario({
+    accountOverrides: {
+      label: "Live Cancel Agent",
+      description:
+        "Live working-task fixture that delays settlement until after abort is observed.",
+    },
+    script: async ({ params, emit, waitForAbort }) => {
+      params.replyOptions?.onAgentRunStart?.("run-live-cancel-e2e");
+      emit({
+        runId: "run-live-cancel-e2e",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: initialToolText },
+        { kind: "tool" },
+      );
+      await waitForAbort();
+      await releaseAfterAbortGate.promise;
+      emit({
+        runId: "run-live-cancel-e2e",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  return {
+    ...scenario,
+    initialPromptText,
+    initialToolText,
+    releaseAfterAbort: () => {
+      releaseAfterAbortGate.resolve();
+    },
   };
 }
 
