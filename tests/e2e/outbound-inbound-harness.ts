@@ -93,6 +93,10 @@ export type DurableWatchScenario = StartedScenario & {
   createFreshService: () => Promise<A2AOutboundService>;
 };
 
+type DurableWatchScenarioOptions = {
+  awaitRuntimeTeardown?: () => Promise<void>;
+};
+
 export type TaskRequirementFailureScenario = StartedScenario & {
   expectedReplyText: string;
 };
@@ -897,7 +901,9 @@ export async function persistedContinuationScenario(): Promise<PersistedContinua
   };
 }
 
-export async function durableWatchScenario(): Promise<DurableWatchScenario> {
+export async function durableWatchScenario(
+  options: DurableWatchScenarioOptions = {},
+): Promise<DurableWatchScenario> {
   const initialToolText = "Initial durable watch artifact.";
   const expectedToolText = "Durable watch update from the inbound server.";
   const initialPromptText = "Start the durable watch workflow.";
@@ -962,6 +968,8 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
   };
 
   const initialInbound = await startInbound(async ({ params, emit, waitForAbort }) => {
+    const abortSignal = params.replyOptions?.abortSignal;
+
     params.replyOptions?.onAgentRunStart?.("run-durable-watch-e2e");
     emit({
       runId: "run-durable-watch-e2e",
@@ -972,12 +980,22 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
       { text: initialToolText },
       { kind: "tool" },
     );
-    await releaseLiveUpdateGate.promise;
+    await Promise.race([releaseLiveUpdateGate.promise, waitForAbort()]);
+
+    if (abortSignal?.aborted) {
+      await options.awaitRuntimeTeardown?.();
+      return;
+    }
+
     await params.dispatcherOptions.deliver(
       { text: expectedToolText },
       { kind: "tool" },
     );
     await waitForAbort();
+
+    if (abortSignal?.aborted) {
+      await options.awaitRuntimeTeardown?.();
+    }
   });
 
   let currentInbound: StartedInboundRuntime | undefined = initialInbound;
@@ -985,11 +1003,19 @@ export async function durableWatchScenario(): Promise<DurableWatchScenario> {
   const service = await createOutboundService(scenarioConfig);
 
   const closeCurrentInbound = async () => {
-    // Model a process restart: close the HTTP surface, then drop the old runtime
-    // without waiting for in-flight script promises to finish.
-    currentInbound?.server.close();
+    const closingInbound = currentInbound;
+
+    if (!closingInbound) {
+      inboundServer = undefined;
+      return;
+    }
+
+    // Model a process restart: close the HTTP surface first, then wait for the
+    // orphaned runtime scripts to observe shutdown before replacing the runtime.
+    closingInbound.server.close();
     inboundServer = undefined;
     currentInbound = undefined;
+    await closingInbound.waitForPending();
   };
 
   return {
@@ -1115,7 +1141,7 @@ export async function taskRequirementFailureScenario(): Promise<TaskRequirementF
       const response = await fetch(targetUrl, {
         method: req.method,
         headers,
-        body,
+        body: body ? new Uint8Array(body) : undefined,
       });
 
       res.statusCode = response.status;

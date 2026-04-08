@@ -90,6 +90,16 @@ export class A2ALiveExecutionRegistry {
     return record;
   }
 
+  shutdownAll(reason: unknown): void {
+    for (const [taskId, record] of this.executions) {
+      if (!record.abortController.signal.aborted) {
+        record.abortController.abort(reason);
+      }
+
+      this.executions.delete(taskId);
+    }
+  }
+
   cleanup(taskId: string): void {
     this.executions.delete(taskId);
   }

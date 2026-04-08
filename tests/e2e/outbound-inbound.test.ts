@@ -868,4 +868,57 @@ describe("durable watch", () => {
     assert.equal(orphanedTask.task_id, initialTask.task_id);
     assert.equal(orphanedConversation.context_id, initialConversation.context_id);
   });
+
+  it("restart waits for orphaned runtime teardown before replacing the inbound runtime", async () => {
+    let releaseTeardown!: () => void;
+    const teardownGate = new Promise<void>((resolve) => {
+      releaseTeardown = resolve;
+    });
+    const delayedScenario = await durableWatchScenario({
+      awaitRuntimeTeardown: async () => teardownGate,
+    });
+
+    try {
+      const firstSend = asSuccess(
+        await delayedScenario.service.execute({
+          action: "send",
+          target_alias: delayedScenario.alias,
+          parts: [{ kind: "text", text: delayedScenario.initialPromptText }],
+          blocking: false,
+        }),
+      );
+      const persistedContinuation = structuredClone(firstSend.summary.continuation);
+
+      if (!persistedContinuation) {
+        assert.fail("expected continuation");
+      }
+
+      const restartPromise = delayedScenario.restartInbound();
+      const restartState = await Promise.race([
+        restartPromise.then(() => "resolved" as const),
+        new Promise<"pending">((resolve) => {
+          setTimeout(() => resolve("pending"), 25);
+        }),
+      ]);
+
+      assert.equal(restartState, "pending");
+      releaseTeardown();
+      await restartPromise;
+
+      const restartedService = await delayedScenario.createFreshService();
+      const orphanedWatch = asSuccess(
+        await restartedService.execute({
+          action: "watch",
+          continuation: persistedContinuation,
+        }),
+      );
+      const orphanedRaw = asStreamRaw(orphanedWatch.raw);
+
+      assert.equal(orphanedRaw.events.length, 1);
+      assert.equal(orphanedRaw.events[0]?.kind, "task");
+    } finally {
+      releaseTeardown();
+      await delayedScenario.cleanup();
+    }
+  });
 });

@@ -26,6 +26,7 @@ import {
   type NormalizedReplyPayload,
   type ToolProgressPhase,
 } from "./response-mapping.js";
+import { isA2AInboundServerShutdownError } from "./runtime-shutdown.js";
 
 type ReplyDispatchKind = "tool" | "block" | "final";
 type LifecyclePhase = "start" | "end" | "error";
@@ -387,6 +388,11 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
+    if (this.isServerShutdownAbort()) {
+      this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
+      return;
+    }
+
     this.flushQueuedAssistantArtifact();
 
     if (this.cancelRequested || this.signal.aborted) {
@@ -458,6 +464,11 @@ export class A2ATaskExecutionCoordinator {
       return;
     }
 
+    if (this.isServerShutdownAbort(error)) {
+      this.liveExecutions.clearRequestMode(this.requestContext.userMessage.messageId);
+      return;
+    }
+
     this.flushQueuedAssistantArtifact();
 
     if (this.cancelRequested || this.signal.aborted) {
@@ -503,6 +514,20 @@ export class A2ATaskExecutionCoordinator {
     }
 
     this.flushQueuedAssistantArtifact();
+  }
+
+  private isServerShutdownAbort(error?: unknown): boolean {
+    if (
+      error !== undefined &&
+      isA2AInboundServerShutdownError(error)
+    ) {
+      return true;
+    }
+
+    return (
+      this.signal.aborted &&
+      isA2AInboundServerShutdownError(this.signal.reason)
+    );
   }
 
   private canReturnDirectMessage(): boolean {

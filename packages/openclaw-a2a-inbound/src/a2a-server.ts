@@ -22,6 +22,7 @@ import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
 import { A2AResubscribePlanner } from "./resubscribe-planner.js";
+import { A2AInboundServerShutdownError } from "./runtime-shutdown.js";
 import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
@@ -280,6 +281,7 @@ export function createA2AInboundServer(
     requestHandler,
     handle: createExpressDispatcher(app),
     close: () => {
+      liveExecutions.shutdownAll(new A2AInboundServerShutdownError());
       taskStore.close();
     },
   };
