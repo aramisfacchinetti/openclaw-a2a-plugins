@@ -410,6 +410,76 @@ describe("direct streaming", () => {
     }
     assert.ok(scenario.requestCounts.jsonRpc > startingJsonRpcCount);
   });
+
+  it("conversation-only continuation allows send and rejects watch, status, and cancel", async () => {
+    const firstSend = asSuccess(
+      await scenario.service.execute({
+        action: "send",
+        target_alias: scenario.alias,
+        parts: [{ kind: "text", text: "Start a direct conversation-only continuation." }],
+      }),
+    );
+    const continuation = structuredClone(firstSend.summary.continuation);
+    const firstConversation = conversationContinuationFromSummary(firstSend.summary);
+
+    if (!continuation) {
+      assert.fail("expected continuation");
+    }
+
+    assert.equal(firstSend.summary.continuation?.task, undefined);
+
+    const startingJsonRpcCount = scenario.requestCounts.jsonRpc;
+    const resumedSend = asSuccess(
+      await scenario.service.execute({
+        action: "send",
+        continuation,
+        parts: [{ kind: "text", text: "Continue within the existing conversation only." }],
+      }),
+    );
+    const resumedConversation = conversationContinuationFromSummary(resumedSend.summary);
+
+    assert.equal(resumedSend.action, "send");
+    assert.equal(resumedSend.summary.response_kind, "message");
+    assert.equal(resumedSend.summary.message_text, scenario.expectedReplyText);
+    assert.equal(resumedSend.summary.continuation?.task, undefined);
+    assert.equal(resumedConversation.context_id, firstConversation.context_id);
+    assert.ok(scenario.requestCounts.jsonRpc > startingJsonRpcCount);
+
+    const rejectedStartingJsonRpcCount = scenario.requestCounts.jsonRpc;
+
+    for (const action of ["watch", "status", "cancel"] as const) {
+      const failure = asFailure(
+        await scenario.service.execute({
+          action,
+          continuation,
+        }),
+      );
+      const details =
+        typeof failure.error.details === "object" && failure.error.details !== null
+          ? (failure.error.details as {
+              source?: unknown;
+              tool?: unknown;
+              errors?: Array<{ instancePath?: unknown; message?: unknown }>;
+            })
+          : undefined;
+
+      assert.equal(failure.action, action);
+      assert.equal(failure.error.code, "VALIDATION_ERROR");
+      assert.equal(failure.error.message, "remote_agent input validation failed");
+      assert.equal(details?.source, "ajv");
+      assert.equal(details?.tool, "remote_agent");
+      assert.ok(
+        details?.errors?.some(
+          (error) =>
+            error.instancePath === "/continuation" &&
+            error.message ===
+              `${action} requires continuation.task.task_id when continuation is present`,
+        ),
+      );
+    }
+
+    assert.equal(scenario.requestCounts.jsonRpc, rejectedStartingJsonRpcCount);
+  });
 });
 
 describe("persisted continuation", () => {
