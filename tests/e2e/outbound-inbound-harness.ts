@@ -19,7 +19,7 @@ type DispatchParams = Parameters<
 type ResolvedAgentRoute = ReturnType<
   PluginRuntime["channel"]["routing"]["resolveAgentRoute"]
 >;
-type RuntimeScript = (ctx: {
+export type RuntimeScript = (ctx: {
   params: DispatchParams;
   emit: (event: {
     runId: string;
@@ -145,7 +145,7 @@ function createDeferred() {
   };
 }
 
-async function listen(server: Server): Promise<string> {
+export async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolvePromise) => {
     server.listen(0, "127.0.0.1", () => resolvePromise());
   });
@@ -159,7 +159,7 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function closeHttpServer(server: Server): Promise<void> {
+export async function closeHttpServer(server: Server): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
     server.close((error) => {
       if (error) {
@@ -229,7 +229,7 @@ async function loadOutboundServiceModule(): Promise<OutboundServiceModule> {
   return outboundServiceModulePromise;
 }
 
-function createMinimalPluginRuntime(
+export function createMinimalPluginRuntime(
   script: RuntimeScript,
   tempDir: string,
   options: RuntimeHarnessOptions = {},
@@ -439,7 +439,7 @@ function createMinimalPluginRuntime(
   };
 }
 
-function createUserMessage(text: string): Message {
+export function createUserMessage(text: string): Message {
   return {
     kind: "message",
     messageId: randomUUID(),
@@ -448,7 +448,7 @@ function createUserMessage(text: string): Message {
   };
 }
 
-function createAccount(
+export function createAccount(
   baseUrl: string,
   tempDir: string,
   overrides: Partial<A2AInboundAccountConfig> = {},
@@ -1189,5 +1189,3 @@ export async function taskRequirementFailureScenario(): Promise<TaskRequirementF
     },
   };
 }
-
-export { createUserMessage };
