@@ -107,6 +107,8 @@ Interpret follow-up capability from `result.summary.continuation`, not from prom
 - Do not call `watch`, `status`, or `cancel` from a result that has only `summary.continuation.conversation`.
 - Do not poll from conversation continuity.
 - If lifecycle tracking is required, fail fast when the peer returns only `summary.continuation.conversation`.
+- Do not route `summary.continuation` back through channel `a2a`; inbound A2A channel delivery is separate from `remote_agent` continuation.
+- If you see `A2A_OUTBOUND_DELIVERY_UNSUPPORTED`, the host selected the wrong boundary. Return to persisted `summary.continuation` plus `remote_agent`.
 
 ```ts
 const task = result.summary.continuation?.task

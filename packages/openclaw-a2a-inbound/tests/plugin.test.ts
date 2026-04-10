@@ -5,6 +5,7 @@ import type {
   OpenClawPluginApi,
   GatewayRequestHandler,
 } from "openclaw/plugin-sdk";
+import { A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE } from "../dist/constants.js";
 import plugin from "../dist/index.js";
 
 type HttpRouteRegistration = {
@@ -128,4 +129,24 @@ test("plugin tolerates missing channel accounts and only registers the channel",
   assert.equal(channels.length, 1);
   assert.equal(routes.length, 0);
   assert.equal(gatewayMethods.size, 0);
+});
+
+test("inbound outbound adapter fails with the documented boundary message", async () => {
+  const api = createApi({});
+
+  plugin.register(api);
+
+  const { channels } = getInternalCollections(api);
+  const channel = channels[0];
+
+  await assert.rejects(
+    channel?.outbound?.sendText({
+      accountId: "default",
+      to: "a2a:peer",
+      text: "follow up",
+    }),
+    {
+      message: A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE,
+    },
+  );
 });

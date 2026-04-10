@@ -12,7 +12,12 @@ import {
   resolveA2AInboundDefaultAccountId,
   type A2AInboundAccountConfig,
 } from "./config.js";
-import { CHANNEL_DOCS_PATH, CHANNEL_ID, CHANNEL_LABEL } from "./constants.js";
+import {
+  A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE,
+  CHANNEL_DOCS_PATH,
+  CHANNEL_ID,
+  CHANNEL_LABEL,
+} from "./constants.js";
 import type { A2AInboundPluginHost } from "./plugin-host.js";
 
 function describeAccount(
@@ -68,9 +73,7 @@ export function buildA2AInboundChannel(
     outbound: {
       deliveryMode: "direct",
       async sendText() {
-        throw new Error(
-          "openclaw-a2a-inbound does not implement OpenClaw-initiated outbound delivery. Use openclaw-a2a-outbound for delegated outbound A2A calls.",
-        );
+        throw new Error(A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE);
       },
     },
     gateway: {

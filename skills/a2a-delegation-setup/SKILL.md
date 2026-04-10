@@ -110,3 +110,13 @@ If `list_targets` succeeds and the two enable flags remain true, setup is comple
 ## Handoff
 
 After setup is complete, stop using this setup skill for normal delegation work. Use the bundled `remote-agent` skill and the `remote_agent` tool instead.
+
+## Troubleshooting Boundary
+
+If follow-up work fails with:
+
+```text
+A2A_OUTBOUND_DELIVERY_UNSUPPORTED: openclaw-a2a-inbound does not implement OpenClaw-initiated outbound delivery. Use openclaw-a2a-outbound for delegated outbound A2A calls.
+```
+
+then the host tried to replay a queued follow-up through inbound channel `a2a`. That is unsupported in this repo. `remote_agent` readiness does not imply channel-level queued follow-up support on `a2a`; continue delegated work only with persisted `summary.continuation` and the `remote_agent` tool.

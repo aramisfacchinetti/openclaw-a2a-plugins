@@ -24,6 +24,15 @@ clawhub install a2a-delegation-setup
 
 The ClawHub skill is an optional guided setup helper for installing, enabling, configuring, verifying, updating, and troubleshooting `@aramisfa/openclaw-a2a-outbound`. The plugin itself still installs through `openclaw plugins install @aramisfa/openclaw-a2a-outbound`.
 
+## Routing Boundary
+
+`@aramisfa/openclaw-a2a-outbound` is the only outbound A2A continuation surface in this repository.
+
+- `summary.continuation` is for `remote_agent` follow-up only.
+- Do not replay `summary.continuation` back through inbound channel delivery on channel `a2a`.
+- Do not treat an inbound A2A channel turn, `OriginatingChannel`, `OriginatingTo`, or inbound `capabilities.reply` as proof that generic channel-level queued follow-up is supported.
+- If you see `A2A_OUTBOUND_DELIVERY_UNSUPPORTED`, OpenClaw tried to route a queued follow-up through `openclaw-a2a-inbound`; switch the workflow back to persisted `summary.continuation` plus `remote_agent`.
+
 ## Requirements
 
 - Node.js `>=22.12.0`
@@ -113,6 +122,7 @@ This package returns continuation metadata under `summary.continuation`. Persist
 - `summary.target_*` and other top-level compatibility aliases are descriptive only. Do not infer lifecycle continuity from flat `task_id`, flat `context_id`, or other top-level fields.
 - `watch`, `status`, and `cancel` require `summary.continuation.task`.
 - Conversation-only follow-up uses `context_id`, not task actions.
+- `summary.continuation` is not a license to route follow-ups through channel `a2a`; it is the persisted contract for `remote_agent` only.
 
 Supported `send` modes:
 

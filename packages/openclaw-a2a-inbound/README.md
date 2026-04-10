@@ -78,6 +78,32 @@ Inbound request parts:
 
 Serialized A2A payloads do not emit `metadata.openclaw.*` or vendor `openclaw.reply` payloads.
 
+## Follow-Up Routing Boundary
+
+`@aramisfa/openclaw-a2a-inbound` is an inbound transport bridge. It is not the outbound A2A continuation surface for this repo.
+
+Supported:
+
+- direct inbound A2A request handling
+- in-band replies during the active inbound request lifecycle
+- A2A task APIs served by the inbound plugin
+
+Unsupported:
+
+- generic OpenClaw-initiated outbound sends through channel `a2a`
+- generic queued follow-up routing that re-enters channel `a2a`
+- treating inbound channel metadata as equivalent to `remote_agent` continuation
+
+The inbound channel records OpenClaw origin metadata for the current host contract, but `OriginatingChannel`, `OriginatingTo`, and channel `capabilities.reply` do not establish generic queued outbound routability for channel `a2a`.
+
+If OpenClaw tries to route a queued follow-up through the inbound channel adapter, the plugin fails deliberately with:
+
+```text
+A2A_OUTBOUND_DELIVERY_UNSUPPORTED: openclaw-a2a-inbound does not implement OpenClaw-initiated outbound delivery. Use openclaw-a2a-outbound for delegated outbound A2A calls.
+```
+
+That failure is the intended boundary. In this repository, outbound A2A continuation is supported only through `@aramisfa/openclaw-a2a-outbound`, the `remote_agent` tool, and persisted `summary.continuation` state.
+
 ## Task Storage
 
 Each account can select one task store:
