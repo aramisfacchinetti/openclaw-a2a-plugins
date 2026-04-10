@@ -94,7 +94,9 @@ Unsupported:
 - generic queued follow-up routing that re-enters channel `a2a`
 - treating inbound channel metadata as equivalent to `remote_agent` continuation
 
-By default, inbound A2A suppresses generic OpenClaw origin-routing fields so later queued follow-ups do not get classified as generic channel-routable `a2a` replies. `OriginatingChannel`, `OriginatingTo`, and channel `capabilities.reply` do not establish generic queued outbound routability for channel `a2a`.
+The inbound channel reports `capabilities.reply = false` because this repo does not support generic OpenClaw-initiated outbound reply delivery over channel `a2a`. That reported capability does not disable the plugin-owned in-band reply path used during the active inbound request lifecycle.
+
+By default, inbound A2A suppresses generic OpenClaw origin-routing fields so later queued follow-ups do not get classified as generic channel-routable `a2a` replies. `OriginatingChannel` and `OriginatingTo` do not establish generic queued outbound routability for channel `a2a`.
 
 `originRoutingPolicy` defaults to `suppress-generic-followup`. Set `originRoutingPolicy: "legacy-origin-routing"` only as a short-lived escape hatch if some host behavior still requires generic OpenClaw origin metadata and you accept the queued follow-up boundary described here.
 

@@ -51,7 +51,7 @@ export function buildA2AInboundChannel(
     },
     capabilities: {
       chatTypes: ["direct"],
-      reply: true,
+      reply: false,
       blockStreaming: true,
     },
     config: {

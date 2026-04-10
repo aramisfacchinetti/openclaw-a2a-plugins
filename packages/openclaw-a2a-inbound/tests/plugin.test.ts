@@ -105,6 +105,11 @@ test("plugin registers one channel and the phase 1 HTTP routes", () => {
 
   assert.equal(channels.length, 1);
   assert.equal(channels[0]?.id, "a2a");
+  assert.deepEqual(channels[0]?.capabilities, {
+    chatTypes: ["direct"],
+    reply: false,
+    blockStreaming: true,
+  });
   assert.deepEqual(
     routes.map((route) => [route.path, route.match ?? "exact"]),
     [
