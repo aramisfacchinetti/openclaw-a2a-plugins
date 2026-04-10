@@ -219,6 +219,51 @@ test("task-generating mode emits task-bearing events for streaming replies", asy
   assert.deepEqual(assistantTexts, ["Streamed", " reply"]);
 });
 
+test("executor emits the current inbound origin-routing context shape", async () => {
+  let capturedCtx: Record<string, unknown> | undefined;
+  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+    capturedCtx = params.ctx as Record<string, unknown>;
+    params.replyOptions?.onAgentRunStart?.("run-origin-routing-shape");
+    emit({
+      runId: "run-origin-routing-shape",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    await params.dispatcherOptions.deliver(
+      { text: "Origin routing context captured." },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-origin-routing-shape",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext({
+    contextId: "peer-origin-route",
+    userMessage: {
+      ...createRequestContext().userMessage,
+      messageId: "message-origin-route",
+      parts: [{ kind: "text", text: "Lock in the current origin routing context." }],
+    },
+  });
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  assert.equal(capturedCtx?.From, "a2a:peer-origin-route");
+  assert.equal(capturedCtx?.To, "a2a:default");
+  assert.equal(capturedCtx?.ConversationLabel, "peer-origin-route");
+  assert.equal(capturedCtx?.Provider, "a2a");
+  assert.equal(capturedCtx?.Surface, "a2a");
+  assert.equal(capturedCtx?.OriginatingChannel, "a2a");
+  assert.equal(capturedCtx?.OriginatingTo, "a2a:default");
+  assert.equal(capturedCtx?.MessageSid, "message-origin-route");
+  assert.equal(capturedCtx?.MessageSidFull, "message-origin-route");
+  assert.equal(capturedCtx?.SessionKey, "session:test");
+});
+
 test("data-only requests dispatch with a synthetic agent body and empty command text", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
   const { executor } = createExecutorHarness(async ({ params, emit }) => {

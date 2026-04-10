@@ -14,6 +14,7 @@ import type {
   PluginRuntime,
 } from "openclaw/plugin-sdk";
 import type { A2AInboundAccountConfig } from "../../packages/openclaw-a2a-inbound/src/config.js";
+import { A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE } from "../../packages/openclaw-a2a-inbound/dist/constants.js";
 import type {
   A2AToolResult,
   SuccessEnvelope,
@@ -203,13 +204,13 @@ async function executeTool(tool: AnyAgentTool, input: unknown): Promise<unknown>
 }
 
 async function waitForCondition(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 2_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
 
@@ -445,8 +446,21 @@ function createInitialStatus(
   );
 }
 
-test("full-host smoke registers both plugins through the real OpenClaw registry", async () => {
-  const expectedReplyText = "Direct e2e reply from the inbound server.";
+type StartedFullHostHarness = {
+  account: A2AInboundAccountConfig;
+  registry: PluginRegistryLike;
+  rootConfig: OpenClawConfig;
+  requestCounts: {
+    agentCard: number;
+    jsonRpc: number;
+  };
+  cleanup: () => Promise<void>;
+};
+
+async function startFullHostHarness(params: {
+  script: RuntimeScript;
+  accountOverrides?: Partial<A2AInboundAccountConfig>;
+}): Promise<StartedFullHostHarness> {
   const requestCounts = {
     agentCard: 0,
     jsonRpc: 0,
@@ -457,28 +471,12 @@ test("full-host smoke registers both plugins through the real OpenClaw registry"
   const account = createAccount(baseUrl, tempDir, {
     label: "Full Host Smoke Agent",
     description: "Real OpenClaw plugin registration smoke for inbound and outbound A2A.",
+    ...params.accountOverrides,
   });
   const rootConfig = createRootConfig(account);
   const outboundPluginConfig = createOutboundPluginConfig(account);
-  const script: RuntimeScript = async ({ params, emit }) => {
-    params.replyOptions?.onAgentRunStart?.("run-full-host-smoke");
-    emit({
-      runId: "run-full-host-smoke",
-      stream: "lifecycle",
-      data: { phase: "start" },
-    });
-    await params.dispatcherOptions.deliver(
-      { text: expectedReplyText },
-      { kind: "final" },
-    );
-    emit({
-      runId: "run-full-host-smoke",
-      stream: "lifecycle",
-      data: { phase: "end" },
-    });
-  };
   const { pluginRuntime, waitForPending } = createMinimalPluginRuntime(
-    script,
+    params.script,
     tempDir,
   );
   const [registeredInboundPlugin, registeredOutboundPlugin] = await Promise.all([
@@ -518,57 +516,96 @@ test("full-host smoke registers both plugins through the real OpenClaw registry"
     );
   });
 
-  try {
-    registerPlugin({
-      registry,
-      createApi,
-      entry: registeredInboundPlugin,
-      source: INBOUND_PLUGIN_SOURCE,
-      config: rootConfig,
-    });
-    registerPlugin({
-      registry,
-      createApi,
-      entry: registeredOutboundPlugin,
-      source: OUTBOUND_PLUGIN_SOURCE,
-      config: rootConfig,
-      pluginConfig: outboundPluginConfig,
-    });
+  registerPlugin({
+    registry,
+    createApi,
+    entry: registeredInboundPlugin,
+    source: INBOUND_PLUGIN_SOURCE,
+    config: rootConfig,
+  });
+  registerPlugin({
+    registry,
+    createApi,
+    entry: registeredOutboundPlugin,
+    source: OUTBOUND_PLUGIN_SOURCE,
+    config: rootConfig,
+    pluginConfig: outboundPluginConfig,
+  });
 
+  const inboundChannel = registry.channels.find((entry) => entry.plugin.id === "a2a");
+  assert.ok(inboundChannel, "expected the inbound channel to be registered");
+  assert.equal(typeof inboundChannel.plugin.gateway?.startAccount, "function");
+
+  let status = createInitialStatus(inboundChannel.plugin, account, rootConfig);
+  startedAccountPromise = inboundChannel.plugin.gateway!.startAccount!({
+    cfg: rootConfig,
+    accountId: account.accountId,
+    account,
+    runtime: {} as never,
+    abortSignal: accountAbort.signal,
+    channelRuntime: pluginRuntime.channel,
+    getStatus: () => status,
+    setStatus: (next) => {
+      status = next;
+    },
+    log: NOOP_LOGGER,
+  });
+
+  await waitForCondition(() => status.running === true && status.connected === true);
+
+  return {
+    account,
+    registry,
+    rootConfig,
+    requestCounts,
+    cleanup: async () => {
+      accountAbort.abort();
+      await Promise.allSettled([
+        startedAccountPromise ?? Promise.resolve(),
+        waitForPending(),
+        closeHttpServer(routeServer),
+      ]);
+      await rm(tempDir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("full-host smoke registers both plugins through the real OpenClaw registry", async () => {
+  const expectedReplyText = "Direct e2e reply from the inbound server.";
+  const harness = await startFullHostHarness({
+    script: async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-full-host-smoke");
+      emit({
+        runId: "run-full-host-smoke",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: expectedReplyText },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-full-host-smoke",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  try {
     assert.deepEqual(
-      registry.diagnostics.filter((entry) => entry.level === "error"),
+      harness.registry.diagnostics.filter((entry) => entry.level === "error"),
       [],
     );
-    assert.equal(registry.plugins.length, 2);
-    assert.equal(registry.channels.length, 1);
-    assert.equal(registry.httpRoutes.length, 2);
-    assert.equal(registry.tools.length, 1);
-
-    const inboundChannel = registry.channels.find((entry) => entry.plugin.id === "a2a");
-    assert.ok(inboundChannel, "expected the inbound channel to be registered");
-    assert.equal(typeof inboundChannel.plugin.gateway?.startAccount, "function");
-
-    let status = createInitialStatus(inboundChannel.plugin, account, rootConfig);
-    startedAccountPromise = inboundChannel.plugin.gateway!.startAccount!({
-      cfg: rootConfig,
-      accountId: account.accountId,
-      account,
-      runtime: {} as never,
-      abortSignal: accountAbort.signal,
-      channelRuntime: pluginRuntime.channel,
-      getStatus: () => status,
-      setStatus: (next) => {
-        status = next;
-      },
-      log: NOOP_LOGGER,
-    });
-
-    await waitForCondition(() => status.running === true && status.connected === true);
+    assert.equal(harness.registry.plugins.length, 2);
+    assert.equal(harness.registry.channels.length, 1);
+    assert.equal(harness.registry.httpRoutes.length, 2);
+    assert.equal(harness.registry.tools.length, 1);
 
     const remoteAgentTool = resolveRegisteredTool(
-      registry,
+      harness.registry,
       "remote_agent",
-      rootConfig,
+      harness.rootConfig,
     );
 
     const listTargetsResult = asSuccess(
@@ -581,8 +618,8 @@ test("full-host smoke registers both plugins through the real OpenClaw registry"
     assert.equal(listTargetsResult.action, "list_targets");
     assert.equal(targets.length, 1);
     assert.equal(targets[0]?.target_alias, TARGET_ALIAS);
-    assert.equal(targets[0]?.target_name, account.label);
-    assert.equal(targets[0]?.description, account.description);
+    assert.equal(targets[0]?.target_name, harness.account.label);
+    assert.equal(targets[0]?.description, harness.account.description);
 
     const sendResult = asSuccess(
       readStructuredContent(
@@ -599,15 +636,102 @@ test("full-host smoke registers both plugins through the real OpenClaw registry"
     assert.equal(sendResult.summary.target_alias, TARGET_ALIAS);
     assert.equal(sendResult.summary.message_text, expectedReplyText);
     assert.equal(readMessageText(rawMessage), expectedReplyText);
-    assert.ok(requestCounts.agentCard >= 1);
-    assert.ok(requestCounts.jsonRpc >= 1);
+    assert.ok(harness.requestCounts.agentCard >= 1);
+    assert.ok(harness.requestCounts.jsonRpc >= 1);
   } finally {
-    accountAbort.abort();
-    await Promise.allSettled([
-      startedAccountPromise ?? Promise.resolve(),
-      waitForPending(),
-      closeHttpServer(routeServer),
-    ]);
-    await rm(tempDir, { recursive: true, force: true });
+    await harness.cleanup();
+  }
+});
+
+test("full-host reproduction locks in the unsupported queued follow-up boundary", async () => {
+  const expectedReplyText = "Tracked reply from the inbound server.";
+  const harness = await startFullHostHarness({
+    accountOverrides: {
+      label: "Full Host Follow-Up Boundary Agent",
+      description: "Tracked follow-up boundary reproduction through the real registry.",
+    },
+    script: async ({ params, emit }) => {
+      params.replyOptions?.onAgentRunStart?.("run-full-host-followup-boundary");
+      emit({
+        runId: "run-full-host-followup-boundary",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: expectedReplyText },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-full-host-followup-boundary",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  try {
+    const remoteAgentTool = resolveRegisteredTool(
+      harness.registry,
+      "remote_agent",
+      harness.rootConfig,
+    );
+    const sendResult = asSuccess(
+      readStructuredContent(
+        await executeTool(remoteAgentTool, {
+          action: "send",
+          target_alias: TARGET_ALIAS,
+          task_requirement: "required",
+          blocking: true,
+          parts: [{ kind: "text", text: "Force a tracked reply for follow-up routing." }],
+        }),
+      ),
+    );
+    const inboundChannel = harness.registry.channels.find(
+      (entry) => entry.plugin.id === "a2a",
+    );
+
+    assert.ok(inboundChannel, "expected the inbound channel to be registered");
+    assert.equal(sendResult.action, "send");
+    assert.equal(sendResult.summary.target_alias, TARGET_ALIAS);
+    assert.equal(sendResult.summary.response_kind, "task");
+    assert.ok(sendResult.summary.continuation?.task, "expected task continuation");
+    assert.ok(harness.requestCounts.agentCard >= 1);
+    assert.ok(harness.requestCounts.jsonRpc >= 1);
+
+    await assert.rejects(
+      inboundChannel.plugin.outbound?.sendText({
+        accountId: harness.account.accountId,
+        to: `a2a:${harness.account.accountId}`,
+        text: "Queued tracked follow-up through generic channel routing.",
+      }),
+      {
+        message: A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE,
+      },
+    );
+
+    let completedStatus: SuccessEnvelope<"status"> | undefined;
+
+    await waitForCondition(async () => {
+      const statusResult = asSuccess(
+        readStructuredContent(
+          await executeTool(remoteAgentTool, {
+            action: "status",
+            continuation: sendResult.summary.continuation,
+            history_length: 10,
+          }),
+        ),
+      ) as SuccessEnvelope<"status">;
+
+      if (statusResult.summary.continuation?.task?.status !== "completed") {
+        return false;
+      }
+
+      completedStatus = statusResult;
+      return true;
+    }, 2_000);
+
+    assert.match(completedStatus?.summary.message_text ?? "", new RegExp(expectedReplyText));
+  } finally {
+    await harness.cleanup();
   }
 });
