@@ -158,6 +158,8 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         body: inbound.bodyForAgent,
         timestamp: inbound.timestamp,
       });
+      const shouldEmitGenericOriginRouting =
+        this.options.account.originRoutingPolicy === "legacy-origin-routing";
 
       const ctxPayload = this.options.channelRuntime.reply.finalizeInboundContext({
         Body: body,
@@ -179,8 +181,12 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         Surface: CHANNEL_ID,
         MessageSid: requestContext.userMessage.messageId,
         MessageSidFull: requestContext.userMessage.messageId,
-        OriginatingChannel: CHANNEL_ID,
-        OriginatingTo: inbound.to,
+        ...(shouldEmitGenericOriginRouting
+          ? {
+              OriginatingChannel: CHANNEL_ID,
+              OriginatingTo: inbound.to,
+            }
+          : {}),
         Timestamp: inbound.timestamp,
       });
       ctxPayload.SessionKey = binding.sessionKey;

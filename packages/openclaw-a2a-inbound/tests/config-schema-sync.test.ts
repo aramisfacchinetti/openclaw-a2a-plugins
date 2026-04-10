@@ -42,6 +42,7 @@ test("channel schema keeps the restored phase 1 taskStore contract and text/json
   const accountProperties = asRecord(accountSchema.properties);
   const defaultInputModes = asRecord(accountProperties.defaultInputModes);
   const agentStyle = asRecord(accountProperties.agentStyle);
+  const originRoutingPolicy = asRecord(accountProperties.originRoutingPolicy);
   const taskStore = asRecord(accountProperties.taskStore);
 
   assert.equal("restPath" in accountProperties, false);
@@ -62,6 +63,11 @@ test("channel schema keeps the restored phase 1 taskStore contract and text/json
   ]);
   assert.deepEqual(agentStyle.default, "hybrid");
   assert.deepEqual(agentStyle.enum, ["hybrid", "task-generating"]);
+  assert.deepEqual(originRoutingPolicy.default, "legacy-origin-routing");
+  assert.deepEqual(originRoutingPolicy.enum, [
+    "legacy-origin-routing",
+    "suppress-generic-followup",
+  ]);
   assert.deepEqual(taskStore.default, {
     kind: "memory",
   });
@@ -73,5 +79,9 @@ test("channel ui hints expose restored taskStore fields and remove legacy ones",
   assert.equal("accounts.*.auth.mode" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, false);
   assert.equal("accounts.*.taskStore.kind" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, true);
   assert.equal("accounts.*.agentStyle" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, true);
+  assert.equal(
+    "accounts.*.originRoutingPolicy" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS,
+    true,
+  );
   assert.equal("accounts.*.taskStore.path" in A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS, true);
 });

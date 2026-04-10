@@ -39,6 +39,7 @@ test("parser normalizes paths, defaults, and account labels", () => {
   assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.deepEqual(account.defaultOutputModes, [...DEFAULT_OUTPUT_MODES]);
   assert.equal(account.agentStyle, "hybrid");
+  assert.equal(account.originRoutingPolicy, "legacy-origin-routing");
   assert.deepEqual(account.taskStore, { kind: "memory" });
   assert.equal(isA2AInboundAccountConfigured(account), true);
 });
@@ -59,6 +60,27 @@ test("parser accepts explicit task-generating agentStyle", () => {
   });
 
   assert.equal(parsed.accounts.default?.agentStyle, "task-generating");
+});
+
+test("parser accepts explicit suppress-generic-followup originRoutingPolicy", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          default: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            originRoutingPolicy: "suppress-generic-followup",
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(
+    parsed.accounts.default?.originRoutingPolicy,
+    "suppress-generic-followup",
+  );
 });
 
 test("duplicate enabled route paths are rejected", () => {

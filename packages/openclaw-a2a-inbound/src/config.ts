@@ -28,6 +28,12 @@ export const INBOUND_AGENT_STYLES = [
   "task-generating",
 ] as const;
 export type A2AInboundAgentStyle = (typeof INBOUND_AGENT_STYLES)[number];
+export const A2A_INBOUND_ORIGIN_ROUTING_POLICIES = [
+  "legacy-origin-routing",
+  "suppress-generic-followup",
+] as const;
+export type A2AInboundOriginRoutingPolicy =
+  (typeof A2A_INBOUND_ORIGIN_ROUTING_POLICIES)[number];
 
 export interface A2AInboundSkillConfig {
   id: string;
@@ -56,6 +62,7 @@ export interface A2AInboundAccountConfig {
   defaultInputModes: A2AInboundInputMode[];
   defaultOutputModes: string[];
   agentStyle: A2AInboundAgentStyle;
+  originRoutingPolicy: A2AInboundOriginRoutingPolicy;
   taskStore: A2AInboundTaskStoreConfig;
   skills: A2AInboundSkillConfig[];
 }
@@ -144,6 +151,11 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
             type: "string",
             enum: [...INBOUND_AGENT_STYLES],
             default: "hybrid",
+          },
+          originRoutingPolicy: {
+            type: "string",
+            enum: [...A2A_INBOUND_ORIGIN_ROUTING_POLICIES],
+            default: "legacy-origin-routing",
           },
           taskStore: {
             oneOf: [
@@ -240,6 +252,11 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
   "accounts.*.agentStyle": {
     label: "Agent Style",
     help: 'Choose "hybrid" to stay protocol-faithful or "task-generating" to force new executions onto the durable task path.',
+    advanced: true,
+  },
+  "accounts.*.originRoutingPolicy": {
+    label: "Origin Routing Policy",
+    help: 'Choose "legacy-origin-routing" to emit generic OpenClaw origin metadata, or "suppress-generic-followup" to omit generic follow-up routing fields for the Phase 3 A2A prototype.',
     advanced: true,
   },
   "accounts.*.taskStore.path": {
@@ -351,6 +368,31 @@ function parseAgentStyle(
   if (!INBOUND_AGENT_STYLES.includes(trimmed)) {
     throw new Error(
       `channels.${CHANNEL_ID}.accounts.${accountId}.agentStyle must be one of ${INBOUND_AGENT_STYLES.join(", ")}; received "${value}".`,
+    );
+  }
+
+  return trimmed;
+}
+
+function parseOriginRoutingPolicy(
+  accountId: string,
+  value: unknown,
+): A2AInboundOriginRoutingPolicy {
+  if (typeof value === "undefined") {
+    return "legacy-origin-routing";
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(
+      `channels.${CHANNEL_ID}.accounts.${accountId}.originRoutingPolicy must be one of ${A2A_INBOUND_ORIGIN_ROUTING_POLICIES.join(", ")}.`,
+    );
+  }
+
+  const trimmed = value.trim() as A2AInboundOriginRoutingPolicy;
+
+  if (!A2A_INBOUND_ORIGIN_ROUTING_POLICIES.includes(trimmed)) {
+    throw new Error(
+      `channels.${CHANNEL_ID}.accounts.${accountId}.originRoutingPolicy must be one of ${A2A_INBOUND_ORIGIN_ROUTING_POLICIES.join(", ")}; received "${value}".`,
     );
   }
 
@@ -527,6 +569,10 @@ function parseAccount(
     defaultInputModes: parseDefaultInputModes(accountId, record.defaultInputModes),
     defaultOutputModes: readStringArray(record.defaultOutputModes, DEFAULT_OUTPUT_MODES),
     agentStyle: parseAgentStyle(accountId, record.agentStyle),
+    originRoutingPolicy: parseOriginRoutingPolicy(
+      accountId,
+      record.originRoutingPolicy,
+    ),
     taskStore: parseTaskStore(accountId, record.taskStore),
     skills: parseSkills(record.skills),
   };

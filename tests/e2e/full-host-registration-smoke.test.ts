@@ -325,6 +325,7 @@ function createRootConfig(account: A2AInboundAccountConfig): OpenClawConfig {
             defaultInputModes: [...account.defaultInputModes],
             defaultOutputModes: [...account.defaultOutputModes],
             agentStyle: account.agentStyle,
+            originRoutingPolicy: account.originRoutingPolicy,
             taskStore: account.taskStore,
             skills: account.skills.map((skill) => ({
               id: skill.id,
@@ -731,6 +732,61 @@ test("full-host reproduction locks in the unsupported queued follow-up boundary"
     }, 2_000);
 
     assert.match(completedStatus?.summary.message_text ?? "", new RegExp(expectedReplyText));
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("full-host registration forwards suppressed origin-routing policy into the runtime context", async () => {
+  let capturedCtx: Record<string, unknown> | undefined;
+  const harness = await startFullHostHarness({
+    accountOverrides: {
+      originRoutingPolicy: "suppress-generic-followup",
+      label: "Full Host Suppressed Origin Routing Agent",
+    },
+    script: async ({ params, emit }) => {
+      capturedCtx = params.ctx as Record<string, unknown>;
+      params.replyOptions?.onAgentRunStart?.("run-full-host-origin-routing-suppressed");
+      emit({
+        runId: "run-full-host-origin-routing-suppressed",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Suppressed origin routing through full-host registration." },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-full-host-origin-routing-suppressed",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+  });
+
+  try {
+    const remoteAgentTool = resolveRegisteredTool(
+      harness.registry,
+      "remote_agent",
+      harness.rootConfig,
+    );
+    const sendResult = asSuccess(
+      readStructuredContent(
+        await executeTool(remoteAgentTool, {
+          action: "send",
+          target_alias: TARGET_ALIAS,
+          parts: [{ kind: "text", text: "Verify suppressed origin routing through the host." }],
+        }),
+      ),
+    );
+
+    assert.equal(sendResult.action, "send");
+    assert.equal(capturedCtx?.Provider, "a2a");
+    assert.equal(capturedCtx?.Surface, "a2a");
+    assert.equal("OriginatingChannel" in (capturedCtx ?? {}), false);
+    assert.equal("OriginatingTo" in (capturedCtx ?? {}), false);
+    assert.ok(harness.requestCounts.agentCard >= 1);
+    assert.ok(harness.requestCounts.jsonRpc >= 1);
   } finally {
     await harness.cleanup();
   }

@@ -468,6 +468,7 @@ export function createAccount(
     defaultInputModes: ["text/plain", "application/json"],
     defaultOutputModes: ["text/plain", "application/json"],
     agentStyle: "hybrid",
+    originRoutingPolicy: "legacy-origin-routing",
     taskStore: {
       kind: "json-file",
       path: join(tempDir, "task-store"),

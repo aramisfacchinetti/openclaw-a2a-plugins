@@ -278,6 +278,7 @@ export function createTestAccount(
       "application/json",
     ],
     agentStyle: "hybrid",
+    originRoutingPolicy: "legacy-origin-routing",
     taskStore: {
       kind: "memory",
     },

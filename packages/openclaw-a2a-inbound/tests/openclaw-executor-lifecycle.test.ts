@@ -264,6 +264,58 @@ test("executor emits the current inbound origin-routing context shape", async ()
   assert.equal(capturedCtx?.SessionKey, "session:test");
 });
 
+test("executor suppresses generic origin-routing fields when the account policy opts in", async () => {
+  let capturedCtx: Record<string, unknown> | undefined;
+  const { executor } = createExecutorHarness(
+    async ({ params, emit }) => {
+      capturedCtx = params.ctx as Record<string, unknown>;
+      params.replyOptions?.onAgentRunStart?.("run-origin-routing-suppressed");
+      emit({
+        runId: "run-origin-routing-suppressed",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Origin routing suppression captured." },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-origin-routing-suppressed",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+    {
+      account: {
+        originRoutingPolicy: "suppress-generic-followup",
+      },
+    },
+  );
+  const requestContext = createRequestContext({
+    contextId: "peer-origin-route-suppressed",
+    userMessage: {
+      ...createRequestContext().userMessage,
+      messageId: "message-origin-route-suppressed",
+      parts: [{ kind: "text", text: "Suppress generic origin routing for this turn." }],
+    },
+  });
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  assert.equal(capturedCtx?.From, "a2a:peer-origin-route-suppressed");
+  assert.equal(capturedCtx?.To, "a2a:default");
+  assert.equal(capturedCtx?.ConversationLabel, "peer-origin-route-suppressed");
+  assert.equal(capturedCtx?.Provider, "a2a");
+  assert.equal(capturedCtx?.Surface, "a2a");
+  assert.equal("OriginatingChannel" in (capturedCtx ?? {}), false);
+  assert.equal("OriginatingTo" in (capturedCtx ?? {}), false);
+  assert.equal(capturedCtx?.MessageSid, "message-origin-route-suppressed");
+  assert.equal(capturedCtx?.MessageSidFull, "message-origin-route-suppressed");
+  assert.equal(capturedCtx?.SessionKey, "session:test");
+});
+
 test("data-only requests dispatch with a synthetic agent body and empty command text", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
   const { executor } = createExecutorHarness(async ({ params, emit }) => {
