@@ -63,7 +63,7 @@ test("channel schema keeps the restored phase 1 taskStore contract and text/json
   ]);
   assert.deepEqual(agentStyle.default, "hybrid");
   assert.deepEqual(agentStyle.enum, ["hybrid", "task-generating"]);
-  assert.deepEqual(originRoutingPolicy.default, "legacy-origin-routing");
+  assert.deepEqual(originRoutingPolicy.default, "suppress-generic-followup");
   assert.deepEqual(originRoutingPolicy.enum, [
     "legacy-origin-routing",
     "suppress-generic-followup",

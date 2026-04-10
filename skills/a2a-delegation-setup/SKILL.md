@@ -120,3 +120,5 @@ A2A_OUTBOUND_DELIVERY_UNSUPPORTED: openclaw-a2a-inbound does not implement OpenC
 ```
 
 then the host tried to replay a queued follow-up through inbound channel `a2a`. That is unsupported in this repo. `remote_agent` readiness does not imply channel-level queued follow-up support on `a2a`; continue delegated work only with persisted `summary.continuation` and the `remote_agent` tool.
+
+Inbound A2A now defaults to `originRoutingPolicy: "suppress-generic-followup"` for this reason. If a host is explicitly configured with `legacy-origin-routing`, queued follow-up replay through channel `a2a` remains unsupported and can still hit this boundary.

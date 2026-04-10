@@ -219,26 +219,33 @@ test("task-generating mode emits task-bearing events for streaming replies", asy
   assert.deepEqual(assistantTexts, ["Streamed", " reply"]);
 });
 
-test("executor emits the current inbound origin-routing context shape", async () => {
+test("executor emits legacy inbound origin-routing fields when the account policy opts in", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
-    capturedCtx = params.ctx as Record<string, unknown>;
-    params.replyOptions?.onAgentRunStart?.("run-origin-routing-shape");
-    emit({
-      runId: "run-origin-routing-shape",
-      stream: "lifecycle",
-      data: { phase: "start" },
-    });
-    await params.dispatcherOptions.deliver(
-      { text: "Origin routing context captured." },
-      { kind: "final" },
-    );
-    emit({
-      runId: "run-origin-routing-shape",
-      stream: "lifecycle",
-      data: { phase: "end" },
-    });
-  });
+  const { executor } = createExecutorHarness(
+    async ({ params, emit }) => {
+      capturedCtx = params.ctx as Record<string, unknown>;
+      params.replyOptions?.onAgentRunStart?.("run-origin-routing-shape");
+      emit({
+        runId: "run-origin-routing-shape",
+        stream: "lifecycle",
+        data: { phase: "start" },
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "Origin routing context captured." },
+        { kind: "final" },
+      );
+      emit({
+        runId: "run-origin-routing-shape",
+        stream: "lifecycle",
+        data: { phase: "end" },
+      });
+    },
+    {
+      account: {
+        originRoutingPolicy: "legacy-origin-routing",
+      },
+    },
+  );
   const requestContext = createRequestContext({
     contextId: "peer-origin-route",
     userMessage: {

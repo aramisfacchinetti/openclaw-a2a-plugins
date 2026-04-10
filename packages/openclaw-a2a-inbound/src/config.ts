@@ -155,7 +155,7 @@ export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
           originRoutingPolicy: {
             type: "string",
             enum: [...A2A_INBOUND_ORIGIN_ROUTING_POLICIES],
-            default: "legacy-origin-routing",
+            default: "suppress-generic-followup",
           },
           taskStore: {
             oneOf: [
@@ -256,7 +256,7 @@ export const A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS = {
   },
   "accounts.*.originRoutingPolicy": {
     label: "Origin Routing Policy",
-    help: 'Choose "legacy-origin-routing" to emit generic OpenClaw origin metadata, or "suppress-generic-followup" to omit generic follow-up routing fields for the Phase 3 A2A prototype.',
+    help: 'Default to "suppress-generic-followup" to omit generic follow-up routing fields. Use "legacy-origin-routing" only as a short-lived escape hatch when host behavior still depends on generic OpenClaw origin metadata.',
     advanced: true,
   },
   "accounts.*.taskStore.path": {
@@ -379,7 +379,7 @@ function parseOriginRoutingPolicy(
   value: unknown,
 ): A2AInboundOriginRoutingPolicy {
   if (typeof value === "undefined") {
-    return "legacy-origin-routing";
+    return "suppress-generic-followup";
   }
 
   if (typeof value !== "string") {

@@ -108,6 +108,7 @@ Interpret follow-up capability from `result.summary.continuation`, not from prom
 - Do not poll from conversation continuity.
 - If lifecycle tracking is required, fail fast when the peer returns only `summary.continuation.conversation`.
 - Do not route `summary.continuation` back through channel `a2a`; inbound A2A channel delivery is separate from `remote_agent` continuation.
+- Inbound A2A defaults to `originRoutingPolicy: "suppress-generic-followup"` to reduce accidental host replay through channel `a2a`; treat `legacy-origin-routing` as an escape hatch, not as a supported queued follow-up path.
 - If you see `A2A_OUTBOUND_DELIVERY_UNSUPPORTED`, the host selected the wrong boundary. Return to persisted `summary.continuation` plus `remote_agent`.
 
 ```ts

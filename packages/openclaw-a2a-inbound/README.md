@@ -94,7 +94,9 @@ Unsupported:
 - generic queued follow-up routing that re-enters channel `a2a`
 - treating inbound channel metadata as equivalent to `remote_agent` continuation
 
-The inbound channel records OpenClaw origin metadata for the current host contract, but `OriginatingChannel`, `OriginatingTo`, and channel `capabilities.reply` do not establish generic queued outbound routability for channel `a2a`.
+By default, inbound A2A suppresses generic OpenClaw origin-routing fields so later queued follow-ups do not get classified as generic channel-routable `a2a` replies. `OriginatingChannel`, `OriginatingTo`, and channel `capabilities.reply` do not establish generic queued outbound routability for channel `a2a`.
+
+`originRoutingPolicy` defaults to `suppress-generic-followup`. Set `originRoutingPolicy: "legacy-origin-routing"` only as a short-lived escape hatch if some host behavior still requires generic OpenClaw origin metadata and you accept the queued follow-up boundary described here.
 
 If OpenClaw tries to route a queued follow-up through the inbound channel adapter, the plugin fails deliberately with:
 
@@ -166,6 +168,7 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
           defaultInputModes: ["text/plain", "application/json"],
           defaultOutputModes: ["text/plain", "application/json"],
           agentStyle: "hybrid",
+          originRoutingPolicy: "suppress-generic-followup",
           taskStore: {
             kind: "json-file",
             path: "/var/lib/openclaw/a2a-tasks"

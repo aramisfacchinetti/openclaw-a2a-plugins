@@ -278,7 +278,7 @@ export function createTestAccount(
       "application/json",
     ],
     agentStyle: "hybrid",
-    originRoutingPolicy: "legacy-origin-routing",
+    originRoutingPolicy: "suppress-generic-followup",
     taskStore: {
       kind: "memory",
     },

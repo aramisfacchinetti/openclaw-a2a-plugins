@@ -39,7 +39,7 @@ test("parser normalizes paths, defaults, and account labels", () => {
   assert.deepEqual(account.defaultInputModes, [...DEFAULT_INPUT_MODES]);
   assert.deepEqual(account.defaultOutputModes, [...DEFAULT_OUTPUT_MODES]);
   assert.equal(account.agentStyle, "hybrid");
-  assert.equal(account.originRoutingPolicy, "legacy-origin-routing");
+  assert.equal(account.originRoutingPolicy, "suppress-generic-followup");
   assert.deepEqual(account.taskStore, { kind: "memory" });
   assert.equal(isA2AInboundAccountConfigured(account), true);
 });
