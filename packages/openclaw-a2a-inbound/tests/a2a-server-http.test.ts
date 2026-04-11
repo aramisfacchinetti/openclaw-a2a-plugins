@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentCard, Message, Task } from "@a2a-js/sdk";
@@ -159,6 +159,48 @@ test("served agent card exposes normalized transports, capabilities, and mode me
   } finally {
     await closeHttpServer(routeServer);
     harness.close();
+  }
+});
+
+test("inbound server starts when the json-file task store has an orphaned writer lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-server-stale-lock-"));
+  const lockPath = join(root, ".writer.lock");
+
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      createdAt: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+
+  const harness = await createServerHarness(
+    async () => {},
+    {
+      account: {
+        taskStore: {
+          kind: "json-file",
+          path: root,
+        },
+      },
+    },
+  );
+  const routeServer = createServer((req, res) => {
+    void harness.handle(req, res);
+  });
+
+  try {
+    const baseUrl = await listen(routeServer);
+    const response = await fetch(`${baseUrl}${harness.account.agentCardPath}`);
+    const agentCard = (await response.json()) as AgentCard;
+
+    assert.equal(response.status, 200);
+    assert.equal(agentCard.name, "Default");
+  } finally {
+    await closeHttpServer(routeServer);
+    harness.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
