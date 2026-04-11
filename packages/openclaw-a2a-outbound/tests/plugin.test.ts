@@ -11,10 +11,19 @@ type RegisteredTool = {
   options?: { optional?: boolean };
 };
 
+type CapturedLogs = {
+  debug: string[];
+  info: string[];
+  warn: string[];
+  error: string[];
+};
+
 type ToolResultLike = {
   structuredContent?: unknown;
   content?: Array<{ text?: unknown }>;
 };
+
+type RegisterTool = OpenClawPluginApi["registerTool"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -36,24 +45,43 @@ function toFailure(result: A2AToolResult): FailureEnvelope {
 function createApi(
   pluginConfig: Record<string, unknown>,
   onRegisterTool: RegisterToolCapture,
+  registrationMode: OpenClawPluginApi["registrationMode"] = "full",
 ): OpenClawPluginApi {
-  const api: OpenClawPluginApi = {
+  const logs: CapturedLogs = {
+    debug: [],
+    info: [],
+    warn: [],
+    error: [],
+  };
+  const api = {
     id: "openclaw-a2a-outbound",
     name: "openclaw-a2a-outbound",
     version: "1.0.0",
     source: "test",
+    registrationMode,
     config: {} as OpenClawPluginApi["config"],
     pluginConfig,
     runtime: {
       logging: {},
     } as OpenClawPluginApi["runtime"],
     logger: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
+      debug(message: string) {
+        logs.debug.push(message);
+      },
+      info(message: string) {
+        logs.info.push(message);
+      },
+      warn(message: string) {
+        logs.warn.push(message);
+      },
+      error(message: string) {
+        logs.error.push(message);
+      },
     },
-    registerTool(tool, options) {
+    registerTool(
+      tool: Parameters<RegisterTool>[0],
+      options?: Parameters<RegisterTool>[1],
+    ) {
       if (typeof tool === "function") {
         throw new TypeError("unexpected tool factory registration in test");
       }
@@ -68,13 +96,21 @@ function createApi(
     registerService() {},
     registerProvider() {},
     registerCommand() {},
-    resolvePath(input) {
+    resolvePath(input: string) {
       return input;
     },
     on() {},
-  };
+  } as unknown as OpenClawPluginApi;
+
+  Object.assign(api, {
+    __logs: logs,
+  });
 
   return api;
+}
+
+function getCapturedLogs(api: OpenClawPluginApi): CapturedLogs {
+  return (api as OpenClawPluginApi & { __logs: CapturedLogs }).__logs;
 }
 
 function readStructuredContent<T = A2AToolResult>(result: unknown): T {
@@ -128,6 +164,59 @@ test("plugin registration with enabled=false registers no tools", () => {
   );
 
   assert.equal(tools.length, 0);
+});
+
+test("plugin defers registration during non-full passes before enabled checks", () => {
+  const tools: RegisteredTool[] = [];
+  const api = createApi(
+    { enabled: false },
+    (descriptor, options) => {
+      tools.push({ descriptor, options });
+    },
+    "setup-only",
+  );
+
+  plugin.register(api);
+
+  const logs = getCapturedLogs(api);
+
+  assert.equal(tools.length, 0);
+  assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.disabled")), false);
+  assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.loaded")), false);
+  assert.equal(
+    logs.debug.some(
+      (entry) =>
+        entry.includes("a2a.plugin.registration.deferred") &&
+        entry.includes('"registrationMode":"setup-only"'),
+    ),
+    true,
+  );
+});
+
+test("plugin does not register tools during non-full passes even when enabled", () => {
+  const tools: RegisteredTool[] = [];
+  const api = createApi(
+    { enabled: true },
+    (descriptor, options) => {
+      tools.push({ descriptor, options });
+    },
+    "setup-runtime",
+  );
+
+  plugin.register(api);
+
+  const logs = getCapturedLogs(api);
+
+  assert.equal(tools.length, 0);
+  assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.loaded")), false);
+  assert.equal(
+    logs.debug.some(
+      (entry) =>
+        entry.includes("a2a.plugin.registration.deferred") &&
+        entry.includes('"registrationMode":"setup-runtime"'),
+    ),
+    true,
+  );
 });
 
 test("plugin registers one optional remote_agent tool", () => {

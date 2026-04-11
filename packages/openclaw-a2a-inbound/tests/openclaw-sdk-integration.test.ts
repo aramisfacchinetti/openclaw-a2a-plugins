@@ -2,11 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type {
   ChannelPlugin,
-  GatewayRequestHandler,
   OpenClawPluginApi,
 } from "openclaw/plugin-sdk";
-import { createLoggerBackedRuntime } from "openclaw/plugin-sdk";
+import { createLoggerBackedRuntime } from "openclaw/plugin-sdk/runtime";
 import plugin from "../dist/index.js";
+
+type GatewayRequestHandler = Parameters<OpenClawPluginApi["registerGatewayMethod"]>[1];
+type RegisterHttpRouteParams = Parameters<OpenClawPluginApi["registerHttpRoute"]>[0];
+type RegisterChannelParams = Parameters<OpenClawPluginApi["registerChannel"]>[0];
+type RegisterGatewayMethod = OpenClawPluginApi["registerGatewayMethod"];
 
 test("integration smoke: plugin loads with official OpenClawPluginApi shape", () => {
   const channels: ChannelPlugin[] = [];
@@ -19,12 +23,13 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
     },
   });
 
-  const api: OpenClawPluginApi = {
+  const api = {
     id: "openclaw-a2a-inbound",
     name: "openclaw-a2a-inbound",
     version: "1.0.0",
     description: "test",
     source: "tests",
+    registrationMode: "full",
     config: {
       channels: {
         a2a: {
@@ -50,26 +55,29 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
     },
     registerTool() {},
     registerHook() {},
-    registerHttpRoute(params) {
+    registerHttpRoute(params: RegisterHttpRouteParams) {
       routes.push({ path: params.path, auth: params.auth });
     },
-    registerChannel(registration) {
+    registerChannel(registration: RegisterChannelParams) {
       channels.push(
         "plugin" in registration ? registration.plugin : registration,
       );
     },
-    registerGatewayMethod(method, handler) {
+    registerGatewayMethod(
+      method: Parameters<RegisterGatewayMethod>[0],
+      handler: Parameters<RegisterGatewayMethod>[1],
+    ) {
       gatewayMethods.set(method, handler);
     },
     registerCli() {},
     registerService() {},
     registerProvider() {},
     registerCommand() {},
-    resolvePath(input) {
+    resolvePath(input: string) {
       return input;
     },
     on() {},
-  };
+  } as unknown as OpenClawPluginApi;
 
   plugin.register(api);
 

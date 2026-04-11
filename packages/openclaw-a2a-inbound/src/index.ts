@@ -30,9 +30,19 @@ function registerPlugin(api: OpenClawPluginApi): void {
     channelConfig,
   );
 
+  if (api.registrationMode !== "full") {
+    log(api.logger, "debug", "a2a.inbound.registration.deferred", {
+      pluginId: PLUGIN_ID,
+      channelId: CHANNEL_ID,
+      registrationMode: api.registrationMode,
+    });
+    return;
+  }
+
   log(api.logger, "info", "a2a.inbound.plugin.loaded", {
     pluginId: PLUGIN_ID,
     channelId: CHANNEL_ID,
+    registrationMode: api.registrationMode,
     accounts: Object.keys(channelConfig.accounts),
     registeredRouteCount,
   });

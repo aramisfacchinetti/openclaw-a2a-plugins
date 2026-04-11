@@ -1,9 +1,9 @@
 import {
-  jsonResult,
   type AnyAgentTool,
   type OpenClawPluginApi,
   type OpenClawPluginConfigSchema,
 } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk/core";
 import { PLUGIN_ID } from "./constants.js";
 import {
   A2A_OUTBOUND_OPENCLAW_CONFIG_SCHEMA,
@@ -67,8 +67,19 @@ function registerTools(api: OpenClawPluginApi): void {
     api.pluginConfig ?? {},
   ) as A2AOutboundPluginConfig;
 
+  if (api.registrationMode !== "full") {
+    log(api.logger, "debug", "a2a.plugin.registration.deferred", {
+      pluginId: PLUGIN_ID,
+      registrationMode: api.registrationMode,
+    });
+    return;
+  }
+
   if (config.enabled !== true) {
-    log(api.logger, "info", "a2a.plugin.disabled", { pluginId: PLUGIN_ID });
+    log(api.logger, "info", "a2a.plugin.disabled", {
+      pluginId: PLUGIN_ID,
+      registrationMode: api.registrationMode,
+    });
     return;
   }
 
@@ -100,6 +111,7 @@ function registerTools(api: OpenClawPluginApi): void {
 
   log(api.logger, "info", "a2a.plugin.loaded", {
     pluginId: PLUGIN_ID,
+    registrationMode: api.registrationMode,
     tools: [remoteAgentTool.name],
   });
 }

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import type {
   ChannelPlugin,
   OpenClawPluginApi,
-  GatewayRequestHandler,
 } from "openclaw/plugin-sdk";
+import { buildA2AInboundChannel } from "../dist/channel.js";
 import { A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE } from "../dist/constants.js";
 import plugin from "../dist/index.js";
 
@@ -14,54 +14,88 @@ type HttpRouteRegistration = {
   match?: "exact" | "prefix";
 };
 
-function createApi(config: Record<string, unknown>): OpenClawPluginApi {
+type CapturedLogs = {
+  debug: string[];
+  info: string[];
+  warn: string[];
+  error: string[];
+};
+
+type GatewayRequestHandler = Parameters<OpenClawPluginApi["registerGatewayMethod"]>[1];
+type RegisterHttpRouteParams = Parameters<OpenClawPluginApi["registerHttpRoute"]>[0];
+type RegisterChannelParams = Parameters<OpenClawPluginApi["registerChannel"]>[0];
+type RegisterGatewayMethod = OpenClawPluginApi["registerGatewayMethod"];
+
+function createApi(
+  config: Record<string, unknown>,
+  registrationMode: OpenClawPluginApi["registrationMode"] = "full",
+): OpenClawPluginApi {
   const routes: HttpRouteRegistration[] = [];
   const channels: ChannelPlugin[] = [];
   const gatewayMethods = new Map<string, GatewayRequestHandler>();
+  const logs: CapturedLogs = {
+    debug: [],
+    info: [],
+    warn: [],
+    error: [],
+  };
 
-  const api: OpenClawPluginApi = {
+  const api = {
     id: "openclaw-a2a-inbound",
     name: "openclaw-a2a-inbound",
     version: "1.0.0",
     source: "test",
+    registrationMode,
     config: config as OpenClawPluginApi["config"],
     pluginConfig: {},
     runtime: {
       logging: {},
     } as OpenClawPluginApi["runtime"],
     logger: {
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
+      debug(message: string) {
+        logs.debug.push(message);
+      },
+      info(message: string) {
+        logs.info.push(message);
+      },
+      warn(message: string) {
+        logs.warn.push(message);
+      },
+      error(message: string) {
+        logs.error.push(message);
+      },
     },
     registerTool() {},
     registerHook() {},
-    registerHttpRoute(params) {
+    registerHttpRoute(params: RegisterHttpRouteParams) {
       routes.push({ path: params.path, auth: params.auth, match: params.match });
     },
-    registerChannel(registration) {
+    registerChannel(registration: RegisterChannelParams) {
       channels.push(
         "plugin" in registration ? registration.plugin : registration,
       );
     },
-    registerGatewayMethod(method, handler) {
+    registerGatewayMethod(
+      method: Parameters<RegisterGatewayMethod>[0],
+      handler: Parameters<RegisterGatewayMethod>[1],
+    ) {
       gatewayMethods.set(method, handler);
     },
     registerCli() {},
     registerService() {},
     registerProvider() {},
     registerCommand() {},
-    resolvePath(input) {
+    resolvePath(input: string) {
       return input;
     },
     on() {},
-  };
+  } as unknown as OpenClawPluginApi;
 
   Object.assign(api, {
     __routes: routes,
     __channels: channels,
     __gatewayMethods: gatewayMethods,
+    __logs: logs,
   });
 
   return api;
@@ -71,6 +105,7 @@ function getInternalCollections(api: OpenClawPluginApi): {
   routes: HttpRouteRegistration[];
   channels: ChannelPlugin[];
   gatewayMethods: Map<string, GatewayRequestHandler>;
+  logs: CapturedLogs;
 } {
   return {
     routes: (api as OpenClawPluginApi & { __routes: HttpRouteRegistration[] })
@@ -82,6 +117,7 @@ function getInternalCollections(api: OpenClawPluginApi): {
         __gatewayMethods: Map<string, GatewayRequestHandler>;
       }
     ).__gatewayMethods,
+    logs: (api as OpenClawPluginApi & { __logs: CapturedLogs }).__logs,
   };
 }
 
@@ -136,6 +172,38 @@ test("plugin tolerates missing channel accounts and only registers the channel",
   assert.equal(gatewayMethods.size, 0);
 });
 
+test("plugin defers loaded logging during non-full registration", () => {
+  const api = createApi(
+    {
+      channels: {
+        a2a: {
+          accounts: {
+            default: {
+              enabled: true,
+              publicBaseUrl: "https://agents.example.com",
+            },
+          },
+        },
+      },
+    },
+    "setup-runtime",
+  );
+
+  plugin.register(api);
+
+  const { logs } = getInternalCollections(api);
+
+  assert.equal(logs.info.some((entry) => entry.includes("a2a.inbound.plugin.loaded")), false);
+  assert.equal(
+    logs.debug.some(
+      (entry) =>
+        entry.includes("a2a.inbound.registration.deferred") &&
+        entry.includes('"registrationMode":"setup-runtime"'),
+    ),
+    true,
+  );
+});
+
 test("inbound outbound adapter fails with the documented boundary message", async () => {
   const api = createApi({});
 
@@ -143,9 +211,16 @@ test("inbound outbound adapter fails with the documented boundary message", asyn
 
   const { channels } = getInternalCollections(api);
   const channel = channels[0];
+  assert.ok(channel);
+  assert.ok(channel.outbound);
+  const sendText = channel.outbound.sendText as (params: {
+    accountId: string;
+    to: string;
+    text: string;
+  }) => Promise<unknown>;
 
   await assert.rejects(
-    channel?.outbound?.sendText({
+    sendText({
       accountId: "default",
       to: "a2a:peer",
       text: "follow up",
@@ -154,4 +229,47 @@ test("inbound outbound adapter fails with the documented boundary message", asyn
       message: A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE,
     },
   );
+});
+
+test("channel declares protocol queued replies and delegates them to the host", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const channel = buildA2AInboundChannel({
+    async deliverQueuedReply(params: Record<string, unknown>) {
+      calls.push(params);
+      return { ok: true, messageId: "queued-1" };
+    },
+  } as never);
+  const queuedReply = (
+    channel as unknown as {
+      queuedReply?: {
+        mode?: string;
+        deliverQueuedReply?: (ctx: Record<string, unknown>) => Promise<{
+          ok: boolean;
+          messageId?: string;
+          error?: string;
+        }>;
+      };
+    }
+  ).queuedReply;
+
+  assert.equal(queuedReply?.mode, "protocol");
+
+  const result = await queuedReply?.deliverQueuedReply?.({
+    accountId: "default",
+    to: "a2a:default",
+    threadId: "task-123",
+    sessionKey: "session:test",
+    payload: { text: "Resume the task." },
+  });
+
+  assert.deepEqual(result, { ok: true, messageId: "queued-1" });
+  assert.deepEqual(calls, [
+    {
+      accountId: "default",
+      to: "a2a:default",
+      threadId: "task-123",
+      sessionKey: "session:test",
+      payload: { text: "Resume the task." },
+    },
+  ]);
 });
