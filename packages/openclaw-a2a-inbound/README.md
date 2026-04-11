@@ -91,16 +91,22 @@ Supported:
 Unsupported:
 
 - generic OpenClaw-initiated outbound sends through channel `a2a`
-- generic queued follow-up routing that re-enters channel `a2a`
 - treating inbound channel metadata as equivalent to `remote_agent` continuation
 
 The inbound channel reports `capabilities.reply = false` because this repo does not support generic OpenClaw-initiated outbound reply delivery over channel `a2a`. That reported capability does not disable the plugin-owned in-band reply path used during the active inbound request lifecycle.
+
+Queued follow-up delivery now uses the OpenClaw queued-reply protocol boundary instead of the generic outbound adapter:
+
+- channel `a2a` declares `queuedReply.mode = "protocol"`
+- inbound execution stores the local A2A task id in `MessageThreadId`
+- later queued follow-ups append protocol artifacts onto that local task
+- peers observe those follow-ups through normal A2A task reads or resubscribe semantics
 
 By default, inbound A2A suppresses generic OpenClaw origin-routing fields so later queued follow-ups do not get classified as generic channel-routable `a2a` replies. `OriginatingChannel` and `OriginatingTo` do not establish generic queued outbound routability for channel `a2a`.
 
 `originRoutingPolicy` defaults to `suppress-generic-followup`. Set `originRoutingPolicy: "legacy-origin-routing"` only as a short-lived escape hatch if some host behavior still requires generic OpenClaw origin metadata and you accept the queued follow-up boundary described here.
 
-If OpenClaw tries to route a queued follow-up through the inbound channel adapter, the plugin fails deliberately with:
+If OpenClaw tries to route a generic outbound send through the inbound channel adapter, the plugin fails deliberately with:
 
 ```text
 A2A_OUTBOUND_DELIVERY_UNSUPPORTED: openclaw-a2a-inbound does not implement OpenClaw-initiated outbound delivery. Use openclaw-a2a-outbound for delegated outbound A2A calls.
@@ -121,7 +127,7 @@ If `taskStore` is omitted, it defaults to:
 { "kind": "memory" }
 ```
 
-`json-file.path` must be a non-empty absolute path.
+`json-file.path` must be a non-empty absolute path. Inbound config rejects duplicate `json-file` task-store paths across accounts, including trivial normalized aliases such as trailing slashes or `..` segments.
 
 The durable json-file store keeps one schema v2 record per task containing:
 

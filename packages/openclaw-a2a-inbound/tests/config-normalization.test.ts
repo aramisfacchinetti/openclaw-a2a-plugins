@@ -254,6 +254,98 @@ test("taskStore accepts memory and absolute json-file paths", () => {
   });
 });
 
+test("taskStore normalizes json-file paths before storing them", () => {
+  const parsed = parseA2AInboundChannelConfig({
+    channels: {
+      a2a: {
+        accounts: {
+          durable: {
+            enabled: true,
+            publicBaseUrl: "https://agents.example.com",
+            taskStore: {
+              kind: "json-file",
+              path: "/tmp/openclaw-a2a-tasks/../openclaw-a2a-tasks/",
+            },
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.accounts.durable?.taskStore, {
+    kind: "json-file",
+    path: "/tmp/openclaw-a2a-tasks",
+  });
+});
+
+test("duplicate json-file taskStore paths are rejected across accounts", () => {
+  assert.throws(
+    () =>
+      parseA2AInboundChannelConfig({
+        channels: {
+          a2a: {
+            accounts: {
+              primary: {
+                enabled: true,
+                publicBaseUrl: "https://agents.example.com",
+                agentCardPath: "/primary/agent-card.json",
+                jsonRpcPath: "/primary/jsonrpc",
+                taskStore: {
+                  kind: "json-file",
+                  path: "/tmp/openclaw-a2a-tasks",
+                },
+              },
+              secondary: {
+                enabled: true,
+                publicBaseUrl: "https://agents.example.com",
+                agentCardPath: "/secondary/agent-card.json",
+                jsonRpcPath: "/secondary/jsonrpc",
+                taskStore: {
+                  kind: "json-file",
+                  path: "/tmp/openclaw-a2a-tasks/",
+                },
+              },
+            },
+          },
+        },
+      }),
+    /taskStore\.path reuses json-file task store path/,
+  );
+});
+
+test("duplicate json-file taskStore paths are rejected even when one account is disabled", () => {
+  assert.throws(
+    () =>
+      parseA2AInboundChannelConfig({
+        channels: {
+          a2a: {
+            accounts: {
+              primary: {
+                enabled: false,
+                publicBaseUrl: "https://agents.example.com",
+                taskStore: {
+                  kind: "json-file",
+                  path: "/tmp/openclaw-a2a-tasks",
+                },
+              },
+              secondary: {
+                enabled: true,
+                publicBaseUrl: "https://agents.example.com",
+                agentCardPath: "/secondary/agent-card.json",
+                jsonRpcPath: "/secondary/jsonrpc",
+                taskStore: {
+                  kind: "json-file",
+                  path: "/tmp/openclaw-a2a-tasks",
+                },
+              },
+            },
+          },
+        },
+      }),
+    /taskStore\.path reuses json-file task store path/,
+  );
+});
+
 for (const invalidPath of ["", "   ", "relative/path"]) {
   test(`taskStore rejects invalid json-file.path ${JSON.stringify(invalidPath)}`, () => {
     assert.throws(

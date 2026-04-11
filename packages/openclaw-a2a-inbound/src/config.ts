@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import type {
   ChannelConfigSchema,
   OpenClawPluginConfigSchema,
@@ -508,7 +508,7 @@ function parseTaskStore(
 
     return {
       kind: "json-file",
-      path,
+      path: resolve(path),
     };
   }
 
@@ -611,6 +611,28 @@ function validateEnabledRoutePaths(
   }
 }
 
+function validateUniqueJsonFileTaskStorePaths(
+  accounts: readonly A2AInboundAccountConfig[],
+): void {
+  const ownersByPath = new Map<string, string>();
+
+  for (const account of accounts) {
+    if (account.taskStore.kind !== "json-file") {
+      continue;
+    }
+
+    const owner = ownersByPath.get(account.taskStore.path);
+
+    if (owner) {
+      throw new Error(
+        `channels.${CHANNEL_ID}.accounts.${account.accountId}.taskStore.path reuses json-file task store path "${account.taskStore.path}" already assigned to account "${owner}".`,
+      );
+    }
+
+    ownersByPath.set(account.taskStore.path, account.accountId);
+  }
+}
+
 export function parseA2AInboundChannelConfig(
   rootConfig: unknown,
 ): A2AInboundChannelConfig {
@@ -625,6 +647,7 @@ export function parseA2AInboundChannelConfig(
   ) as Record<string, A2AInboundAccountConfig>;
 
   validateEnabledRoutePaths(Object.values(accounts));
+  validateUniqueJsonFileTaskStorePaths(Object.values(accounts));
 
   return {
     accounts,
