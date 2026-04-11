@@ -324,7 +324,6 @@ export async function acquireTaskStoreWriteLock(params: {
   lockPath: string;
   timeoutMs?: number;
   staleMs?: number;
-  maxHoldMs?: number;
 }): Promise<TaskStoreWriteLock> {
   registerCleanupHandlers();
 
