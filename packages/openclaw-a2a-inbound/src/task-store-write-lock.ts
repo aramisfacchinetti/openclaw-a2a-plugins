@@ -227,7 +227,6 @@ async function releaseHeldLock(
     return true;
   }
 
-  HELD_LOCKS.delete(normalizedLockPath);
   held.releasePromise = (async () => {
     try {
       await held.handle.close();
@@ -246,6 +245,7 @@ async function releaseHeldLock(
     await held.releasePromise;
     return true;
   } finally {
+    HELD_LOCKS.delete(normalizedLockPath);
     held.releasePromise = undefined;
   }
 }
@@ -346,6 +346,11 @@ export async function acquireTaskStoreWriteLock(params: {
   const held = HELD_LOCKS.get(normalizedLockPath);
 
   if (held) {
+    if (held.releasePromise) {
+      await held.releasePromise.catch(() => undefined);
+      return acquireTaskStoreWriteLock(params);
+    }
+
     held.count += 1;
     return {
       release: async () => {

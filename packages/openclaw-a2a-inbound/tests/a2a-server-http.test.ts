@@ -15,7 +15,7 @@ import {
 } from "./runtime-harness.js";
 import { isMessage, isTask } from "./test-helpers.js";
 
-function createServerHarness(
+async function createServerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   options: {
     account?: Parameters<typeof createTestAccount>[0];
@@ -26,7 +26,7 @@ function createServerHarness(
   const { pluginRuntime } = options.runtime
     ? createPluginRuntimeHarness(script, options.runtime)
     : createPluginRuntimeHarness(script);
-  const server = createA2AInboundServer({
+  const server = await createA2AInboundServer({
     accountId: "default",
     account,
     cfg: {},
@@ -113,7 +113,7 @@ function parseSseJsonRpcEvents(body: string): Array<{
 }
 
 test("served agent card exposes normalized transports, capabilities, and mode metadata", async () => {
-  const harness = createServerHarness(async () => {});
+  const harness = await createServerHarness(async () => {});
   const routeServer = createServer((req, res) => {
     void harness.handle(req, res);
   });
@@ -163,7 +163,7 @@ test("served agent card exposes normalized transports, capabilities, and mode me
 });
 
 test("HTTP JSON-RPC message/send returns a direct Message for terminal replies", async () => {
-  const harness = createServerHarness(async ({ params, emit }) => {
+  const harness = await createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-http-direct");
     emit({
       runId: "run-http-direct",
@@ -213,7 +213,7 @@ test("HTTP JSON-RPC message/send returns a direct Message for terminal replies",
 });
 
 test("raw JSON-RPC message/stream returns an SDK SSE stream instead of methodNotFound", async () => {
-  const harness = createServerHarness(async ({ params, emit }) => {
+  const harness = await createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-http-stream");
     emit({
       runId: "run-http-stream",
@@ -265,7 +265,7 @@ test("raw JSON-RPC message/stream returns an SDK SSE stream instead of methodNot
 
 test("raw JSON-RPC tasks/resubscribe returns an SDK SSE stream instead of methodNotFound", async () => {
   let releaseRun: (() => void) | undefined;
-  const harness = createServerHarness(async ({ params, emit }) => {
+  const harness = await createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-http-resubscribe");
     emit({
       runId: "run-http-resubscribe",
@@ -365,7 +365,7 @@ test("raw JSON-RPC tasks/resubscribe returns an SDK SSE stream instead of method
 
 test("raw JSON-RPC still rejects removed push-notification methods at the boundary", async () => {
   let executed = false;
-  const harness = createServerHarness(async () => {
+  const harness = await createServerHarness(async () => {
     executed = true;
   });
   const routeServer = createServer((req, res) => {
@@ -415,7 +415,7 @@ test("raw JSON-RPC still rejects removed push-notification methods at the bounda
 
 test("HTTP JSON-RPC rejects inbound file parts with invalidParams before execution", async () => {
   let executed = false;
-  const harness = createServerHarness(async () => {
+  const harness = await createServerHarness(async () => {
     executed = true;
   });
   const routeServer = createServer((req, res) => {
@@ -457,7 +457,7 @@ test("HTTP JSON-RPC rejects inbound file parts with invalidParams before executi
 });
 
 test("former /a2a/files paths fall through to the server 404 route", async () => {
-  const harness = createServerHarness(async () => {});
+  const harness = await createServerHarness(async () => {});
   const routeServer = createServer((req, res) => {
     void harness.handle(req, res);
   });
@@ -484,7 +484,7 @@ test("former /a2a/files paths fall through to the server 404 route", async () =>
 });
 
 test("handle reports matched JSON-RPC requests as handled to an outer fallback server", async () => {
-  const harness = createServerHarness(async ({ params, emit }) => {
+  const harness = await createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-http-fallback");
     emit({
       runId: "run-http-fallback",
@@ -534,7 +534,7 @@ test("handle reports matched JSON-RPC requests as handled to an outer fallback s
 });
 
 test("restarting the server loses prior memory-backed task state", async () => {
-  const initialHarness = createServerHarness(async ({ params, emit }) => {
+  const initialHarness = await createServerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-restart-loss");
     emit({
       runId: "run-restart-loss",
@@ -597,7 +597,7 @@ test("restarting the server loses prior memory-backed task state", async () => {
     assert.fail("expected task id");
   }
 
-  const restartedHarness = createServerHarness(async () => {});
+  const restartedHarness = await createServerHarness(async () => {});
   const restartedRouteServer = createServer((req, res) => {
     void restartedHarness.handle(req, res);
   });
@@ -627,7 +627,7 @@ test("restarting the server loses prior memory-backed task state", async () => {
 test("restarting the server with json-file task storage preserves task state and closes orphaned resubscribe streams", async () => {
   const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-http-"));
   let taskId: string | undefined;
-  const initialHarness = createServerHarness(
+  const initialHarness = await createServerHarness(
     async ({ params, emit }) => {
       params.replyOptions?.onAgentRunStart?.("run-restart-json");
       emit({
@@ -695,7 +695,7 @@ test("restarting the server with json-file task storage preserves task state and
     assert.fail("expected task id");
   }
 
-  const restartedHarness = createServerHarness(
+  const restartedHarness = await createServerHarness(
     async () => {},
     {
       account: {

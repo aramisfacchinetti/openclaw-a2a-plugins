@@ -168,7 +168,7 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   });
 
   let inboundServer:
-    | ReturnType<typeof createA2AInboundServer>
+    | Awaited<ReturnType<typeof createA2AInboundServer>>
     | undefined;
   const routeServer = createServer((req, res) => {
     if (!inboundServer) {
@@ -184,7 +184,7 @@ test("integration: send resumes the same inbound task via task_handle", async (t
   const account = createTestAccount({
     publicBaseUrl: baseUrl,
   });
-  inboundServer = createA2AInboundServer({
+  inboundServer = await createA2AInboundServer({
     accountId: "default",
     account,
     cfg: {},

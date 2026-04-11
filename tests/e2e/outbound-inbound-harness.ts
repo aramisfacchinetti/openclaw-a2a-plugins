@@ -588,7 +588,7 @@ async function startScenario(params: {
   );
   const inboundModule = await loadInboundServerModule();
 
-  inboundServer = inboundModule.createA2AInboundServer({
+  inboundServer = await inboundModule.createA2AInboundServer({
     accountId: account.accountId,
     account,
     cfg: {},
@@ -954,7 +954,7 @@ export async function durableWatchScenario(
     script: RuntimeScript,
   ): Promise<StartedInboundRuntime> => {
     const runtimeHarness = createMinimalPluginRuntime(script, tempDir);
-    const server = inboundModule.createA2AInboundServer({
+    const server = await inboundModule.createA2AInboundServer({
       accountId: account.accountId,
       account,
       cfg: {},
@@ -1079,7 +1079,7 @@ export async function taskRequirementFailureScenario(): Promise<TaskRequirementF
   );
   const inboundModule = await loadInboundServerModule();
 
-  let inboundServer = inboundModule.createA2AInboundServer({
+  let inboundServer = await inboundModule.createA2AInboundServer({
     accountId: account.accountId,
     account,
     cfg: {},
@@ -1163,7 +1163,7 @@ export async function taskRequirementFailureScenario(): Promise<TaskRequirementF
   const baseUrl = await listen(proxyServer);
   account.publicBaseUrl = baseUrl;
   inboundServer.close();
-  inboundServer = inboundModule.createA2AInboundServer({
+  inboundServer = await inboundModule.createA2AInboundServer({
     accountId: account.accountId,
     account,
     cfg: {},

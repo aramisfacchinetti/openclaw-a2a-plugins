@@ -26,18 +26,22 @@ import {
   isTask,
 } from "./test-helpers.js";
 
-function createExecutorHarness(
+async function createExecutorHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   options?: Parameters<typeof createPluginRuntimeHarness>[1] & {
     account?: Parameters<typeof createTestAccount>[0];
   },
-) {
+): Promise<{
+  liveExecutions: A2ALiveExecutionRegistry;
+  taskRuntime: Awaited<ReturnType<typeof createTaskStore>>;
+  executor: ReturnType<typeof createOpenClawA2AExecutor>;
+}> {
   const { account: accountOverrides, ...runtimeOptions } = options ?? {};
   const { pluginRuntime } = options
     ? createPluginRuntimeHarness(script, runtimeOptions)
     : createPluginRuntimeHarness(script);
   const liveExecutions = new A2ALiveExecutionRegistry();
-  const taskRuntime = createTaskStore();
+  const taskRuntime = await createTaskStore();
 
   return {
     liveExecutions,
@@ -55,7 +59,7 @@ function createExecutorHarness(
 }
 
 test("direct terminal run publishes one A2A message", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct");
     emit({
       runId: "run-direct",
@@ -92,7 +96,7 @@ test("direct terminal run publishes one A2A message", async () => {
 });
 
 test("block emission alone does not force task mode for a terminal reply", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-block-only");
     emit({
       runId: "run-block-only",
@@ -124,7 +128,7 @@ test("block emission alone does not force task mode for a terminal reply", async
 });
 
 test("task-generating mode publishes a Task for a simple blocking reply", async () => {
-  const { executor } = createExecutorHarness(
+  const { executor } = await createExecutorHarness(
     async ({ params, emit }) => {
       params.replyOptions?.onAgentRunStart?.("run-task-generating-blocking");
       emit({
@@ -167,7 +171,7 @@ test("task-generating mode publishes a Task for a simple blocking reply", async 
 });
 
 test("task-generating mode emits task-bearing events for streaming replies", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(
+  const { executor, liveExecutions } = await createExecutorHarness(
     async ({ params, emit }) => {
       params.replyOptions?.onAgentRunStart?.("run-task-generating-stream");
       emit({
@@ -221,7 +225,7 @@ test("task-generating mode emits task-bearing events for streaming replies", asy
 
 test("executor emits legacy inbound origin-routing fields when the account policy opts in", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
-  const { executor } = createExecutorHarness(
+  const { executor } = await createExecutorHarness(
     async ({ params, emit }) => {
       capturedCtx = params.ctx as Record<string, unknown>;
       params.replyOptions?.onAgentRunStart?.("run-origin-routing-shape");
@@ -266,6 +270,7 @@ test("executor emits legacy inbound origin-routing fields when the account polic
   assert.equal(capturedCtx?.Surface, "a2a");
   assert.equal(capturedCtx?.OriginatingChannel, "a2a");
   assert.equal(capturedCtx?.OriginatingTo, "a2a:default");
+  assert.equal(capturedCtx?.MessageThreadId, requestContext.taskId);
   assert.equal(capturedCtx?.MessageSid, "message-origin-route");
   assert.equal(capturedCtx?.MessageSidFull, "message-origin-route");
   assert.equal(capturedCtx?.SessionKey, "session:test");
@@ -273,7 +278,7 @@ test("executor emits legacy inbound origin-routing fields when the account polic
 
 test("executor suppresses generic origin-routing fields when the account policy opts in", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
-  const { executor } = createExecutorHarness(
+  const { executor } = await createExecutorHarness(
     async ({ params, emit }) => {
       capturedCtx = params.ctx as Record<string, unknown>;
       params.replyOptions?.onAgentRunStart?.("run-origin-routing-suppressed");
@@ -318,6 +323,7 @@ test("executor suppresses generic origin-routing fields when the account policy 
   assert.equal(capturedCtx?.Surface, "a2a");
   assert.equal("OriginatingChannel" in (capturedCtx ?? {}), false);
   assert.equal("OriginatingTo" in (capturedCtx ?? {}), false);
+  assert.equal(capturedCtx?.MessageThreadId, requestContext.taskId);
   assert.equal(capturedCtx?.MessageSid, "message-origin-route-suppressed");
   assert.equal(capturedCtx?.MessageSidFull, "message-origin-route-suppressed");
   assert.equal(capturedCtx?.SessionKey, "session:test");
@@ -325,7 +331,7 @@ test("executor suppresses generic origin-routing fields when the account policy 
 
 test("data-only requests dispatch with a synthetic agent body and empty command text", async () => {
   let capturedCtx: Record<string, unknown> | undefined;
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     capturedCtx = params.ctx as Record<string, unknown>;
     params.replyOptions?.onAgentRunStart?.("run-data-only");
     emit({
@@ -386,7 +392,7 @@ test("data-only requests dispatch with a synthetic agent body and empty command 
 
 test("requests with no usable text or data parts return the supported-parts failure", async () => {
   let dispatcherInvoked = false;
-  const { executor } = createExecutorHarness(async () => {
+  const { executor } = await createExecutorHarness(async () => {
     dispatcherInvoked = true;
   });
   const requestContext = createRequestContext({
@@ -414,7 +420,7 @@ test("requests with no usable text or data parts return the supported-parts fail
 });
 
 test("non_blocking mode publishes a Task before a simple terminal reply", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-nonblocking");
     emit({
       runId: "run-nonblocking",
@@ -451,7 +457,7 @@ test("non_blocking mode publishes a Task before a simple terminal reply", async 
 });
 
 test("non_blocking mode publishes metadata-free task updates", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     emit({
       runId: "run-metadata-free",
       stream: "lifecycle",
@@ -486,7 +492,7 @@ test("non_blocking mode publishes metadata-free task updates", async () => {
 
 test("promoted live executions stay registered until completion and then clean up", async () => {
   let releaseRun: (() => void) | undefined;
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-live-bridge");
     emit({
       runId: "run-live-bridge",
@@ -526,7 +532,7 @@ test("promoted live executions stay registered until completion and then clean u
 });
 
 test("cumulative assistant previews accumulate into one final assistant artifact", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-cumulative");
     emit({
       runId: "run-cumulative",
@@ -576,7 +582,7 @@ test("cumulative assistant previews accumulate into one final assistant artifact
 });
 
 test("delta assistant previews accumulate into the same final assistant artifact", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-delta");
     emit({
       runId: "run-delta",
@@ -626,7 +632,7 @@ test("delta assistant previews accumulate into the same final assistant artifact
 });
 
 test("multiple assistant stages publish distinct indexed assistant artifact ids", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-multi-assistant");
     emit({
       runId: "run-multi-assistant",
@@ -666,7 +672,7 @@ test("multiple assistant stages publish distinct indexed assistant artifact ids"
 });
 
 test("tool-progress events publish data artifacts and tool summaries stay text-only", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-tool-artifacts");
     emit({
       runId: "run-tool-artifacts",
@@ -749,7 +755,7 @@ test("tool-progress events publish data artifacts and tool summaries stay text-o
 });
 
 test("default text or text/plain output filters file parts and vendor payloads from direct replies", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-filter-text");
     emit({
       runId: "run-filter-text",
@@ -796,7 +802,7 @@ test("default text or text/plain output filters file parts and vendor payloads f
 });
 
 test("file-only direct replies fail when nothing representable remains", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct-file");
     emit({
       runId: "run-direct-file",
@@ -839,7 +845,7 @@ test("file-only direct replies fail when nothing representable remains", async (
 });
 
 test("vendor-only direct replies fail when filtering leaves no user-visible output", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-vendor-only");
     emit({
       runId: "run-vendor-only",
@@ -886,7 +892,7 @@ test("vendor-only direct replies fail when filtering leaves no user-visible outp
 });
 
 test("lifecycle error produces a failed task state", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-error");
     emit({
       runId: "run-error",
@@ -928,7 +934,7 @@ test("lifecycle error produces a failed task state", async () => {
 });
 
 test("approval-pending tool results publish input-required without completing", async () => {
-  const { executor, liveExecutions } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor, liveExecutions } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-approval-pending");
     emit({
       runId: "run-approval-pending",
@@ -998,7 +1004,7 @@ test("approval-pending tool results publish input-required without completing", 
 });
 
 test("needs_approval tool results use requiresApproval.prompt for input-required", async () => {
-  const { executor } = createExecutorHarness(async ({ params, emit }) => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-needs-approval");
     emit({
       runId: "run-needs-approval",
@@ -1056,7 +1062,7 @@ test("needs_approval tool results use requiresApproval.prompt for input-required
 test("cancelTask aborts immediately but only publishes canceled after reply settlement", async () => {
   let releaseAfterAbort: (() => void) | undefined;
   let signalAborted = false;
-  const { executor, liveExecutions } = createExecutorHarness(
+  const { executor, liveExecutions } = await createExecutorHarness(
     async ({ params, emit, waitForAbort }) => {
       params.replyOptions?.onAgentRunStart?.("run-cancel");
       emit({

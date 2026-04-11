@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import type { AgentCard } from "@a2a-js/sdk";
+import type { Part } from "@a2a-js/sdk";
 import {
   A2AError,
   DefaultRequestHandler,
@@ -11,22 +13,27 @@ import {
   jsonRpcHandler,
 } from "@a2a-js/sdk/server/express";
 import express, { type RequestHandler } from "express";
+import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type {
   ChannelGatewayContext,
-  ChannelLogSink,
-  PluginRuntime,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-contract";
 import type { A2AInboundAccountConfig } from "./config.js";
-import { CHANNEL_ID, PLUGIN_VERSION } from "./constants.js";
+import {
+  A2A_INBOUND_QUEUED_REPLY_TASK_NOT_FOUND_ERROR_CODE,
+  CHANNEL_ID,
+  PLUGIN_VERSION,
+} from "./constants.js";
 import { createOpenClawA2AExecutor } from "./openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
 import { A2AInboundRequestHandler } from "./request-handler.js";
 import { A2AResubscribePlanner } from "./resubscribe-planner.js";
+import { normalizeReplyPayload } from "./response-mapping.js";
 import { A2AInboundServerShutdownError } from "./runtime-shutdown.js";
 import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
 type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
+type ChannelLogSink = NonNullable<ChannelGatewayContext["log"]>;
 
 export interface A2AInboundServerOptions {
   accountId: string;
@@ -40,7 +47,59 @@ export interface A2AInboundServerOptions {
 export interface A2AInboundServer {
   requestHandler: A2AInboundRequestHandler;
   handle: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+  deliverQueuedReply: (params: {
+    taskId: string;
+    payload: unknown;
+    sessionKey?: string;
+    to?: string;
+  }) => Promise<{ ok: boolean; messageId?: string; error?: string }>;
   close: () => void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function buildQueuedReplyParts(payload: unknown): Part[] {
+  const normalized = normalizeReplyPayload(payload);
+  const parts: Part[] = [];
+
+  if (normalized.text) {
+    parts.push({
+      kind: "text",
+      text: normalized.text,
+    });
+  }
+
+  const data: Record<string, unknown> = {};
+
+  if (normalized.mediaUrls.length > 0) {
+    data.mediaUrls = [...normalized.mediaUrls];
+  }
+
+  if (isRecord(payload)) {
+    if (isRecord(payload.channelData)) {
+      data.channelData = structuredClone(payload.channelData);
+    }
+    if (payload.isError === true) {
+      data.isError = true;
+    }
+    if (payload.audioAsVoice === true) {
+      data.audioAsVoice = true;
+    }
+    if (payload.replyToId !== undefined) {
+      data.replyToId = payload.replyToId;
+    }
+  }
+
+  if (Object.keys(data).length > 0) {
+    parts.push({
+      kind: "data",
+      data,
+    });
+  }
+
+  return parts;
 }
 
 function resolvePublicUrl(baseUrl: string, path: string): string {
@@ -199,10 +258,10 @@ function createProtocolBoundaryRequestHandler(
   };
 }
 
-export function createA2AInboundServer(
+export async function createA2AInboundServer(
   options: A2AInboundServerOptions,
-): A2AInboundServer {
-  const taskStore = createTaskStore(options.account.taskStore);
+): Promise<A2AInboundServer> {
+  const taskStore = await createTaskStore(options.account.taskStore);
   const liveExecutions = new A2ALiveExecutionRegistry();
   const agentExecutor = createOpenClawA2AExecutor({
     accountId: options.accountId,
@@ -280,6 +339,49 @@ export function createA2AInboundServer(
   return {
     requestHandler,
     handle: createExpressDispatcher(app),
+    deliverQueuedReply: async ({ taskId, payload, sessionKey, to }) => {
+      const task = await taskStore.load(taskId);
+
+      if (!task) {
+        return {
+          ok: false,
+          error:
+            `${A2A_INBOUND_QUEUED_REPLY_TASK_NOT_FOUND_ERROR_CODE}: local A2A task "${taskId}" was not found.`,
+        };
+      }
+
+      const parts = buildQueuedReplyParts(payload);
+
+      if (parts.length === 0) {
+        return { ok: true };
+      }
+
+      const artifactId = `queued-reply-${randomUUID()}`;
+
+      await taskStore.commitEvent({
+        kind: "artifact-update",
+        taskId,
+        contextId: task.contextId,
+        artifact: {
+          artifactId,
+          name: "Queued follow-up reply",
+          metadata: {
+            source: "queued-reply",
+            channel: CHANNEL_ID,
+            ...(typeof sessionKey === "string" && sessionKey.length > 0
+              ? { sessionKey }
+              : {}),
+            ...(typeof to === "string" && to.length > 0 ? { to } : {}),
+          },
+          parts,
+        },
+      });
+
+      return {
+        ok: true,
+        messageId: artifactId,
+      };
+    },
     close: () => {
       liveExecutions.shutdownAll(new A2AInboundServerShutdownError());
       taskStore.close();

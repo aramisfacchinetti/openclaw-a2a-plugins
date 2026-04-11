@@ -1,21 +1,25 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type {
   ChannelGatewayContext,
-  ChannelLogSink,
-  PluginRuntime,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-contract";
 import {
   explainA2AInboundAccountUnconfigured,
   isA2AInboundAccountConfigured,
   type A2AInboundAccountConfig,
 } from "./config.js";
 import { createA2AInboundServer, type A2AInboundServer } from "./a2a-server.js";
-import { CHANNEL_ID } from "./constants.js";
+import {
+  A2A_INBOUND_QUEUED_REPLY_ACCOUNT_NOT_RUNNING_ERROR_CODE,
+  A2A_INBOUND_QUEUED_REPLY_TASK_REQUIRED_MESSAGE,
+  CHANNEL_ID,
+} from "./constants.js";
 
 type ActiveAccountState = {
   account: A2AInboundAccountConfig;
   server: A2AInboundServer;
 };
+type ChannelLogSink = NonNullable<ChannelGatewayContext["log"]>;
 
 function writeJson(
   res: ServerResponse,
@@ -81,7 +85,7 @@ export class A2AInboundPluginHost {
       return waitUntilAbort(abortSignal);
     }
 
-    const server = createA2AInboundServer({
+    const server = await createA2AInboundServer({
       accountId,
       account,
       cfg,
@@ -162,6 +166,76 @@ export class A2AInboundPluginHost {
         },
       });
     }
+  }
+
+  async deliverQueuedReply(params: {
+    accountId?: string | null;
+    to: string;
+    threadId?: string | number | null;
+    payload: unknown;
+    sessionKey?: string;
+  }): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+    const taskId =
+      typeof params.threadId === "string" && params.threadId.trim().length > 0
+        ? params.threadId.trim()
+        : undefined;
+
+    if (!taskId) {
+      return {
+        ok: false,
+        error: A2A_INBOUND_QUEUED_REPLY_TASK_REQUIRED_MESSAGE,
+      };
+    }
+
+    const accountId = this.resolveQueuedReplyAccountId(params);
+
+    if (!accountId) {
+      return {
+        ok: false,
+        error:
+          `${A2A_INBOUND_QUEUED_REPLY_ACCOUNT_NOT_RUNNING_ERROR_CODE}: queued A2A protocol reply could not resolve a running inbound account.`,
+      };
+    }
+
+    const state = this.activeAccounts.get(accountId);
+
+    if (!state) {
+      return {
+        ok: false,
+        error:
+          `${A2A_INBOUND_QUEUED_REPLY_ACCOUNT_NOT_RUNNING_ERROR_CODE}: inbound A2A account "${accountId}" is not running.`,
+      };
+    }
+
+    return state.server.deliverQueuedReply({
+      taskId,
+      payload: params.payload,
+      sessionKey: params.sessionKey,
+      to: params.to,
+    });
+  }
+
+  private resolveQueuedReplyAccountId(params: {
+    accountId?: string | null;
+    to: string;
+  }): string | undefined {
+    if (typeof params.accountId === "string" && params.accountId.trim().length > 0) {
+      return params.accountId.trim();
+    }
+
+    if (params.to.startsWith("a2a:")) {
+      const accountId = params.to.slice("a2a:".length).trim();
+
+      if (accountId.length > 0) {
+        return accountId;
+      }
+    }
+
+    if (this.activeAccounts.size === 1) {
+      return this.activeAccounts.keys().next().value;
+    }
+
+    return undefined;
   }
 
   private stopAccountInternal(

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import type {
   Task,
   TaskArtifactUpdateEvent,
@@ -77,7 +79,7 @@ function createSnapshot(params: {
 }
 
 function readMemoryStoredRecord(
-  store: ReturnType<typeof createTaskStore>,
+  store: Awaited<ReturnType<typeof createTaskStore>>,
   taskId: string,
 ): PersistedTaskRecordData | undefined {
   const backend = (
@@ -91,7 +93,9 @@ function readMemoryStoredRecord(
   return record ? structuredClone(record) : undefined;
 }
 
-function readOpenSubscriptionCount(store: ReturnType<typeof createTaskStore>): number {
+function readOpenSubscriptionCount(
+  store: Awaited<ReturnType<typeof createTaskStore>>,
+): number {
   const subscriptions = (
     store as unknown as {
       subscriptions?: Set<unknown>;
@@ -110,7 +114,7 @@ async function readJsonStoredRecord(
 }
 
 test("save, load, and listTaskIds expose the latest stored snapshots", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-1", state: "submitted" }));
   await store.save(
@@ -144,7 +148,7 @@ test("save, load, and listTaskIds expose the latest stored snapshots", async () 
 });
 
 test("primed bindings flush on the first snapshot save and on later journal commits", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   const initialBinding = createBinding("task-1");
   const updatedBinding = {
     ...createBinding("task-2"),
@@ -170,7 +174,7 @@ test("primed bindings flush on the first snapshot save and on later journal comm
 });
 
 test("persistIncomingMessage appends new history entries without duplicating messageIds", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   const original = createUserMessage({
     messageId: "message:task-1:1",
     contextId: "context:task-1",
@@ -206,7 +210,7 @@ test("persistIncomingMessage appends new history entries without duplicating mes
 });
 
 test("committed journal events advance currentSequence, update the snapshot, and persist journal entries in order", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-1", state: "submitted" }));
   await store.commitEvent(
@@ -255,7 +259,7 @@ test("committed journal events advance currentSequence, update the snapshot, and
 });
 
 test("save, writeBinding, and persistIncomingMessage preserve the existing journal and currentSequence", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   const binding = createBinding("task-1");
   const followUp = createUserMessage({
     messageId: "message:task-1:2",
@@ -292,7 +296,7 @@ test("save, writeBinding, and persistIncomingMessage preserve the existing journ
 });
 
 test("prepareResubscribe with allowLiveTail=true returns the latest snapshot and only future tail events for active tasks", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-active", state: "submitted" }));
   await store.commitEvent(
@@ -338,7 +342,7 @@ test("prepareResubscribe with allowLiveTail=true returns the latest snapshot and
 });
 
 test("prepareResubscribe with allowLiveTail=false returns snapshot-only for active tasks without creating a subscription", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-active", state: "working" }));
 
@@ -354,7 +358,7 @@ test("prepareResubscribe with allowLiveTail=false returns snapshot-only for acti
 });
 
 test("subscribeToCommittedTail subscribes only for active tasks and only yields committed tail events", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-active", state: "submitted" }));
   await store.commitEvent(
@@ -398,7 +402,7 @@ test("subscribeToCommittedTail subscribes only for active tasks and only yields 
 });
 
 test("memory backend loses state across new runtime instances", async () => {
-  const initial = createTaskStore({ kind: "memory" });
+  const initial = await createTaskStore({ kind: "memory" });
 
   await initial.save(createSnapshot({ taskId: "task-memory", state: "working" }));
   await initial.commitEvent(
@@ -416,7 +420,7 @@ test("memory backend loses state across new runtime instances", async () => {
   assert.equal(record?.journal?.length, 1);
   initial.close();
 
-  const restarted = createTaskStore({ kind: "memory" });
+  const restarted = await createTaskStore({ kind: "memory" });
 
   try {
     assert.equal(await restarted.load("task-memory"), undefined);
@@ -428,7 +432,7 @@ test("memory backend loses state across new runtime instances", async () => {
 
 test("json-file backend preserves snapshot, binding, journal, history, artifacts, and final state across runtime instances", async () => {
   const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-"));
-  const original = createTaskStore({
+  const original = await createTaskStore({
     kind: "json-file",
     path: root,
   });
@@ -488,7 +492,7 @@ test("json-file backend preserves snapshot, binding, journal, history, artifacts
 
   const rawRecord = await readJsonStoredRecord(root, "task-json");
 
-  const restarted = createTaskStore({
+  const restarted = await createTaskStore({
     kind: "json-file",
     path: root,
   });
@@ -524,6 +528,83 @@ test("json-file backend preserves snapshot, binding, journal, history, artifacts
   }
 });
 
+test("json-file backend starts after recovering an orphaned writer lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-stale-lock-"));
+  const lockPath = join(root, ".writer.lock");
+
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: 999_999_999,
+      createdAt: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+
+  const store = await createTaskStore({
+    kind: "json-file",
+    path: root,
+  });
+
+  try {
+    await store.save(createSnapshot({ taskId: "task-stale-lock", state: "submitted" }));
+
+    const persisted = await store.load("task-stale-lock");
+
+    assert.equal(persisted?.id, "task-stale-lock");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("json-file backend rejects a live concurrent writer lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-live-lock-"));
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+        const fs = require("node:fs");
+        const path = process.argv[1];
+        const handle = fs.openSync(path, "wx");
+        fs.writeFileSync(
+          handle,
+          JSON.stringify({
+            pid: process.pid,
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        process.stdout.write("ready\\n");
+        setTimeout(() => {
+          try { fs.closeSync(handle); } catch {}
+          try { fs.rmSync(path, { force: true }); } catch {}
+        }, 60_000);
+      `,
+      join(root, ".writer.lock"),
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  try {
+    await once(child.stdout!, "data");
+
+    await assert.rejects(
+      createTaskStore({
+        kind: "json-file",
+        path: root,
+      }),
+      /timed out/,
+    );
+  } finally {
+    child.kill("SIGTERM");
+    await once(child, "exit").catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("json-file backend lazily upgrades schema v1 records to schema v2 on the next write", async () => {
   const root = await mkdtemp(join(tmpdir(), "openclaw-a2a-inbound-store-v1-"));
   const taskId = "task-v1";
@@ -549,7 +630,7 @@ test("json-file backend lazily upgrades schema v1 records to schema v2 on the ne
     "utf8",
   );
 
-  const store = createTaskStore({
+  const store = await createTaskStore({
     kind: "json-file",
     path: root,
   });
@@ -584,7 +665,7 @@ test("json-file backend lazily upgrades schema v1 records to schema v2 on the ne
 });
 
 test("close clears tasks, bindings, pending bindings, and open subscriptions", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
 
   await store.save(createSnapshot({ taskId: "task-1", state: "working" }));
   await store.writeBinding("task-1", createBinding("task-1"));

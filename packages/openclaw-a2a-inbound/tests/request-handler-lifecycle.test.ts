@@ -97,15 +97,19 @@ function createBinding(taskId: string): StoredTaskBinding {
   };
 }
 
-function createHandlerHarness(
+async function createHandlerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   options?: Parameters<typeof createPluginRuntimeHarness>[1],
-) {
+): Promise<{
+  liveExecutions: A2ALiveExecutionRegistry;
+  taskRuntime: Awaited<ReturnType<typeof createTaskStore>>;
+  requestHandler: A2AInboundRequestHandler;
+}> {
   const account = createTestAccount();
   const { pluginRuntime } = options
     ? createPluginRuntimeHarness(script, options)
     : createPluginRuntimeHarness(script);
-  const taskRuntime = createTaskStore();
+  const taskRuntime = await createTaskStore();
   const liveExecutions = new A2ALiveExecutionRegistry();
   const agentExecutor = createOpenClawA2AExecutor({
     accountId: "default",
@@ -175,7 +179,7 @@ async function collectStreamEvents<T>(
 }
 
 test("blocking sendMessage returns a direct Message for terminal replies", async () => {
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-direct");
     emit({
       runId: "run-direct",
@@ -206,7 +210,7 @@ test("blocking sendMessage returns a direct Message for terminal replies", async
 });
 
 test("blocking sendMessage returns a Task once reply activity promotes the run", async () => {
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-promoted");
     emit({
       runId: "run-promoted",
@@ -244,7 +248,7 @@ test("blocking sendMessage returns a Task once reply activity promotes the run",
 });
 
 test("sendMessageStream returns only one canonical Message for direct streaming replies", async () => {
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-direct");
     emit({
       runId: "run-stream-direct",
@@ -287,7 +291,7 @@ test("sendMessageStream returns only one canonical Message for direct streaming 
 });
 
 test("sendMessageStream yields committed task events for promoted runs and tasks/get matches the final task", async () => {
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-stream-promoted");
     emit({
       runId: "run-stream-promoted",
@@ -361,7 +365,7 @@ test("sendMessageStream yields committed task events for promoted runs and tasks
 });
 
 test("getTask reads the latest snapshot and trims returned history", async () => {
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-nonblocking");
     emit({
       runId: "run-nonblocking",
@@ -415,7 +419,7 @@ test("getTask reads the latest snapshot and trims returned history", async () =>
 });
 
 test("sendMessage rejects follow-ups for missing tasks", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -439,7 +443,7 @@ test("sendMessage rejects follow-ups for missing tasks", async () => {
 });
 
 test("sendMessage rejects follow-ups whose contextId does not match the stored task", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -472,7 +476,7 @@ test("sendMessage rejects follow-ups whose contextId does not match the stored t
 });
 
 test("sendMessage rejects follow-ups for terminal tasks before mutation", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -508,7 +512,7 @@ test("sendMessage rejects follow-ups for terminal tasks before mutation", async 
 
 test("sendMessage rejects file-part follow-ups before execution and without mutating history", async () => {
   let executeCalls = 0;
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     executeCalls += 1;
   });
   const originalMessage: Message = createUserMessage({
@@ -560,7 +564,7 @@ test("sendMessage rejects file-part follow-ups before execution and without muta
 });
 
 test("cancelTask passes terminal tasks through unchanged", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -587,7 +591,7 @@ test("cancelTask passes terminal tasks through unchanged", async () => {
 });
 
 test("cancelTask marks quiescent tasks canceled immediately", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -622,7 +626,7 @@ test("cancelTask marks quiescent tasks canceled immediately", async () => {
 test("cancelTask waits for the committed terminal state of live tasks", async () => {
   let releaseAfterAbort: (() => void) | undefined;
   let abortObserved = false;
-  const harness = createHandlerHarness(async ({ params, emit, waitForAbort }) => {
+  const harness = await createHandlerHarness(async ({ params, emit, waitForAbort }) => {
     params.replyOptions?.onAgentRunStart?.("run-cancel");
     emit({
       runId: "run-cancel",
@@ -683,7 +687,7 @@ test("cancelTask waits for the committed terminal state of live tasks", async ()
 });
 
 test("cancelTask rejects non-live active tasks", async () => {
-  const harness = createHandlerHarness(async () => {
+  const harness = await createHandlerHarness(async () => {
     throw new Error("executor should not run");
   });
 
@@ -710,7 +714,7 @@ test("cancelTask rejects non-live active tasks", async () => {
 
 test("resubscribe emits the latest snapshot immediately and only tails future committed events for live active tasks", async () => {
   let releaseRun: (() => void) | undefined;
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-resubscribe-live");
     emit({
       runId: "run-resubscribe-live",
@@ -858,7 +862,7 @@ for (const taskCase of [
   },
 ] as const) {
   test(`resubscribe returns only the snapshot for ${taskCase.label} tasks`, async () => {
-    const harness = createHandlerHarness(async () => {
+    const harness = await createHandlerHarness(async () => {
       throw new Error("executor should not run");
     });
 
@@ -881,7 +885,7 @@ for (const taskCase of [
 
 test("nonblocking tasks and committed tail events stay free of metadata.openclaw", async () => {
   let releaseRun: (() => void) | undefined;
-  const harness = createHandlerHarness(async ({ params, emit }) => {
+  const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-metadata-free");
     emit({
       runId: "run-metadata-free",

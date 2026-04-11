@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type {
@@ -12,10 +12,15 @@ import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
 import type { A2AInboundTaskStoreConfig } from "./config.js";
 import { isActiveExecutionTaskState } from "./response-mapping.js";
 import { decodeTaskStorageId, encodeTaskStorageId } from "./storage-id.js";
+import {
+  acquireTaskStoreWriteLock,
+  type TaskStoreWriteLock,
+} from "./task-store-write-lock.js";
 
 type JournalEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
 type StoredTaskBindingMatchedBy =
   | "binding.peer"
+  | "binding.peer.wildcard"
   | "binding.peer.parent"
   | "binding.guild+roles"
   | "binding.guild"
@@ -353,37 +358,20 @@ class InMemoryTaskRecordBackend implements TaskRecordBackend {
 class JsonFileTaskRecordBackend implements TaskRecordBackend {
   readonly kind = "json-file" as const;
 
-  private readonly writerLockPath: string;
-  private readonly writerLockFd: number;
-
-  constructor(private readonly root: string) {
+  private constructor(
+    private readonly root: string,
+    private readonly writerLock: TaskStoreWriteLock,
+  ) {
     mkdirSync(root, { recursive: true });
-    this.writerLockPath = join(root, ".writer.lock");
+  }
 
-    try {
-      this.writerLockFd = openSync(this.writerLockPath, "wx");
-    } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "EEXIST"
-      ) {
-        throw new Error(
-          `Task store path "${root}" is already locked by another writer.`,
-        );
-      }
-
-      throw error;
-    }
-
-    writeFileSync(
-      this.writerLockFd,
-      JSON.stringify({
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-      }),
-    );
+  static async create(root: string): Promise<JsonFileTaskRecordBackend> {
+    mkdirSync(root, { recursive: true });
+    const writerLockPath = join(root, ".writer.lock");
+    const writerLock = await acquireTaskStoreWriteLock({
+      lockPath: writerLockPath,
+    });
+    return new JsonFileTaskRecordBackend(root, writerLock);
   }
 
   async loadRecord(taskId: string): Promise<StoredTaskRecord | undefined> {
@@ -447,17 +435,7 @@ class JsonFileTaskRecordBackend implements TaskRecordBackend {
   }
 
   close(): void {
-    try {
-      closeSync(this.writerLockFd);
-    } catch {
-      // Ignore close failures during shutdown.
-    }
-
-    try {
-      unlinkSync(this.writerLockPath);
-    } catch {
-      // Ignore unlink failures during shutdown.
-    }
+    void this.writerLock.release().catch(() => undefined);
   }
 
   private recordPath(taskId: string): string {
@@ -465,11 +443,11 @@ class JsonFileTaskRecordBackend implements TaskRecordBackend {
   }
 }
 
-function createTaskRecordBackend(
+async function createTaskRecordBackend(
   config: A2AInboundTaskStoreConfig,
-): TaskRecordBackend {
+): Promise<TaskRecordBackend> {
   if (config.kind === "json-file") {
-    return new JsonFileTaskRecordBackend(config.path);
+    return JsonFileTaskRecordBackend.create(config.path);
   }
 
   return new InMemoryTaskRecordBackend();
@@ -843,8 +821,8 @@ export class A2ATaskRuntimeStore implements TaskStore {
   }
 }
 
-export function createTaskStore(
+export async function createTaskStore(
   config: A2AInboundTaskStoreConfig = { kind: "memory" },
-): A2ATaskRuntimeStore {
-  return new A2ATaskRuntimeStore(createTaskRecordBackend(config));
+): Promise<A2ATaskRuntimeStore> {
+  return new A2ATaskRuntimeStore(await createTaskRecordBackend(config));
 }
