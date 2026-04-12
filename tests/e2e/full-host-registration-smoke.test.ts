@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -86,20 +86,6 @@ type PluginRegistryLike = {
   }>;
 };
 
-type CreatePluginRegistry = (params: {
-  logger: OpenClawPluginApi["logger"];
-  runtime: PluginRuntime;
-}) => {
-  registry: PluginRegistryLike;
-  createApi: (
-    record: PluginRecordLike,
-    params: {
-      config: OpenClawPluginApi["config"];
-      pluginConfig?: Record<string, unknown>;
-    },
-  ) => OpenClawPluginApi;
-};
-
 type SDKPluginEntry = {
   id: string;
   name?: string;
@@ -110,10 +96,6 @@ type SDKPluginEntry = {
 };
 
 const REPO_ROOT = resolve(process.cwd());
-const OPENCLAW_PLUGIN_SDK_DIST_DIR = resolve(
-  REPO_ROOT,
-  "node_modules/openclaw/dist/plugin-sdk",
-);
 const INBOUND_PLUGIN_SOURCE = resolve(
   REPO_ROOT,
   "packages/openclaw-a2a-inbound/dist/index.js",
@@ -130,8 +112,6 @@ const NOOP_LOGGER: OpenClawPluginApi["logger"] = {
   warn() {},
   error() {},
 };
-
-let createPluginRegistryPromise: Promise<CreatePluginRegistry> | undefined;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,28 +200,158 @@ async function waitForCondition(
   throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
-async function loadCreatePluginRegistry(): Promise<CreatePluginRegistry> {
-  createPluginRegistryPromise ??= (async () => {
-    const entries = await readdir(OPENCLAW_PLUGIN_SDK_DIST_DIR);
-    const registryEntry = entries.find((entry) => /^registry-.*\.js$/.test(entry));
+function createCapturedPluginRegistry(params: {
+  logger: OpenClawPluginApi["logger"];
+  runtime: PluginRuntime;
+}): {
+  registry: PluginRegistryLike;
+  createApi: (
+    record: PluginRecordLike,
+    args: {
+      config: OpenClawPluginApi["config"];
+      pluginConfig?: Record<string, unknown>;
+    },
+  ) => OpenClawPluginApi;
+} {
+  const registry: PluginRegistryLike = {
+    plugins: [],
+    tools: [],
+    channels: [],
+    httpRoutes: [],
+    diagnostics: [],
+  };
 
-    if (!registryEntry) {
-      throw new Error("failed to locate the OpenClaw plugin-sdk registry bundle");
+  const pushUnique = (target: string[], value: string) => {
+    if (!target.includes(value)) {
+      target.push(value);
+    }
+  };
+
+  const readToolNames = (
+    tool: AnyAgentTool | ((ctx: Record<string, unknown>) => AnyAgentTool | AnyAgentTool[] | null | undefined),
+    opts?: { name?: string; names?: string[]; optional?: boolean },
+  ): string[] => {
+    const explicitNames = [
+      ...(opts?.name ? [opts.name] : []),
+      ...(opts?.names ?? []),
+    ].filter((name): name is string => typeof name === "string" && name.length > 0);
+
+    if (explicitNames.length > 0) {
+      return [...new Set(explicitNames)];
     }
 
-    const moduleUrl = pathToFileURL(
-      join(OPENCLAW_PLUGIN_SDK_DIST_DIR, registryEntry),
-    ).href;
-    const module = (await import(moduleUrl)) as { p?: unknown };
-
-    if (typeof module.p !== "function") {
-      throw new TypeError("OpenClaw registry bundle did not export createPluginRegistry");
+    if (typeof tool === "function") {
+      return [];
     }
 
-    return module.p as CreatePluginRegistry;
-  })();
+    return typeof tool.name === "string" && tool.name.length > 0 ? [tool.name] : [];
+  };
 
-  return createPluginRegistryPromise;
+  return {
+    registry,
+    createApi(record, args) {
+      const api = {
+        id: record.id,
+        name: record.name,
+        ...(record.version ? { version: record.version } : {}),
+        ...(record.description ? { description: record.description } : {}),
+        source: record.source,
+        ...(record.workspaceDir ? { rootDir: record.workspaceDir } : {}),
+        registrationMode: "full" as const,
+        config: args.config,
+        ...(args.pluginConfig ? { pluginConfig: args.pluginConfig } : {}),
+        runtime: params.runtime,
+        logger: params.logger,
+        registerTool(tool, opts) {
+          const names = readToolNames(tool, opts);
+          const factory =
+            typeof tool === "function"
+              ? tool
+              : () => tool;
+
+          for (const name of names) {
+            pushUnique(record.toolNames, name);
+          }
+
+          registry.tools.push({
+            pluginId: record.id,
+            factory,
+            names,
+            optional: opts?.optional === true,
+            source: record.source,
+          });
+        },
+        registerHook(events, _handler, opts) {
+          record.hookCount += 1;
+          const names = [
+            ...(typeof opts?.name === "string" ? [opts.name] : []),
+            ...(Array.isArray(events) ? events : [events]),
+          ];
+
+          for (const name of names) {
+            if (typeof name === "string" && name.length > 0) {
+              pushUnique(record.hookNames, name);
+            }
+          }
+        },
+        registerHttpRoute(route) {
+          record.httpRoutes += 1;
+          registry.httpRoutes.push({
+            path: route.path,
+            ...(route.match ? { match: route.match } : {}),
+            handler: route.handler,
+          });
+        },
+        registerChannel(registration) {
+          const plugin = "plugin" in registration ? registration.plugin : registration;
+          pushUnique(record.channelIds, plugin.id);
+          registry.channels.push({
+            pluginId: record.id,
+            plugin,
+            source: record.source,
+          });
+        },
+        registerGatewayMethod(method) {
+          pushUnique(record.gatewayMethods, method);
+        },
+        registerCli(_registrar, opts) {
+          for (const command of opts?.commands ?? []) {
+            if (typeof command === "string" && command.length > 0) {
+              pushUnique(record.cliCommands, command);
+            }
+          }
+        },
+        registerReload() {},
+        registerNodeHostCommand(command) {
+          pushUnique(record.commands, command.command);
+        },
+        registerSecurityAuditCollector() {},
+        registerService(service) {
+          if (typeof service.id === "string" && service.id.length > 0) {
+            pushUnique(record.services, service.id);
+          }
+        },
+        registerCliBackend() {},
+        registerConfigMigration() {},
+        registerAutoEnableProbe() {},
+        registerProvider(provider) {
+          pushUnique(record.providerIds, provider.id);
+        },
+        registerSpeechProvider() {},
+        registerRealtimeTranscriptionProvider() {},
+        registerRealtimeVoiceProvider() {},
+        registerMediaUnderstandingProvider() {},
+        registerImageGenerationProvider() {},
+        registerVideoGenerationProvider() {},
+        registerMusicGenerationProvider() {},
+        registerWebFetchProvider() {},
+        registerWebSearchProvider() {},
+        registerMemoryEmbeddingProvider() {},
+      } satisfies OpenClawPluginApi;
+
+      return api;
+    },
+  };
 }
 
 async function loadPluginEntry(source: string): Promise<SDKPluginEntry> {
@@ -471,7 +581,7 @@ async function startFullHostHarness(params: {
   const baseUrl = await listen(routeServer);
   const account = createAccount(baseUrl, tempDir, {
     label: "Full Host Smoke Agent",
-    description: "Real OpenClaw plugin registration smoke for inbound and outbound A2A.",
+    description: "Public OpenClaw plugin API registration smoke for inbound and outbound A2A.",
     ...params.accountOverrides,
   });
   const rootConfig = createRootConfig(account);
@@ -484,8 +594,7 @@ async function startFullHostHarness(params: {
     loadPluginEntry(INBOUND_PLUGIN_SOURCE),
     loadPluginEntry(OUTBOUND_PLUGIN_SOURCE),
   ]);
-  const createPluginRegistry = await loadCreatePluginRegistry();
-  const { registry, createApi } = createPluginRegistry({
+  const { registry, createApi } = createCapturedPluginRegistry({
     logger: NOOP_LOGGER,
     runtime: pluginRuntime,
   });
@@ -571,7 +680,7 @@ async function startFullHostHarness(params: {
   };
 }
 
-test("full-host smoke registers both plugins through the real OpenClaw registry", async () => {
+test("full-host smoke registers both plugins through the public OpenClaw plugin API", async () => {
   const expectedReplyText = "Direct e2e reply from the inbound server.";
   const harness = await startFullHostHarness({
     script: async ({ params, emit }) => {
@@ -649,7 +758,7 @@ test("full-host reproduction locks in the unsupported queued follow-up boundary"
   const harness = await startFullHostHarness({
     accountOverrides: {
       label: "Full Host Follow-Up Boundary Agent",
-      description: "Tracked follow-up boundary reproduction through the real registry.",
+      description: "Tracked follow-up boundary reproduction through the public plugin API.",
     },
     script: async ({ params, emit }) => {
       params.replyOptions?.onAgentRunStart?.("run-full-host-followup-boundary");
