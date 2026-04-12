@@ -10,6 +10,7 @@ import {
 } from "./constants.js";
 import { A2A_OUTBOUND_DEFAULT_CONFIG } from "./config.js";
 import { A2AOutboundError, ERROR_CODES } from "./errors.js";
+import { log, type LoggerLike } from "./logging.js";
 import type { A2ATargetInput } from "./schemas.js";
 
 export interface SDKClientPoolOptions {
@@ -17,6 +18,7 @@ export interface SDKClientPoolOptions {
   preferredTransports?: A2ATransport[];
   normalizeBaseUrl?: boolean;
   enforceSupportedTransports?: boolean;
+  logger?: LoggerLike;
 }
 
 export interface ResolvedTarget {
@@ -134,6 +136,8 @@ export class SDKClientPool {
 
   private readonly shouldEnforceSupportedTransports: boolean;
 
+  private readonly logger: LoggerLike | undefined;
+
   constructor(options: SDKClientPoolOptions = {}) {
     this.defaultCardPath =
       options.defaultCardPath ?? A2A_OUTBOUND_DEFAULT_CONFIG.defaults.cardPath;
@@ -153,6 +157,7 @@ export class SDKClientPool {
     this.shouldEnforceSupportedTransports =
       options.enforceSupportedTransports ??
       A2A_OUTBOUND_DEFAULT_CONFIG.policy.enforceSupportedTransports;
+    this.logger = options.logger;
   }
 
   normalizeTarget(target: SDKClientPoolTargetInput): ResolvedTarget {
@@ -188,18 +193,34 @@ export class SDKClientPool {
   async get(target: SDKClientPoolTargetInput): Promise<SDKClientPoolEntry> {
     const normalized = this.normalizeTarget(target);
     const key = clientKey(normalized);
+    const resolvedCardUrl = new URL(normalized.cardPath, normalized.baseUrl).toString();
 
     const existing = this.cache.get(key);
     if (existing) {
+      log(this.logger, "warn", "a2a.remote_agent.client_pool.cache_hit", {
+        normalizedTarget: normalized,
+        resolvedCardUrl,
+      });
+
       return {
         client: existing.client,
         target: normalized,
       };
     }
 
+    log(this.logger, "warn", "a2a.remote_agent.client_pool.cache_miss", {
+      normalizedTarget: normalized,
+      resolvedCardUrl,
+    });
+
     const factory = new ClientFactory(
       this.buildFactoryOptions(normalized.preferredTransports),
     );
+
+    log(this.logger, "warn", "a2a.remote_agent.client_pool.resolve_card", {
+      normalizedTarget: normalized,
+      resolvedCardUrl,
+    });
 
     const client = await factory.createFromUrl(
       normalized.baseUrl,

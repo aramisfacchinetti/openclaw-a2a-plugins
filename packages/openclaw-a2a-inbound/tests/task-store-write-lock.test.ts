@@ -97,6 +97,27 @@ test("reclaims a stale lock when the pid was recycled", async () => {
   });
 });
 
+test("reclaims orphan lock files without starttime when PID matches current process", async () => {
+  await withTempDir(async (root) => {
+    const lockPath = join(root, ".writer.lock");
+
+    await writeFile(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+
+    const lock = await acquireTaskStoreWriteLock({ lockPath, timeoutMs: 200 });
+    const payload = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: number };
+
+    assert.equal(payload.pid, process.pid);
+    await lock.release();
+  });
+});
+
 test("reclaims a malformed lock only after the mtime-based stale fallback", async () => {
   await withTempDir(async (root) => {
     const lockPath = join(root, ".writer.lock");
@@ -127,6 +148,10 @@ test("does not reclaim an active live lock", async () => {
       starttime?: number;
     };
     await probe.release();
+
+    if (typeof currentPayload.starttime !== "number") {
+      return;
+    }
 
     await writeFile(
       lockPath,

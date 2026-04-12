@@ -54,10 +54,10 @@
     "@a2a-js/sdk": "^0.3.10",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
-    "openclaw": "2026.3.2"
+    "openclaw": "2026.4.10"
   },
   "peerDependencies": {
-    "openclaw": "2026.3.2"
+    "openclaw": "2026.4.10"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -501,6 +501,7 @@ export class A2AOutboundService {
         normalizeBaseUrl: this.config.policy.normalizeBaseUrl,
         enforceSupportedTransports:
           this.config.policy.enforceSupportedTransports,
+        logger: this.logger,
       });
 
     this.targetCatalog =
@@ -570,6 +571,11 @@ export class A2AOutboundService {
   }
 
   private async resolveClient(target: ResolvedTarget): Promise<ResolvedClientContext> {
+    log(this.logger, "warn", "a2a.remote_agent.resolve_client.begin", {
+      target,
+      resolvedCardUrl: new URL(target.cardPath, target.baseUrl).toString(),
+    });
+
     const clientEntry = await this.clientPool.get(target);
     let resolvedTarget = target;
 
@@ -582,6 +588,12 @@ export class A2AOutboundService {
         error: toToolError(error, fallbackErrorCode(error)),
       });
     }
+
+    log(this.logger, "warn", "a2a.remote_agent.resolve_client.end", {
+      target,
+      resolvedTarget,
+      resolvedCardUrl: new URL(resolvedTarget.cardPath, resolvedTarget.baseUrl).toString(),
+    });
 
     return {
       target: resolvedTarget,

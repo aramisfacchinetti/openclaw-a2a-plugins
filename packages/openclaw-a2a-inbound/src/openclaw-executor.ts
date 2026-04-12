@@ -4,12 +4,11 @@ import type {
   RequestContext,
 } from "@a2a-js/sdk/server";
 import { A2AError } from "@a2a-js/sdk/server";
-import {
-  createInboundEnvelopeBuilder,
-  type ChannelGatewayContext,
-  type ChannelLogSink,
-  type PluginRuntime,
-} from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk";
+import { createInboundEnvelopeBuilder } from "openclaw/plugin-sdk/inbound-envelope";
+import type {
+  ChannelGatewayContext,
+} from "openclaw/plugin-sdk/channel-contract";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID } from "./constants.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
@@ -28,6 +27,7 @@ import {
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
 type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
+type ChannelLogSink = NonNullable<ChannelGatewayContext["log"]>;
 type OpenClawRuntimeEvent = Parameters<
   Parameters<PluginRuntime["events"]["onAgentEvent"]>[0]
 >[0];
@@ -83,7 +83,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
       this.options.account.agentStyle,
       undefined,
     );
-    let unsubscribeAgentEvents: (() => boolean) | undefined;
+    let unsubscribeAgentEvents: (() => void) | undefined;
 
     try {
       if (requestContext.task) {
@@ -100,7 +100,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         });
         const createdAt = new Date().toISOString();
 
-        binding = {
+        const nextBinding: StoredTaskBinding = {
           schemaVersion: 1,
           agentId: route.agentId,
           channel: route.channel,
@@ -118,7 +118,8 @@ export class OpenClawA2AExecutor implements AgentExecutor {
           createdAt,
           updatedAt: createdAt,
         };
-        this.options.taskRuntime.primeBinding(requestContext.taskId, binding);
+        binding = nextBinding;
+        this.options.taskRuntime.primeBinding(requestContext.taskId, nextBinding);
       }
 
       if (!binding) {

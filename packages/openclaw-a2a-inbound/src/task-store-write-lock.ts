@@ -189,7 +189,12 @@ async function shouldReclaimLock(
   inspection: LockInspection,
   staleMs: number,
   nowMs: number,
+  orphanSelfLock: boolean,
 ): Promise<boolean> {
+  if (orphanSelfLock) {
+    return true;
+  }
+
   if (!inspection.stale) {
     return false;
   }
@@ -414,8 +419,21 @@ export async function acquireTaskStoreWriteLock(params: {
       const payload = await readLockPayload(normalizedLockPath);
       const nowMs = Date.now();
       const inspection = inspectLockPayload(payload, staleMs, nowMs);
+      const orphanSelfLock =
+        isPositiveInteger(payload?.pid) &&
+        payload.pid === process.pid &&
+        !isPositiveInteger(payload?.starttime) &&
+        !HELD_LOCKS.has(normalizedLockPath);
 
-      if (await shouldReclaimLock(normalizedLockPath, inspection, staleMs, nowMs)) {
+      if (
+        await shouldReclaimLock(
+          normalizedLockPath,
+          inspection,
+          staleMs,
+          nowMs,
+          orphanSelfLock,
+        )
+      ) {
         await fs.rm(normalizedLockPath, { force: true });
         continue;
       }

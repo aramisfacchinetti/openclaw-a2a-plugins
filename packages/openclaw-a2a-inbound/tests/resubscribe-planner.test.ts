@@ -31,7 +31,7 @@ function createSnapshot(params: {
 
 test("planner returns undefined when the task does not exist", async () => {
   const planner = new A2AResubscribePlanner(
-    createTaskStore(),
+    await createTaskStore(),
     new A2ALiveExecutionRegistry(),
   );
 
@@ -39,7 +39,7 @@ test("planner returns undefined when the task does not exist", async () => {
 });
 
 test("planner returns snapshot-only with terminal reason for terminal tasks", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   await store.save(createSnapshot({ taskId: "task-terminal", state: "completed" }));
 
   const planner = new A2AResubscribePlanner(
@@ -54,7 +54,7 @@ test("planner returns snapshot-only with terminal reason for terminal tasks", as
 });
 
 test("planner returns snapshot-only with quiescent reason for quiescent tasks", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   await store.save(
     createSnapshot({ taskId: "task-quiescent", state: "input-required" }),
   );
@@ -71,7 +71,7 @@ test("planner returns snapshot-only with quiescent reason for quiescent tasks", 
 });
 
 test("planner returns snapshot-only with orphaned reason for active tasks without live ownership", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   await store.save(createSnapshot({ taskId: "task-orphaned", state: "working" }));
 
   const planner = new A2AResubscribePlanner(
@@ -86,7 +86,7 @@ test("planner returns snapshot-only with orphaned reason for active tasks withou
 });
 
 test("planner returns live-tail for active tasks with live ownership and the subscription yields only future committed events", async () => {
-  const store = createTaskStore();
+  const store = await createTaskStore();
   const liveExecutions = new A2ALiveExecutionRegistry();
 
   await store.save(createSnapshot({ taskId: "task-live", state: "submitted" }));
