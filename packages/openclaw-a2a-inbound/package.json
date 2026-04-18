@@ -62,7 +62,7 @@
     "prepublishOnly": "node ../../scripts/publish-guard.cjs package --package=@aramisfa/openclaw-a2a-inbound"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.10",
+    "@a2a-js/sdk": "^0.3.13",
     "express": "^5.2.1",
     "openclaw": "2026.4.10"
   },
