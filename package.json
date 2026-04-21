@@ -20,7 +20,7 @@
     "@a2a-js/sdk": "^0.3.13",
     "@changesets/cli": "^2.29.6",
     "@types/node": "^20.0.0",
-    "openclaw": "2026.4.10",
+    "openclaw": "2026.4.15",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

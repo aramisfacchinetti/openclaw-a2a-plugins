@@ -17,6 +17,7 @@ import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type {
   ChannelGatewayContext,
 } from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawChannelRuntime } from "./channel-runtime.js";
 import type { A2AInboundAccountConfig } from "./config.js";
 import {
   A2A_INBOUND_QUEUED_REPLY_TASK_NOT_FOUND_ERROR_CODE,
@@ -32,14 +33,13 @@ import { A2AInboundServerShutdownError } from "./runtime-shutdown.js";
 import { createTaskStore } from "./task-store.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
-type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
 type ChannelLogSink = NonNullable<ChannelGatewayContext["log"]>;
 
 export interface A2AInboundServerOptions {
   accountId: string;
   account: A2AInboundAccountConfig;
   cfg: OpenClawConfig;
-  channelRuntime: ChannelRuntime;
+  channelRuntime: OpenClawChannelRuntime;
   pluginRuntime: PluginRuntime;
   log?: ChannelLogSink;
 }

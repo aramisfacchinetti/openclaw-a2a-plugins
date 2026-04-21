@@ -36,10 +36,17 @@ function describeAccount(
   };
 }
 
+type A2AInboundQueuedReply = {
+  queuedReply: {
+    mode: "protocol";
+    deliverQueuedReply: A2AInboundPluginHost["deliverQueuedReply"];
+  };
+};
+
 export function buildA2AInboundChannel(
   host: A2AInboundPluginHost,
-): ChannelPlugin<A2AInboundAccountConfig> {
-  return {
+): ChannelPlugin<A2AInboundAccountConfig> & A2AInboundQueuedReply {
+  const channel = {
     id: CHANNEL_ID,
     meta: {
       id: CHANNEL_ID,
@@ -80,5 +87,11 @@ export function buildA2AInboundChannel(
       startAccount: async (ctx) => host.startAccount(ctx),
       stopAccount: async (ctx) => host.stopAccount(ctx),
     },
-  };
+    queuedReply: {
+      mode: "protocol",
+      deliverQueuedReply: (params) => host.deliverQueuedReply(params),
+    },
+  } satisfies ChannelPlugin<A2AInboundAccountConfig> & A2AInboundQueuedReply;
+
+  return channel;
 }

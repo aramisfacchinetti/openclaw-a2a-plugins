@@ -9,6 +9,7 @@ import { createInboundEnvelopeBuilder } from "openclaw/plugin-sdk/inbound-envelo
 import type {
   ChannelGatewayContext,
 } from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawChannelRuntime } from "./channel-runtime.js";
 import type { A2AInboundAccountConfig } from "./config.js";
 import { CHANNEL_ID } from "./constants.js";
 import type { A2ALiveExecutionRegistry } from "./live-execution-registry.js";
@@ -26,7 +27,6 @@ import {
 } from "./task-execution-coordinator.js";
 
 type OpenClawConfig = ChannelGatewayContext["cfg"];
-type ChannelRuntime = NonNullable<ChannelGatewayContext["channelRuntime"]>;
 type ChannelLogSink = NonNullable<ChannelGatewayContext["log"]>;
 type OpenClawRuntimeEvent = Parameters<
   Parameters<PluginRuntime["events"]["onAgentEvent"]>[0]
@@ -36,7 +36,7 @@ export interface OpenClawA2AExecutorOptions {
   accountId: string;
   account: A2AInboundAccountConfig;
   cfg: OpenClawConfig;
-  channelRuntime: ChannelRuntime;
+  channelRuntime: OpenClawChannelRuntime;
   pluginRuntime: PluginRuntime;
   taskRuntime: A2ATaskRuntimeStore;
   liveExecutions: A2ALiveExecutionRegistry;
@@ -46,7 +46,7 @@ export interface OpenClawA2AExecutorOptions {
 function createPinnedEnvelopeBuilder(params: {
   cfg: OpenClawConfig;
   binding: StoredTaskBinding;
-  channelRuntime: ChannelRuntime;
+  channelRuntime: OpenClawChannelRuntime;
   sessionStore: string | undefined;
 }) {
   return createInboundEnvelopeBuilder({
@@ -191,6 +191,7 @@ export class OpenClawA2AExecutor implements AgentExecutor {
         Timestamp: inbound.timestamp,
       });
       ctxPayload.SessionKey = binding.sessionKey;
+      ctxPayload.MessageThreadId = requestContext.taskId;
 
       await this.options.channelRuntime.session.recordInboundSession({
         storePath: binding.storePath,

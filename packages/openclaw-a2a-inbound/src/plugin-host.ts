@@ -3,6 +3,7 @@ import type { PluginRuntime } from "openclaw/plugin-sdk";
 import type {
   ChannelGatewayContext,
 } from "openclaw/plugin-sdk/channel-contract";
+import { requireOpenClawChannelRuntime } from "./channel-runtime.js";
 import {
   explainA2AInboundAccountUnconfigured,
   isA2AInboundAccountConfigured,
@@ -89,7 +90,7 @@ export class A2AInboundPluginHost {
       accountId,
       account,
       cfg,
-      channelRuntime: ctx.channelRuntime,
+      channelRuntime: requireOpenClawChannelRuntime(ctx.channelRuntime),
       pluginRuntime: this.pluginRuntime,
       log: ctx.log,
     });
