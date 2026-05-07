@@ -332,6 +332,7 @@ function createCapturedPluginRegistry(params: {
           }
         },
         registerCliBackend() {},
+        registerTextTransforms() {},
         registerConfigMigration() {},
         registerAutoEnableProbe() {},
         registerProvider(provider) {
@@ -346,7 +347,25 @@ function createCapturedPluginRegistry(params: {
         registerMusicGenerationProvider() {},
         registerWebFetchProvider() {},
         registerWebSearchProvider() {},
+        registerInteractiveHandler() {},
+        onConversationBindingResolved() {},
+        registerCommand(command) {
+          pushUnique(record.commands, command.name);
+        },
+        registerContextEngine() {},
+        registerCompactionProvider() {},
+        registerAgentHarness() {},
+        registerMemoryCapability() {},
+        registerMemoryPromptSection() {},
+        registerMemoryPromptSupplement() {},
+        registerMemoryCorpusSupplement() {},
+        registerMemoryFlushPlan() {},
+        registerMemoryRuntime() {},
         registerMemoryEmbeddingProvider() {},
+        resolvePath(input) {
+          return resolve(record.workspaceDir ?? REPO_ROOT, input);
+        },
+        on() {},
       } satisfies OpenClawPluginApi;
 
       return api;
@@ -808,8 +827,10 @@ test("full-host reproduction locks in the unsupported queued follow-up boundary"
     assert.ok(harness.requestCounts.agentCard >= 1);
     assert.ok(harness.requestCounts.jsonRpc >= 1);
 
+    assert.ok(inboundChannel.plugin.outbound?.sendText, "expected inbound outbound adapter");
     await assert.rejects(
-      inboundChannel.plugin.outbound?.sendText({
+      inboundChannel.plugin.outbound.sendText({
+        cfg: harness.rootConfig,
         accountId: harness.account.accountId,
         to: `a2a:${harness.account.accountId}`,
         text: "Queued tracked follow-up through generic channel routing.",
