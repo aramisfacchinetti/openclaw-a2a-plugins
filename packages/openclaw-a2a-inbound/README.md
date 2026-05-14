@@ -196,6 +196,42 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 
 `publicBaseUrl` is the only plugin-level readiness prerequisite — the account will not start without it. Gateway networking must also be configured independently; see [Networking Prerequisites](#networking-prerequisites).
 
+### Advertise A TweetClaw Skill
+
+If the inbound A2A endpoint runs OpenClaw plugins such as [TweetClaw](https://github.com/Xquik-dev/tweetclaw), advertise that capability in `channels.a2a.accounts.<name>.skills` so remote agents can decide when to delegate social automation work. Install TweetClaw on that gateway separately:
+
+```bash
+openclaw plugins install @xquik/tweetclaw --pin
+```
+
+Then expose a concise A2A skill in the agent card:
+
+```json5
+{
+  channels: {
+    a2a: {
+      accounts: {
+        default: {
+          skills: [
+            {
+              id: "x-twitter-automation",
+              name: "X/Twitter Automation",
+              description: "Search tweets, inspect replies, export followers, monitor tweets, run giveaway draws, and prepare approval-gated tweet or reply actions through TweetClaw.",
+              tags: ["x", "twitter", "tweetclaw", "social"],
+              examples: [
+                "Search tweets about this release and summarize recurring complaints.",
+                "Export followers for this account and identify likely developer advocates.",
+                "Prepare a reply draft for approval on this customer tweet."
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
 ## Streaming And Resubscribe Semantics
 
 - `message/send`

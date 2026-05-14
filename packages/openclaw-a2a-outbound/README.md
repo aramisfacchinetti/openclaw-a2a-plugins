@@ -76,6 +76,40 @@ The ClawHub skill is an optional guided setup helper for installing, enabling, c
 
 Call `list_targets` first to discover configured aliases and refreshed peer-card metadata. Prefer `target_alias` over `target_url`; use `target_url` only when policy allows direct URL routing.
 
+### Configure A TweetClaw Peer
+
+Use this pattern when another OpenClaw gateway exposes an inbound A2A endpoint with [TweetClaw](https://github.com/Xquik-dev/tweetclaw) installed for X/Twitter automation:
+
+```json
+{
+  "alias": "tweetclaw-social",
+  "baseUrl": "https://social-agent.example",
+  "description": "TweetClaw-enabled OpenClaw agent for X/Twitter automation.",
+  "tags": ["x", "twitter", "tweetclaw", "social"],
+  "examples": [
+    "Search tweets matching \"openclaw\" and summarize the top product questions.",
+    "Export followers for @xquik and segment likely developer accounts.",
+    "Prepare an approval-gated reply to this tweet URL."
+  ]
+}
+```
+
+Then route work to the configured target with the same flattened `remote_agent` contract:
+
+```json
+{
+  "action": "send",
+  "target_alias": "tweetclaw-social",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Search tweet replies for this launch tweet and return the most common objections."
+    }
+  ],
+  "follow_updates": true
+}
+```
+
 ## Unified Tool Contract
 
 `remote_agent` accepts a flattened request object with top-level fields:
