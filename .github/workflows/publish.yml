@@ -42,7 +42,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install npm 11 for trusted publishing
-        run: npm install --global npm@^11.5.1
+        run: npm install --global npm@^11.14.1
 
       - name: Enable Corepack
         run: corepack enable
