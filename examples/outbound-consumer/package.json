@@ -1,0 +1,10 @@
+{
+  "name": "openclaw-a2a-outbound-consumer-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@aramisfa/openclaw-a2a-outbound": "4.0.0",
+    "openclaw": "2026.4.15"
+  }
+}

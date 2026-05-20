@@ -1,0 +1,13 @@
+{"version":2,"width":100,"height":28,"timestamp":1779292800,"env":{"SHELL":"zsh","TERM":"xterm-256color"}}
+[0.0,"o","$ openclaw a2a demo run\n"]
+[0.2,"o","OpenClaw A2A local demo\n"]
+[0.2,"o","Peer: http://127.0.0.1:41234\n"]
+[0.2,"o","Agent card: http://127.0.0.1:41234/.well-known/agent-card.json\n"]
+[0.2,"o","JSON-RPC: http://127.0.0.1:41234/a2a/jsonrpc\n\n"]
+[0.4,"o","[ok] list_targets - 1 target(s)\n"]
+[0.6,"o","[ok] send - Demo peer completed durable task demo-task-1.\n"]
+[0.8,"o","[ok] watch - Demo peer completed durable task demo-task-1.\n"]
+[1.0,"o","[ok] status - Demo peer completed durable task demo-task-1.\n"]
+[1.2,"o","[ok] continuation_send - Demo peer resumed demo-task-1 from persisted continuation.\n\n"]
+[1.4,"o","Persist this summary.continuation for follow-up:\n"]
+[1.4,"o","{\n  \"target\": {\n    \"target_url\": \"http://127.0.0.1:41234/\",\n    \"card_path\": \"/.well-known/agent-card.json\",\n    \"preferred_transports\": [\"JSONRPC\", \"HTTP+JSON\"],\n    \"target_alias\": \"local-demo\"\n  },\n  \"task\": {\n    \"task_id\": \"demo-task-1\",\n    \"task_handle\": \"rah_demo\"\n  },\n  \"conversation\": {\n    \"context_id\": \"demo-context-1\",\n    \"can_send\": true\n  }\n}\n"]

@@ -208,13 +208,6 @@ export function createPluginRuntimeHarness(
       groups: {} as PluginRuntime["channel"]["groups"],
       debounce: {} as PluginRuntime["channel"]["debounce"],
       commands: {} as PluginRuntime["channel"]["commands"],
-      discord: {} as PluginRuntime["channel"]["discord"],
-      slack: {} as PluginRuntime["channel"]["slack"],
-      telegram: {} as PluginRuntime["channel"]["telegram"],
-      signal: {} as PluginRuntime["channel"]["signal"],
-      imessage: {} as PluginRuntime["channel"]["imessage"],
-      whatsapp: {} as PluginRuntime["channel"]["whatsapp"],
-      line: {} as PluginRuntime["channel"]["line"],
     },
     events: {
       onAgentEvent: (

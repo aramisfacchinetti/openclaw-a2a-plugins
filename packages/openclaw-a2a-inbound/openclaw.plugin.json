@@ -6,7 +6,7 @@
   "channels": [
     "a2a"
   ],
-  "description": "Accept inbound A2A requests and route them into OpenClaw agents through a native channel plugin.",
+  "description": "Advanced inbound A2A bridge for exposing OpenClaw agents over a reachable HTTP endpoint.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

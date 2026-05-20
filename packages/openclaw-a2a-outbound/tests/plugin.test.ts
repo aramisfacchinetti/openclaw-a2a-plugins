@@ -11,6 +11,15 @@ type RegisteredTool = {
   options?: { optional?: boolean };
 };
 
+type RegisteredCli = {
+  commands: string[];
+  descriptors: Array<{
+    name: string;
+    description: string;
+    hasSubcommands?: boolean;
+  }>;
+};
+
 type CapturedLogs = {
   debug: string[];
   info: string[];
@@ -53,6 +62,7 @@ function createApi(
     warn: [],
     error: [],
   };
+  const cli: RegisteredCli[] = [];
   const api = {
     id: "openclaw-a2a-outbound",
     name: "openclaw-a2a-outbound",
@@ -92,7 +102,18 @@ function createApi(
     registerHttpRoute() {},
     registerChannel() {},
     registerGatewayMethod() {},
-    registerCli() {},
+    registerCli(
+      _registrar: unknown,
+      options?: {
+        commands?: string[];
+        descriptors?: RegisteredCli["descriptors"];
+      },
+    ) {
+      cli.push({
+        commands: options?.commands ?? [],
+        descriptors: options?.descriptors ?? [],
+      });
+    },
     registerService() {},
     registerProvider() {},
     registerCommand() {},
@@ -104,6 +125,7 @@ function createApi(
 
   Object.assign(api, {
     __logs: logs,
+    __cli: cli,
   });
 
   return api;
@@ -111,6 +133,10 @@ function createApi(
 
 function getCapturedLogs(api: OpenClawPluginApi): CapturedLogs {
   return (api as OpenClawPluginApi & { __logs: CapturedLogs }).__logs;
+}
+
+function getCapturedCli(api: OpenClawPluginApi): RegisteredCli[] {
+  return (api as OpenClawPluginApi & { __cli: RegisteredCli[] }).__cli;
 }
 
 function readStructuredContent<T = A2AToolResult>(result: unknown): T {
@@ -156,14 +182,15 @@ async function executeToolByIdAndInput(
 
 test("plugin registration with enabled=false registers no tools", () => {
   const tools: RegisteredTool[] = [];
+  let api!: OpenClawPluginApi;
 
-  plugin.register(
-    createApi({ enabled: false }, (descriptor, options) => {
-      tools.push({ descriptor, options });
-    }),
-  );
+  api = createApi({ enabled: false }, (descriptor, options) => {
+    tools.push({ descriptor, options });
+  });
+  plugin.register(api);
 
   assert.equal(tools.length, 0);
+  assert.deepEqual(getCapturedCli(api)[0]?.commands, ["a2a"]);
 });
 
 test("plugin defers registration during non-full passes before enabled checks", () => {
@@ -181,6 +208,7 @@ test("plugin defers registration during non-full passes before enabled checks", 
   const logs = getCapturedLogs(api);
 
   assert.equal(tools.length, 0);
+  assert.deepEqual(getCapturedCli(api)[0]?.commands, ["a2a"]);
   assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.disabled")), false);
   assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.loaded")), false);
   assert.equal(
@@ -208,6 +236,7 @@ test("plugin does not register tools during non-full passes even when enabled", 
   const logs = getCapturedLogs(api);
 
   assert.equal(tools.length, 0);
+  assert.deepEqual(getCapturedCli(api)[0]?.commands, ["a2a"]);
   assert.equal(logs.info.some((entry) => entry.includes("a2a.plugin.loaded")), false);
   assert.equal(
     logs.debug.some(
@@ -221,17 +250,24 @@ test("plugin does not register tools during non-full passes even when enabled", 
 
 test("plugin registers one optional remote_agent tool", () => {
   const tools: RegisteredTool[] = [];
+  let api!: OpenClawPluginApi;
 
-  plugin.register(
-    createApi({ enabled: true }, (descriptor, options) => {
-      tools.push({ descriptor, options });
-    }),
-  );
+  api = createApi({ enabled: true }, (descriptor, options) => {
+    tools.push({ descriptor, options });
+  });
+  plugin.register(api);
 
   assert.equal(tools.length, 1);
   assert.equal(tools[0]?.descriptor.name, "remote_agent");
   assert.deepEqual(tools[0]?.options, { optional: true });
   assert.equal(typeof tools[0]?.descriptor.execute, "function");
+  assert.deepEqual(getCapturedCli(api)[0]?.descriptors, [
+    {
+      name: "a2a",
+      description: "A2A outbound demo and diagnostics",
+      hasSubcommands: true,
+    },
+  ]);
 });
 
 test("plugin registration parses pluginConfig through configSchema once", () => {

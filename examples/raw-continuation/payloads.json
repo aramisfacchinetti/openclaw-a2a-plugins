@@ -1,0 +1,34 @@
+{
+  "list_targets": {
+    "action": "list_targets"
+  },
+  "send": {
+    "action": "send",
+    "target_alias": "local-demo",
+    "task_requirement": "required",
+    "parts": [
+      {
+        "kind": "text",
+        "text": "Create a durable demo task."
+      }
+    ]
+  },
+  "watch": {
+    "action": "watch",
+    "continuation": "<paste summary.continuation here>"
+  },
+  "status": {
+    "action": "status",
+    "continuation": "<paste summary.continuation here>"
+  },
+  "continuation_replay": {
+    "action": "send",
+    "continuation": "<paste summary.continuation here>",
+    "parts": [
+      {
+        "kind": "text",
+        "text": "Continue from the persisted continuation."
+      }
+    ]
+  }
+}

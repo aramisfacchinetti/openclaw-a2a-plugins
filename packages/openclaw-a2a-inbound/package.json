@@ -1,7 +1,7 @@
 {
   "name": "@aramisfa/openclaw-a2a-inbound",
   "version": "2.0.0",
-  "description": "Inbound A2A channel plugin for OpenClaw agents",
+  "description": "Advanced inbound A2A channel plugin for exposing OpenClaw agents over HTTP",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,7 +17,9 @@
     "a2a",
     "agent-to-agent",
     "inbound",
-    "channel"
+    "channel",
+    "advanced",
+    "json-rpc"
   ],
   "type": "module",
   "main": "./dist/index.js",

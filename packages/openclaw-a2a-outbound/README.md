@@ -1,8 +1,20 @@
 # @aramisfa/openclaw-a2a-outbound
 
-Native OpenClaw outbound A2A delegation plugin.
+OpenClaw outbound A2A delegation plugin with a zero-config local onboarding CLI.
 
-This package registers exactly one optional OpenClaw tool, `remote_agent`. The tool exposes five actions: `list_targets`, `send`, `watch`, `status`, and `cancel`.
+```bash
+openclaw plugins install @aramisfa/openclaw-a2a-outbound
+openclaw a2a demo run
+```
+
+`openclaw a2a demo run` starts the packaged local demo peer, configures a temporary `local-demo` target in memory, exercises `list_targets`, task-bearing `send`, `watch`, `status`, and continuation replay, then prints the returned `summary.continuation`.
+
+This package registers:
+
+- the `openclaw a2a` CLI family for demos and diagnostics
+- one optional OpenClaw tool, `remote_agent`, with actions `list_targets`, `send`, `watch`, `status`, and `cancel`
+
+For a raw payload walkthrough, see [../../docs/quickstart.md](../../docs/quickstart.md).
 
 ## Installation
 
@@ -36,7 +48,19 @@ The ClawHub skill is an optional guided setup helper for installing, enabling, c
 ## Requirements
 
 - Node.js `>=22.12.0`
-- OpenClaw `2026.3.2`
+- OpenClaw `2026.4.15`
+
+## CLI
+
+```bash
+openclaw a2a demo run [--json] [--write-continuation <path>]
+openclaw a2a demo serve [--port <port>] [--json]
+openclaw a2a doctor [--alias <alias>] [--json]
+```
+
+- `demo run`: self-contained first-success path.
+- `demo serve`: long-lived local peer that prints exact config commands and raw `remote_agent` payloads.
+- `doctor`: read-only install/config/target/card diagnostics for real targets.
 
 ## OpenClaw Plugin Config
 

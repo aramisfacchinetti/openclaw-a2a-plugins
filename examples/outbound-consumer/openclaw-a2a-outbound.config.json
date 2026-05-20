@@ -1,0 +1,34 @@
+{
+  "enabled": true,
+  "defaults": {
+    "timeoutMs": 30000,
+    "cardPath": "/.well-known/agent-card.json",
+    "preferredTransports": ["JSONRPC", "HTTP+JSON"],
+    "serviceParameters": {}
+  },
+  "targets": [
+    {
+      "alias": "local-demo",
+      "baseUrl": "http://127.0.0.1:41234",
+      "description": "Deterministic local A2A demo peer.",
+      "tags": ["demo", "local"],
+      "cardPath": "/.well-known/agent-card.json",
+      "preferredTransports": ["JSONRPC", "HTTP+JSON"],
+      "examples": [
+        "Create a durable demo task.",
+        "Continue from the persisted continuation."
+      ],
+      "default": true
+    }
+  ],
+  "taskHandles": {
+    "ttlMs": 86400000,
+    "maxEntries": 100
+  },
+  "policy": {
+    "acceptedOutputModes": ["text/plain", "application/json"],
+    "normalizeBaseUrl": true,
+    "enforceSupportedTransports": true,
+    "allowTargetUrlOverride": false
+  }
+}

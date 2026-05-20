@@ -214,35 +214,34 @@ test("createRemoteAgentInputValidator accepts nested continuation for send and f
     },
   } as const;
 
-  assert.deepEqual(
-    validate({
-      action: "send",
-      continuation,
-      parts: [{ kind: "text", text: "continue" }],
-    }).continuation,
+  const send = validate({
+    action: "send",
     continuation,
-  );
-  assert.deepEqual(
-    validate({
-      action: "status",
-      continuation,
-    }).continuation,
+    parts: [{ kind: "text", text: "continue" }],
+  });
+  assert.equal(send.action, "send");
+  assert.deepEqual(send.continuation, continuation);
+
+  const status = validate({
+    action: "status",
     continuation,
-  );
-  assert.deepEqual(
-    validate({
-      action: "watch",
-      continuation,
-    }).continuation,
+  });
+  assert.equal(status.action, "status");
+  assert.deepEqual(status.continuation, continuation);
+
+  const watch = validate({
+    action: "watch",
     continuation,
-  );
-  assert.deepEqual(
-    validate({
-      action: "cancel",
-      continuation,
-    }).continuation,
+  });
+  assert.equal(watch.action, "watch");
+  assert.deepEqual(watch.continuation, continuation);
+
+  const cancel = validate({
+    action: "cancel",
     continuation,
-  );
+  });
+  assert.equal(cancel.action, "cancel");
+  assert.deepEqual(cancel.continuation, continuation);
 });
 
 test("createRemoteAgentInputValidator rejects follow-up continuation with only conversation continuity", () => {

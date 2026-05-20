@@ -3,7 +3,7 @@
   "name": "External A2A Delegation",
   "version": "4.0.0",
   "entry": "./dist/index.js",
-  "description": "Delegate requests to external A2A agents and manage delegated tasks.",
+  "description": "Delegate to A2A agents from OpenClaw with remote_agent plus a zero-config local demo CLI.",
   "skills": [
     "./skills"
   ],

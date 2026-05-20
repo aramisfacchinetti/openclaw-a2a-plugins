@@ -13,7 +13,7 @@ import { createUserMessage } from "./runtime-harness.js";
 function createSnapshot(params: {
   taskId: string;
   contextId?: string;
-  state: "working" | "input-required" | "completed";
+  state: "submitted" | "working" | "input-required" | "completed";
 }) {
   return createTaskSnapshot({
     taskId: params.taskId,

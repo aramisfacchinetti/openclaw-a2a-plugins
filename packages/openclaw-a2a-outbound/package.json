@@ -1,7 +1,7 @@
 {
   "name": "@aramisfa/openclaw-a2a-outbound",
   "version": "4.0.0",
-  "description": "Outbound A2A delegation plugin for OpenClaw agents",
+  "description": "OpenClaw outbound A2A delegation plugin with a zero-config local demo CLI",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,7 +17,10 @@
     "a2a",
     "agent-to-agent",
     "delegation",
-    "agent"
+    "agent",
+    "a2a-cli",
+    "local-demo",
+    "continuation"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -27,6 +30,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./demo-peer": {
+      "types": "./dist/demo-peer.d.ts",
+      "import": "./dist/demo-peer.js",
+      "default": "./dist/demo-peer.js"
     }
   },
   "files": [

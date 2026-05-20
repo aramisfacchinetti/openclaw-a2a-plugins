@@ -9,6 +9,7 @@ import {
   A2A_OUTBOUND_OPENCLAW_CONFIG_SCHEMA,
   type A2AOutboundPluginConfig,
 } from "./config.js";
+import { registerA2ACli } from "./cli.js";
 import { log } from "./logging.js";
 import { buildRemoteAgentToolDefinition } from "./schemas.js";
 import { buildService } from "./service.js";
@@ -66,6 +67,25 @@ function registerTools(api: OpenClawPluginApi): void {
   const config = A2A_OUTBOUND_OPENCLAW_CONFIG_SCHEMA.parse?.(
     api.pluginConfig ?? {},
   ) as A2AOutboundPluginConfig;
+
+  api.registerCli?.(
+    ({ program }: { program: unknown }) => {
+      registerA2ACli(program as Parameters<typeof registerA2ACli>[0], {
+        pluginConfig: config,
+        rootConfig: api.config,
+      });
+    },
+    {
+      commands: ["a2a"],
+      descriptors: [
+        {
+          name: "a2a",
+          description: "A2A outbound demo and diagnostics",
+          hasSubcommands: true,
+        },
+      ],
+    },
+  );
 
   if (api.registrationMode !== "full") {
     log(api.logger, "debug", "a2a.plugin.registration.deferred", {

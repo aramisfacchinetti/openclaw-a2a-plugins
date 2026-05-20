@@ -1,0 +1,39 @@
+{
+  "send": {
+    "action": "send",
+    "target_alias": "local-demo",
+    "task_requirement": "required",
+    "parts": [
+      {
+        "kind": "text",
+        "text": "Create a durable demo task."
+      }
+    ]
+  },
+  "persist": "result.summary.continuation",
+  "replay": {
+    "action": "send",
+    "continuation": {
+      "target": {
+        "target_url": "http://127.0.0.1:41234/",
+        "card_path": "/.well-known/agent-card.json",
+        "preferred_transports": ["JSONRPC", "HTTP+JSON"],
+        "target_alias": "local-demo"
+      },
+      "task": {
+        "task_id": "demo-task-1",
+        "task_handle": "rah_demo"
+      },
+      "conversation": {
+        "context_id": "demo-context-1",
+        "can_send": true
+      }
+    },
+    "parts": [
+      {
+        "kind": "text",
+        "text": "Continue from the persisted continuation."
+      }
+    ]
+  }
+}

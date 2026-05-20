@@ -1,6 +1,15 @@
 # @aramisfa/openclaw-a2a-inbound
 
-Native OpenClaw inbound A2A channel plugin.
+Advanced OpenClaw inbound A2A channel plugin.
+
+You do not need this package for first success. Start with outbound:
+
+```bash
+openclaw plugins install @aramisfa/openclaw-a2a-outbound
+openclaw a2a demo run
+```
+
+Install inbound only when you want another A2A peer to call your OpenClaw instance over HTTP.
 
 This package serves an A2A agent card plus a JSON-RPC endpoint and routes inbound A2A requests into OpenClaw through one committed task runtime. The runtime is the single source of truth for `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and `tasks/resubscribe`.
 
@@ -17,6 +26,10 @@ Pin the exact published version if you want reproducible installs:
 ```bash
 openclaw plugins install @aramisfa/openclaw-a2a-inbound --pin
 ```
+
+## Advanced Entry Point
+
+Inbound requires real networking. Before enabling it in a deployment, read the networking prerequisites below and decide how the gateway will be reached.
 
 ## Networking Prerequisites
 
