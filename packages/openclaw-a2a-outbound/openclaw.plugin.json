@@ -1,7 +1,7 @@
 {
   "id": "openclaw-a2a-outbound",
   "name": "External A2A Delegation",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "entry": "./dist/index.js",
   "description": "Delegate to A2A agents from OpenClaw with remote_agent plus a zero-config local demo CLI.",
   "skills": [
