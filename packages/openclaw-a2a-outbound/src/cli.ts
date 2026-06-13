@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { A2AOutboundService } from "./service.js";
 import {
@@ -142,11 +143,11 @@ function continuationPlaceholder(baseUrl: string): Record<string, unknown> {
 }
 
 function writeStdout(line = ""): void {
-  process.stdout.write(`${line}\n`);
+  writeSync(1, `${line}\n`);
 }
 
 function writeStderr(line: string): void {
-  process.stderr.write(`${line}\n`);
+  writeSync(2, `${line}\n`);
 }
 
 function printHumanDemoRun(result: DemoRunResult): void {
@@ -634,7 +635,7 @@ export function registerA2ACli(
           });
 
           if (Boolean(opts.json)) {
-            console.log(JSON.stringify(instructions, null, 2));
+            writeStdout(JSON.stringify(instructions, null, 2));
           } else {
             printHumanServeInstructions(instructions);
           }

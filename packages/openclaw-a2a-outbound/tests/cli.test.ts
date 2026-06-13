@@ -100,7 +100,7 @@ async function waitForServeJson(
     }
 
     try {
-      const parsed = extractJsonObject(`${stdout}\n${stderr}`);
+      const parsed = extractJsonObject(stdout);
 
       if (
         typeof parsed === "object" &&
@@ -117,7 +117,7 @@ async function waitForServeJson(
   }
 
   throw new Error(
-    `timed out waiting for demo serve JSON output. stderr=${stderr.trim()}`,
+    `timed out waiting for demo serve JSON output. stdout=${stdout.trim()} stderr=${stderr.trim()}`,
   );
 }
 
