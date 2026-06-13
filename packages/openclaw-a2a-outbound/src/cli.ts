@@ -60,7 +60,6 @@ export type DemoServeInstructions = {
   agent_card_url: string;
   json_rpc_url: string;
   commands: {
-    enable_plugin: string;
     configure_target: string;
   };
   remote_agent_payloads: {
@@ -176,7 +175,6 @@ function printHumanServeInstructions(instructions: DemoServeInstructions): void 
   console.log(`JSON-RPC: ${instructions.json_rpc_url}`);
   console.log("");
   console.log("Configure OpenClaw outbound:");
-  console.log(instructions.commands.enable_plugin);
   console.log(instructions.commands.configure_target);
   console.log("");
   console.log("remote_agent payloads:");
@@ -262,8 +260,7 @@ export function buildDemoServeInstructions(
     agent_card_url: peer.cardUrl,
     json_rpc_url: peer.jsonRpcUrl,
     commands: {
-      enable_plugin: `openclaw plugins enable ${PLUGIN_ID}`,
-      configure_target: `openclaw config set plugins.entries.${PLUGIN_ID}.config ${shellQuote(
+      configure_target: `openclaw config set plugins.entries.openclaw-a2a-outbound.config ${shellQuote(
         configJson,
       )} --strict-json`,
     },
