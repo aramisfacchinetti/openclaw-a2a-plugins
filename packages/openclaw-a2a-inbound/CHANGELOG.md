@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 2.0.1
+
+### Patch Changes
+
+- d03a16f: Ship outbound-first onboarding with the `openclaw a2a` CLI, a packaged local demo peer, diagnostics, quickstart docs, examples, and inbound positioning as an advanced follow-on package.
+
 ## 2.0.0
 
 ### Major Changes

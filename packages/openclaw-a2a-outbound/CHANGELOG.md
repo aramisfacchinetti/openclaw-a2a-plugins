@@ -1,5 +1,15 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 4.1.0
+
+### Minor Changes
+
+- d03a16f: Ship outbound-first onboarding with the `openclaw a2a` CLI, a packaged local demo peer, diagnostics, quickstart docs, examples, and inbound positioning as an advanced follow-on package.
+
+### Patch Changes
+
+- 727e9ad: Register the `openclaw a2a` command during OpenClaw CLI metadata discovery so fresh installs can run the documented quickstart immediately after plugin installation. Clarify quickstart prerequisites and label raw `remote_agent` payloads as tool inputs rather than standalone shell commands.
+
 ## 4.0.0
 
 ### Major Changes
