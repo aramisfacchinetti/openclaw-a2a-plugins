@@ -1,6 +1,6 @@
 {
   "name": "@aramisfa/openclaw-a2a-outbound",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "OpenClaw outbound A2A delegation plugin with a zero-config local demo CLI",
   "license": "MIT",
   "repository": {
