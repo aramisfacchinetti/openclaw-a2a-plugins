@@ -5,7 +5,20 @@
 [![outbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-outbound?label=outbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
 [![inbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-inbound?label=inbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-inbound)
 
-Delegate work from OpenClaw to A2A agents. Start with the outbound plugin; inbound is only needed later when you want your OpenClaw instance to receive A2A calls from other peers.
+Make OpenClaw delegate work to remote A2A agents in about 5 minutes.
+
+Start with the outbound plugin. It gives OpenClaw one durable delegation tool, `remote_agent`, plus a local demo that proves outbound calls, task watching, and continuation replay without any external setup. Add inbound later only when you want your OpenClaw instance to receive A2A calls from other peers.
+
+## Why This Exists
+
+OpenClaw is good at orchestrating tools you already trust. This repo adds a clean way to send work to other A2A agents without inventing a second continuation format or wiring ad hoc webhooks between systems.
+
+Use it when you want OpenClaw to:
+
+- delegate a task to a specialist remote agent
+- watch or cancel long-running delegated work
+- persist follow-up state and resume later with the exact returned continuation
+- pair two OpenClaw instances over A2A once you are ready for inbound networking
 
 ## First Success
 
@@ -15,6 +28,18 @@ openclaw a2a demo run
 ```
 
 `openclaw a2a demo run` starts a deterministic local A2A peer, configures a temporary `local-demo` outbound target in memory, runs `list_targets`, sends a task-bearing request, watches it, checks status, prints `summary.continuation`, and replays one follow-up using that exact continuation.
+
+If that command succeeds, you have already verified the core contract:
+
+- OpenClaw can call an A2A agent through `remote_agent`
+- task-bearing requests can be watched and resumed
+- follow-up state is returned as `summary.continuation`
+
+## Who This Is For
+
+- OpenClaw users who want cross-agent delegation without standing up custom glue code
+- A2A developers who want a concrete OpenClaw integration instead of another protocol demo
+- self-hosters who want a local-first proof before exposing any inbound endpoint
 
 ## What You Get
 
