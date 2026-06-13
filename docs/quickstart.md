@@ -2,6 +2,11 @@
 
 The first-success path is outbound-only. You do not need a public URL, inbound networking, a second OpenClaw instance, or secrets.
 
+Prerequisites:
+
+- OpenClaw `2026.4.15` installed locally
+- the `openclaw` CLI available on your `PATH`
+
 ## Track 1: Self-Contained 5-Minute Demo
 
 ```bash
@@ -31,19 +36,30 @@ Write the continuation for issue reports or local experimentation:
 openclaw a2a demo run --write-continuation ./continuation.json
 ```
 
-## Track 2: Raw `remote_agent` Flow
+## Track 2: Raw `remote_agent` Payloads
+
+This track assumes the plugin is already installed.
+
+The JSON objects below are `remote_agent` tool inputs for an OpenClaw session or integration harness. They are not standalone shell commands.
 
 Start the packaged local peer and keep it running:
 
 ```bash
-openclaw a2a demo serve --port 41234
+openclaw a2a demo serve --port 41234 --json
 ```
+
+`demo serve --json` prints the same target config command and payloads shown below.
 
 Configure outbound against the demo peer:
 
 ```bash
-openclaw plugins enable openclaw-a2a-outbound
 openclaw config set plugins.entries.openclaw-a2a-outbound.config '{"enabled":true,"defaults":{"timeoutMs":30000,"cardPath":"/.well-known/agent-card.json","preferredTransports":["JSONRPC","HTTP+JSON"],"serviceParameters":{}},"targets":[{"alias":"local-demo","baseUrl":"http://127.0.0.1:41234","description":"Deterministic local A2A demo peer.","tags":["demo","local"],"cardPath":"/.well-known/agent-card.json","preferredTransports":["JSONRPC","HTTP+JSON"],"examples":["Create a durable demo task.","Continue from the persisted continuation."],"default":true}],"taskHandles":{"ttlMs":86400000,"maxEntries":100},"policy":{"acceptedOutputModes":["text/plain","application/json"],"normalizeBaseUrl":true,"enforceSupportedTransports":true,"allowTargetUrlOverride":false}}' --strict-json
+```
+
+Verify the configured target while the local peer is still running:
+
+```bash
+openclaw a2a doctor --alias local-demo --json
 ```
 
 Discover the target:
@@ -150,7 +166,7 @@ Continuation replay:
 
 ## Diagnostics
 
-For real installs, run:
+For real installs, run the doctor after configuring a target:
 
 ```bash
 openclaw a2a doctor --alias local-demo

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createLoggerBackedRuntime } from "openclaw/plugin-sdk/runtime";
+import cliMetadata from "../dist/cli-metadata.js";
 import plugin from "../dist/index.js";
 
 type RegisterTool = OpenClawPluginApi["registerTool"];
@@ -74,4 +75,71 @@ test("integration smoke: plugin loads with official OpenClawPluginApi shape", ()
   assert.equal(registrations[0]?.tool.name, "remote_agent");
   assert.deepEqual(registrations[0]?.opts, { optional: true });
   assert.equal(typeof registrations[0]?.tool.execute, "function");
+});
+
+test("cli metadata entry registers the a2a command during discovery", () => {
+  const registrations: Array<{
+    commands?: string[];
+    descriptors?: Array<{
+      name: string;
+      description?: string;
+      hasSubcommands?: boolean;
+    }>;
+  }> = [];
+
+  const api = {
+    id: "openclaw-a2a-outbound",
+    name: "openclaw-a2a-outbound",
+    version: "1.0.0",
+    description: "test",
+    source: "tests",
+    registrationMode: "cli-metadata",
+    config: {} as OpenClawPluginApi["config"],
+    pluginConfig: {
+      enabled: false,
+    },
+    runtime: {} as OpenClawPluginApi["runtime"],
+    logger: {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+    },
+    registerTool() {},
+    registerHook() {},
+    registerHttpRoute() {},
+    registerChannel() {},
+    registerGatewayMethod() {},
+    registerCli(
+      _registrar: unknown,
+      opts?: {
+        commands?: string[];
+        descriptors?: Array<{
+          name: string;
+          description?: string;
+          hasSubcommands?: boolean;
+        }>;
+      },
+    ) {
+      registrations.push(opts ?? {});
+    },
+    registerService() {},
+    registerProvider() {},
+    registerCommand() {},
+    resolvePath(input: string) {
+      return input;
+    },
+    on() {},
+  } as unknown as OpenClawPluginApi;
+
+  cliMetadata.register(api);
+
+  assert.deepEqual(registrations[0]?.commands, ["a2a"]);
+  assert.deepEqual(registrations[0]?.descriptors, [
+    {
+      name: "a2a",
+      description: "A2A outbound demo and diagnostics",
+      hasSubcommands: true,
+    },
+  ]);
 });
