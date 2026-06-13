@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 4.1.1
+
+### Patch Changes
+
+- 8eb3944: Keep `openclaw a2a ... --json` machine-readable by writing command payloads to stdout, reduce default plugin lifecycle log noise during CLI startup, and fix the outbound package README quickstart link on npm so it resolves to the repository guide.
+
 ## 4.1.0
 
 ### Minor Changes
