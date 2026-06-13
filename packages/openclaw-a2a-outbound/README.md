@@ -14,7 +14,7 @@ This package registers:
 - the `openclaw a2a` CLI family for demos and diagnostics
 - one optional OpenClaw tool, `remote_agent`, with actions `list_targets`, `send`, `watch`, `status`, and `cancel`
 
-For a raw payload walkthrough, see [../../docs/quickstart.md](../../docs/quickstart.md).
+For a raw payload walkthrough, see [docs/quickstart.md](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/blob/master/docs/quickstart.md).
 
 ## Installation
 

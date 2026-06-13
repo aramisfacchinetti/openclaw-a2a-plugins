@@ -96,7 +96,7 @@ function registerTools(api: OpenClawPluginApi): void {
   }
 
   if (config.enabled !== true) {
-    log(api.logger, "info", "a2a.plugin.disabled", {
+    log(api.logger, "debug", "a2a.plugin.disabled", {
       pluginId: PLUGIN_ID,
       registrationMode: api.registrationMode,
     });
@@ -129,7 +129,7 @@ function registerTools(api: OpenClawPluginApi): void {
 
   api.registerTool(remoteAgentTool, { optional: true });
 
-  log(api.logger, "info", "a2a.plugin.loaded", {
+  log(api.logger, "debug", "a2a.plugin.loaded", {
     pluginId: PLUGIN_ID,
     registrationMode: api.registrationMode,
     tools: [remoteAgentTool.name],

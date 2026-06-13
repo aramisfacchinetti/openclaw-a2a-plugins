@@ -141,56 +141,66 @@ function continuationPlaceholder(baseUrl: string): Record<string, unknown> {
   };
 }
 
+function writeStdout(line = ""): void {
+  process.stdout.write(`${line}\n`);
+}
+
+function writeStderr(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
+
 function printHumanDemoRun(result: DemoRunResult): void {
-  console.log("OpenClaw A2A local demo");
-  console.log(`Peer: ${result.peer.base_url}`);
-  console.log(`Agent card: ${result.peer.agent_card_url}`);
-  console.log(`JSON-RPC: ${result.peer.json_rpc_url}`);
-  console.log("");
+  writeStdout("OpenClaw A2A local demo");
+  writeStdout(`Peer: ${result.peer.base_url}`);
+  writeStdout(`Agent card: ${result.peer.agent_card_url}`);
+  writeStdout(`JSON-RPC: ${result.peer.json_rpc_url}`);
+  writeStdout();
 
   for (const step of result.steps) {
     const label = step.ok ? "[ok]" : "[fail]";
     const summaryText =
       step.summary?.message_text ??
       (step.summary?.targets ? `${step.summary.targets.length} target(s)` : "");
-    console.log(`${label} ${step.name}${summaryText ? ` - ${summaryText}` : ""}`);
+    writeStdout(
+      `${label} ${step.name}${summaryText ? ` - ${summaryText}` : ""}`,
+    );
   }
 
   if (result.continuation !== undefined) {
-    console.log("");
-    console.log("Persist this summary.continuation for follow-up:");
-    console.log(JSON.stringify(result.continuation, null, 2));
+    writeStdout();
+    writeStdout("Persist this summary.continuation for follow-up:");
+    writeStdout(JSON.stringify(result.continuation, null, 2));
   }
 
   if (result.continuation_path !== undefined) {
-    console.log("");
-    console.log(`Continuation written to ${result.continuation_path}`);
+    writeStdout();
+    writeStdout(`Continuation written to ${result.continuation_path}`);
   }
 }
 
 function printHumanServeInstructions(instructions: DemoServeInstructions): void {
-  console.log("OpenClaw A2A local demo peer");
-  console.log(`Base URL: ${instructions.base_url}`);
-  console.log(`Agent card: ${instructions.agent_card_url}`);
-  console.log(`JSON-RPC: ${instructions.json_rpc_url}`);
-  console.log("");
-  console.log("Configure OpenClaw outbound:");
-  console.log(instructions.commands.configure_target);
-  console.log("");
-  console.log("remote_agent payloads:");
+  writeStdout("OpenClaw A2A local demo peer");
+  writeStdout(`Base URL: ${instructions.base_url}`);
+  writeStdout(`Agent card: ${instructions.agent_card_url}`);
+  writeStdout(`JSON-RPC: ${instructions.json_rpc_url}`);
+  writeStdout();
+  writeStdout("Configure OpenClaw outbound:");
+  writeStdout(instructions.commands.configure_target);
+  writeStdout();
+  writeStdout("remote_agent payloads:");
 
   for (const [name, payload] of Object.entries(instructions.remote_agent_payloads)) {
-    console.log("");
-    console.log(`${name}:`);
-    console.log(JSON.stringify(payload, null, 2));
+    writeStdout();
+    writeStdout(`${name}:`);
+    writeStdout(JSON.stringify(payload, null, 2));
   }
 }
 
 function printHumanDoctor(result: DoctorResult): void {
-  console.log(`OpenClaw A2A doctor (${result.alias})`);
+  writeStdout(`OpenClaw A2A doctor (${result.alias})`);
 
   for (const check of result.checks) {
-    console.log(`[${check.status}] ${check.name}: ${check.message}`);
+    writeStdout(`[${check.status}] ${check.name}: ${check.message}`);
   }
 }
 
@@ -210,7 +220,7 @@ function parsePort(value: unknown): number | undefined {
 
 function outputResult(value: unknown, json: boolean): void {
   if (json) {
-    console.log(JSON.stringify(value, null, 2));
+    writeStdout(JSON.stringify(value, null, 2));
   }
 }
 
@@ -231,7 +241,7 @@ async function runCommand(
     process.exitCode = 1;
 
     if (json) {
-      console.log(
+      writeStdout(
         JSON.stringify(
           {
             ok: false,
@@ -244,7 +254,7 @@ async function runCommand(
       return;
     }
 
-    console.error(error instanceof Error ? error.message : String(error));
+    writeStderr(error instanceof Error ? error.message : String(error));
   }
 }
 

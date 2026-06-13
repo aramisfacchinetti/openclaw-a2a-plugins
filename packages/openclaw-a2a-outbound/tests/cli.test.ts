@@ -21,6 +21,7 @@ import { PLUGIN_ID } from "../dist/constants.js";
 const execFileAsync = promisify(execFile);
 const packageDir = process.cwd();
 const repoRoot = resolve(packageDir, "../..");
+const openclawBin = resolve(repoRoot, "node_modules/.bin/openclaw");
 
 async function reservePort(): Promise<number> {
   const { createServer } = await import("node:net");
@@ -266,8 +267,8 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
     };
 
     await execFileAsync(
-      "corepack",
-      ["pnpm", "exec", "openclaw", "plugins", "install", tarballPath],
+      openclawBin,
+      ["plugins", "install", tarballPath],
       {
         cwd: repoRoot,
         env,
@@ -275,16 +276,14 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
     );
 
     const demoRun = await execFileAsync(
-      "corepack",
-      ["pnpm", "exec", "openclaw", "a2a", "demo", "run", "--json"],
+      openclawBin,
+      ["a2a", "demo", "run", "--json"],
       {
         cwd: repoRoot,
         env,
       },
     );
-    const demoRunJson = extractJsonObject(
-      `${demoRun.stdout}\n${demoRun.stderr}`,
-    ) as {
+    const demoRunJson = JSON.parse(demoRun.stdout) as {
       ok?: boolean;
       steps?: Array<{ name?: string }>;
       continuation?: { task?: { task_id?: string } };
@@ -299,11 +298,8 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
 
     const continuationPath = join(tempDir, "continuation.json");
     await execFileAsync(
-      "corepack",
+      openclawBin,
       [
-        "pnpm",
-        "exec",
-        "openclaw",
         "a2a",
         "demo",
         "run",
@@ -324,11 +320,8 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
 
     const port = await reservePort();
     serveChild = spawn(
-      "corepack",
+      openclawBin,
       [
-        "pnpm",
-        "exec",
-        "openclaw",
         "a2a",
         "demo",
         "serve",
@@ -356,16 +349,14 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
     });
 
     const doctor = await execFileAsync(
-      "corepack",
-      ["pnpm", "exec", "openclaw", "a2a", "doctor", "--alias", "local-demo", "--json"],
+      openclawBin,
+      ["a2a", "doctor", "--alias", "local-demo", "--json"],
       {
         cwd: repoRoot,
         env,
       },
     );
-    const doctorJson = extractJsonObject(
-      `${doctor.stdout}\n${doctor.stderr}`,
-    ) as {
+    const doctorJson = JSON.parse(doctor.stdout) as {
       ok?: boolean;
       checks?: Array<{ name?: string; status?: string }>;
     };
