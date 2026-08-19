@@ -270,6 +270,34 @@ test("plugin registers one optional remote_agent tool", () => {
   ]);
 });
 
+test("plugin registers remote_agent during tool-discovery passes", () => {
+  const tools: RegisteredTool[] = [];
+  let api!: OpenClawPluginApi;
+
+  api = createApi(
+    { enabled: true },
+    (descriptor, options) => {
+      tools.push({ descriptor, options });
+    },
+    "tool-discovery",
+  );
+  plugin.register(api);
+
+  const logs = getCapturedLogs(api);
+
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0]?.descriptor.name, "remote_agent");
+  assert.deepEqual(tools[0]?.options, { optional: true });
+  assert.equal(
+    logs.debug.some(
+      (entry) =>
+        entry.includes("a2a.plugin.loaded") &&
+        entry.includes('"registrationMode":"tool-discovery"'),
+    ),
+    true,
+  );
+});
+
 test("plugin registration parses pluginConfig through configSchema once", () => {
   const tools: RegisteredTool[] = [];
   const configSchema = plugin.configSchema as {
