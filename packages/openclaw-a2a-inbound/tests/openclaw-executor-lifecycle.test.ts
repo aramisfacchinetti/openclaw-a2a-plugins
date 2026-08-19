@@ -754,6 +754,74 @@ test("tool-progress events publish data artifacts and tool summaries stay text-o
   assertNoA2AFilePartsOrTransportUrls(toolResult);
 });
 
+test("agent events tagged with a foreign or missing session key are dropped, not leaked into this task's output", async () => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-session-isolation");
+    emit({
+      runId: "run-session-isolation",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+
+    // `onAgentEvent` is a process-wide bus shared by every concurrently
+    // running session. These two events simulate an unrelated session's
+    // tool call and assistant output reaching this task's listener without
+    // a sessionKey (the exact shape that used to fail open and leak). They
+    // share this run's runId to prove runId matching alone is not
+    // sufficient isolation — the session key check must reject them too.
+    emit({
+      runId: "run-session-isolation",
+      stream: "tool",
+      sessionKey: "",
+      data: {
+        phase: "result",
+        name: "unrelated-session-tool",
+        toolCallId: "tool:unrelated/1",
+        isError: false,
+        result: { secret: "cross-session-leak" },
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "",
+      data: {
+        text: "This text belongs to an unrelated session and must not leak.",
+      },
+    });
+
+    await params.dispatcherOptions.deliver(
+      { text: "Legitimate reply" },
+      { kind: "final" },
+    );
+    emit({
+      runId: "run-session-isolation",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const serialized = JSON.stringify(recorder.events);
+  assert.ok(!serialized.includes("cross-session-leak"));
+  assert.ok(!serialized.includes("unrelated session"));
+  assert.ok(!serialized.includes("unrelated-session-tool"));
+
+  assert.equal(recorder.events.length, 1);
+  assert.equal(isMessage(recorder.events[0]), true);
+  const directMessage = recorder.events[0] as Message;
+  assert.equal(
+    directMessage.parts[0] && "text" in directMessage.parts[0]
+      ? directMessage.parts[0].text
+      : undefined,
+    "Legitimate reply",
+  );
+});
+
 test("default text or text/plain output filters file parts and vendor payloads from direct replies", async () => {
   const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-filter-text");
