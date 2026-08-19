@@ -87,7 +87,22 @@ function registerTools(api: OpenClawPluginApi): void {
     },
   );
 
-  if (api.registrationMode !== "full") {
+  // "tool-discovery" is the mode the host uses to enumerate available tools
+  // for an agent's system prompt/tool list without doing a full runtime
+  // activation (channel registration, gateway handlers, etc). It must still
+  // register the tool itself -- this mirrors defineChannelPluginEntry's own
+  // handling ("tool-discovery" -> registerFull) elsewhere in the host. Without
+  // this, remote_agent never appears as a callable tool in any agent whose
+  // turn is served through that discovery path (found 2026-08-19: it made the
+  // tool permanently unreachable outside a narrow "full" runtime path).
+  //
+  // Compared as `string` deliberately: this package's pinned openclaw
+  // peerDependency (2026.4.15) predates "tool-discovery" in
+  // PluginRegistrationMode's type, but newer hosts (confirmed on 2026.7.1-2)
+  // already send it at runtime. Widening avoids a stale non-overlap type
+  // error while staying a no-op against hosts that never send this value.
+  const registrationMode: string = api.registrationMode;
+  if (registrationMode !== "full" && registrationMode !== "tool-discovery") {
     log(api.logger, "debug", "a2a.plugin.registration.deferred", {
       pluginId: PLUGIN_ID,
       registrationMode: api.registrationMode,
