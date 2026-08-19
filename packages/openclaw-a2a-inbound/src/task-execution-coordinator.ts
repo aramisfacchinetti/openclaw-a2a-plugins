@@ -558,10 +558,12 @@ export class A2ATaskExecutionCoordinator {
 
     const eventSessionKey = readTrimmedString(event.sessionKey);
 
-    if (!eventSessionKey) {
-      return true;
-    }
-
+    // Fail closed: an event with no sessionKey cannot be proven to belong
+    // to this task, and `onAgentEvent` is a process-wide bus shared by
+    // every concurrently running session. Treating an untagged event as a
+    // match let unrelated sessions' tool calls and assistant output leak
+    // into this A2A task's response. An expected session key that was set
+    // must be positively matched, never assumed.
     return eventSessionKey === this.expectedSessionKey;
   }
 
