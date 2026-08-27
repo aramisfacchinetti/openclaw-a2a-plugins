@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { CHANNEL_ID } from "../dist/constants.js";
 import {
   A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA,
+  A2A_INBOUND_CHANNEL_CONFIG_SCHEMA,
   A2A_INBOUND_CHANNEL_CONFIG_UI_HINTS,
   A2A_INBOUND_PLUGIN_CONFIG_JSON_SCHEMA,
   A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA,
@@ -33,6 +35,19 @@ test("plugin configSchema export reuses the canonical plugin JSON schema", () =>
     A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA.jsonSchema,
     A2A_INBOUND_PLUGIN_CONFIG_JSON_SCHEMA,
   );
+});
+
+test("manifest channelConfigs stays in lockstep with the TypeScript channel config schema export", () => {
+  const rawManifest = readFileSync(
+    new URL("../openclaw.plugin.json", import.meta.url),
+    "utf8",
+  );
+
+  const manifest = asRecord(JSON.parse(rawManifest));
+  const channelConfigs = asRecord(manifest.channelConfigs);
+  const a2aChannelConfig = asRecord(channelConfigs[CHANNEL_ID]);
+
+  assert.deepEqual(a2aChannelConfig, A2A_INBOUND_CHANNEL_CONFIG_SCHEMA);
 });
 
 test("channel schema keeps the restored phase 1 taskStore contract and text/json defaults", () => {
