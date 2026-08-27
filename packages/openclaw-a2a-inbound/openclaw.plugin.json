@@ -11,5 +11,235 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "channelConfigs": {
+    "a2a": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "accounts": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "label": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "publicBaseUrl": {
+                  "type": "string"
+                },
+                "defaultAgentId": {
+                  "type": "string"
+                },
+                "sessionStore": {
+                  "type": "string"
+                },
+                "protocolVersion": {
+                  "type": "string",
+                  "default": "0.3.0"
+                },
+                "agentCardPath": {
+                  "type": "string",
+                  "default": "/.well-known/agent-card.json"
+                },
+                "jsonRpcPath": {
+                  "type": "string",
+                  "default": "/a2a/jsonrpc"
+                },
+                "maxBodyBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1048576
+                },
+                "defaultInputModes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain",
+                      "application/json"
+                    ]
+                  },
+                  "default": [
+                    "text/plain",
+                    "application/json"
+                  ]
+                },
+                "defaultOutputModes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "text/plain",
+                    "application/json"
+                  ]
+                },
+                "agentStyle": {
+                  "type": "string",
+                  "enum": [
+                    "hybrid",
+                    "task-generating"
+                  ],
+                  "default": "hybrid"
+                },
+                "originRoutingPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "legacy-origin-routing",
+                    "suppress-generic-followup"
+                  ],
+                  "default": "suppress-generic-followup"
+                },
+                "taskStore": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "memory"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "path"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "json-file"
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  ],
+                  "default": {
+                    "kind": "memory"
+                  }
+                },
+                "skills": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "name"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "tags": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      },
+                      "examples": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "default": []
+                      }
+                    }
+                  },
+                  "default": [
+                    {
+                      "id": "chat",
+                      "name": "Chat",
+                      "description": "Routes inbound A2A requests with text and structured data into the configured OpenClaw agent. Inbound file parts are unsupported.",
+                      "tags": [
+                        "chat",
+                        "openclaw"
+                      ],
+                      "examples": [
+                        "Summarize the latest incident and propose the next two steps."
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "uiHints": {
+        "accounts": {
+          "label": "Accounts",
+          "help": "A2A inbound endpoints exposed by this channel."
+        },
+        "accounts.*.publicBaseUrl": {
+          "label": "Public Base URL",
+          "help": "Externally reachable base URL used in the agent card.",
+          "placeholder": "https://agents.example.com"
+        },
+        "accounts.*.defaultAgentId": {
+          "label": "Default Agent Id",
+          "help": "Preferred OpenClaw agent route for inbound requests."
+        },
+        "accounts.*.agentCardPath": {
+          "label": "Agent Card Path",
+          "help": "HTTP path serving the A2A agent card.",
+          "advanced": true
+        },
+        "accounts.*.jsonRpcPath": {
+          "label": "JSON-RPC Path",
+          "help": "HTTP path serving the A2A JSON-RPC transport.",
+          "advanced": true
+        },
+        "accounts.*.taskStore.kind": {
+          "label": "Task Store",
+          "help": "Persist tasks in memory only or in a single-writer JSON file directory.",
+          "advanced": true
+        },
+        "accounts.*.agentStyle": {
+          "label": "Agent Style",
+          "help": "Choose \"hybrid\" to stay protocol-faithful or \"task-generating\" to force new executions onto the durable task path.",
+          "advanced": true
+        },
+        "accounts.*.originRoutingPolicy": {
+          "label": "Origin Routing Policy",
+          "help": "Default to \"suppress-generic-followup\" to omit generic follow-up routing fields. Use \"legacy-origin-routing\" only as a short-lived escape hatch when host behavior still depends on generic OpenClaw origin metadata.",
+          "advanced": true
+        },
+        "accounts.*.taskStore.path": {
+          "label": "Task Store Path",
+          "help": "Absolute directory path used when task storage is set to json-file.",
+          "placeholder": "/var/lib/openclaw/a2a-tasks",
+          "advanced": true
+        }
+      }
+    }
   }
 }
