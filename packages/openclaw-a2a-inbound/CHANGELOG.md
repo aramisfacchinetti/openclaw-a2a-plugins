@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 2.0.2
+
+### Patch Changes
+
+- 7f2faba: Add `channelConfigs.a2a` metadata to the inbound plugin manifest so OpenClaw can expose the channel configuration schema and setup UI before runtime loading.
+
 ## 2.0.1
 
 ### Patch Changes
