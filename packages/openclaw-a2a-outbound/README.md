@@ -47,8 +47,8 @@ The ClawHub skill is an optional guided setup helper for installing, enabling, c
 
 ## Requirements
 
-- Node.js `>=22.12.0`
-- OpenClaw `2026.4.15`
+- Node.js `>=24.16.0 <25 || >=26.1.0`
+- OpenClaw `2026.9.6`
 
 ## CLI
 

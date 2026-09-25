@@ -4,7 +4,7 @@ import type {
   RequestContext,
 } from "@a2a-js/sdk/server";
 import { A2AError } from "@a2a-js/sdk/server";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createInboundEnvelopeBuilder } from "openclaw/plugin-sdk/inbound-envelope";
 import type {
   ChannelGatewayContext,

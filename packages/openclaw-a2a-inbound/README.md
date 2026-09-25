@@ -246,8 +246,8 @@ Channel config lives under `channels.a2a`, not under `plugins.entries`.
 
 ## Requirements
 
-- Node.js `>=22.12.0`
-- OpenClaw `2026.3.2`
+- Node.js `>=24.16.0 <25 || >=26.1.0`
+- OpenClaw `2026.9.6`
 
 ## Development
 

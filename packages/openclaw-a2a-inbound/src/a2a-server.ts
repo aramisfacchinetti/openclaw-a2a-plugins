@@ -13,7 +13,7 @@ import {
   jsonRpcHandler,
 } from "@a2a-js/sdk/server/express";
 import express, { type RequestHandler } from "express";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import type {
   ChannelGatewayContext,
 } from "openclaw/plugin-sdk/channel-contract";

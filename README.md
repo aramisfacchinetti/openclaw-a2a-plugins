@@ -1,7 +1,7 @@
 # A2A Plugins for OpenClaw
 
 [![license](https://img.shields.io/github/license/aramisfacchinetti/openclaw-a2a-plugins)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins/blob/master/LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.4.15-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.9.6-0A7B83)](https://github.com/aramisfacchinetti/openclaw-a2a-plugins)
 [![outbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-outbound?label=outbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-outbound)
 [![inbound npm](https://img.shields.io/npm/v/%40aramisfa%2Fopenclaw-a2a-inbound?label=inbound%20npm)](https://www.npmjs.com/package/@aramisfa/openclaw-a2a-inbound)
 

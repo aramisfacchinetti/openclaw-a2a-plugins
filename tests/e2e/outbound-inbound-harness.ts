@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Message } from "@a2a-js/sdk";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import type { A2AInboundAccountConfig } from "../../packages/openclaw-a2a-inbound/src/config.js";
 import type { A2AInboundServer } from "../../packages/openclaw-a2a-inbound/src/a2a-server.js";
 import type { A2AOutboundPluginConfig } from "../../packages/openclaw-a2a-outbound/src/config.js";

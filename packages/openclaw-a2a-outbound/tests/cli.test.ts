@@ -90,7 +90,9 @@ async function waitForServeJson(
     stderr += chunk;
   });
 
-  const deadline = Date.now() + 15000;
+  // OpenClaw 2026.9.6 can take over 30 seconds to cold-start an installed
+  // plugin command while it scans extensions and initializes the CLI runtime.
+  const deadline = Date.now() + 60000;
 
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
@@ -266,9 +268,17 @@ test("installed artifact exposes the documented quickstart flow end to end", asy
       XDG_CACHE_HOME: cacheDir,
     };
 
+    // Accept the local fixture and its declared capabilities in this
+    // isolated temporary home.
     await execFileAsync(
       openclawBin,
-      ["plugins", "install", tarballPath],
+      [
+        "plugins",
+        "install",
+        "--force",
+        "--accept-capabilities",
+        tarballPath,
+      ],
       {
         cwd: repoRoot,
         env,

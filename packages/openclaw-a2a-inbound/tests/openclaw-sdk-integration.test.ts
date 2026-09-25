@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type {
   ChannelPlugin,
   OpenClawPluginApi,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import { createLoggerBackedRuntime } from "openclaw/plugin-sdk/runtime";
 import plugin from "../dist/index.js";
 

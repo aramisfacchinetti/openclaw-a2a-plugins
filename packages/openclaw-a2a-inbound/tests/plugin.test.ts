@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type {
   ChannelPlugin,
   OpenClawPluginApi,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import { buildA2AInboundChannel } from "../dist/channel.js";
 import { A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE } from "../dist/constants.js";
 import plugin from "../dist/index.js";

@@ -1,8 +1,8 @@
 import { isAbsolute, resolve } from "node:path";
 import type {
-  ChannelConfigSchema,
+  ChannelPlugin,
   OpenClawPluginConfigSchema,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import {
   CHANNEL_ID,
   DEFAULT_AGENT_CARD_PATH,
@@ -12,6 +12,7 @@ import {
 } from "./constants.js";
 
 type JsonRecord = Record<string, unknown>;
+type ChannelConfigSchema = NonNullable<ChannelPlugin["configSchema"]>;
 
 export const DEFAULT_INPUT_MODES = [
   "text/plain",
@@ -92,13 +93,13 @@ export const A2A_INBOUND_PLUGIN_CONFIG_JSON_SCHEMA: NonNullable<
   properties: {},
 };
 
-export const A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA = {
+export const A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA: OpenClawPluginConfigSchema = {
   jsonSchema: A2A_INBOUND_PLUGIN_CONFIG_JSON_SCHEMA,
   uiHints: {},
   parse(_input?: unknown) {
     return {};
   },
-} satisfies OpenClawPluginConfigSchema;
+};
 
 export const A2A_INBOUND_CHANNEL_CONFIG_JSON_SCHEMA = {
   type: "object",

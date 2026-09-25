@@ -1,4 +1,4 @@
-import type { OpenClawPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import {
   ALL_TRANSPORTS,
   SUPPORTED_TRANSPORTS,
