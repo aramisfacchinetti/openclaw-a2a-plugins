@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 4.1.3
+
+### Patch Changes
+
+- e227292: Fix `remote_agent` registration during OpenClaw `tool-discovery` passes so the tool is available to agent turns that discover tools without performing full plugin activation.
+
 ## 4.1.2
 
 ### Patch Changes
