@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Message, Task } from "@a2a-js/sdk";
 import { createOpenClawA2AExecutor } from "../dist/openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "../dist/live-execution-registry.js";
+import { A2ATaskExecutionCoordinator } from "../dist/task-execution-coordinator.js";
 import { attachAcceptedOutputModes } from "../dist/request-context.js";
 import { createTaskStore } from "../dist/task-store.js";
 import {
@@ -752,6 +753,128 @@ test("tool-progress events publish data artifacts and tool summaries stay text-o
   assert.ok(toolResult);
   assert.deepEqual(toolResult?.artifact.parts.map((part) => part.kind), ["text"]);
   assertNoA2AFilePartsOrTransportUrls(toolResult);
+});
+
+test("agent events require the exact expected session key to enter this task's output", async () => {
+  const { executor } = await createExecutorHarness(async ({ params, emit }) => {
+    params.replyOptions?.onAgentRunStart?.("run-session-isolation");
+    emit({
+      runId: "run-session-isolation",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+
+    // All events share the active runId to verify that runId alone is not enough.
+    emit({
+      runId: "run-session-isolation",
+      stream: "tool",
+      sessionKey: null,
+      data: {
+        phase: "result",
+        name: "untagged-session-tool",
+        toolCallId: "tool:unrelated/1",
+        isError: false,
+        result: { secret: "cross-session-leak" },
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "",
+      data: {
+        text: "An empty session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: " \t ",
+      data: {
+        text: "A whitespace session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "session:foreign",
+      data: {
+        text: "A foreign session must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: " session:test ",
+      data: {
+        text: "A padded session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "session:test",
+      data: {
+        text: "Exact session output",
+      },
+    });
+
+    emit({
+      runId: "run-session-isolation",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+  });
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+
+  await executor.execute(requestContext, recorder.bus);
+  await recorder.finished;
+
+  const serialized = JSON.stringify(recorder.events);
+  assert.ok(!serialized.includes("cross-session-leak"));
+  assert.ok(!serialized.includes("untagged-session-tool"));
+  assert.ok(!serialized.includes("empty session key"));
+  assert.ok(!serialized.includes("whitespace session key"));
+  assert.ok(!serialized.includes("foreign session"));
+  assert.ok(!serialized.includes("padded session key"));
+
+  assert.equal(recorder.events.length, 1);
+  assert.equal(isMessage(recorder.events[0]), true);
+  const directMessage = recorder.events[0] as Message;
+  assert.equal(
+    directMessage.parts[0] && "text" in directMessage.parts[0]
+      ? directMessage.parts[0].text
+      : undefined,
+    "Exact session output",
+  );
+});
+
+test("agent events remain permissive when no expected session key is configured", async () => {
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+  const coordinator = new A2ATaskExecutionCoordinator(
+    requestContext,
+    recorder.bus,
+    new A2ALiveExecutionRegistry(),
+    "hybrid",
+  );
+
+  coordinator.handleAgentRunStart("run-without-expected-session");
+  coordinator.handleAgentEvent({
+    runId: "run-without-expected-session",
+    stream: "assistant",
+    data: { text: "Unbound session output" },
+  } as Parameters<typeof coordinator.handleAgentEvent>[0]);
+  await coordinator.finalizeSuccess();
+
+  const directMessage = recorder.events.find(isMessage) as Message | undefined;
+  assert.ok(directMessage);
+  assert.equal(
+    directMessage?.parts[0] && "text" in directMessage.parts[0]
+      ? directMessage.parts[0].text
+      : undefined,
+    "Unbound session output",
+  );
 });
 
 test("default text or text/plain output filters file parts and vendor payloads from direct replies", async () => {

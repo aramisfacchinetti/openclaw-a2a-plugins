@@ -239,7 +239,7 @@ export class A2ATaskExecutionCoordinator {
     private readonly agentStyle: A2AInboundAgentStyle,
     expectedSessionKey?: string,
   ) {
-    this.expectedSessionKey = expectedSessionKey;
+    this.expectedSessionKey = readTrimmedString(expectedSessionKey);
     this.responseMode =
       this.liveExecutions.getRequestMode(this.requestContext.userMessage.messageId) ??
       "blocking";
@@ -556,12 +556,13 @@ export class A2ATaskExecutionCoordinator {
       return true;
     }
 
-    const eventSessionKey = readTrimmedString(event.sessionKey);
+    const eventSessionKey =
+      typeof event.sessionKey === "string" && event.sessionKey.trim().length > 0
+        ? event.sessionKey
+        : undefined;
 
-    if (!eventSessionKey) {
-      return true;
-    }
-
+    // Agent events are process-wide; once a session is known, require an exact
+    // session-key match so untagged or foreign events cannot enter this task.
     return eventSessionKey === this.expectedSessionKey;
   }
 

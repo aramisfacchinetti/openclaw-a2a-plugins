@@ -22,7 +22,7 @@ type RuntimeScript = (ctx: {
     runId: string;
     stream: string;
     data: Record<string, unknown>;
-    sessionKey?: string;
+    sessionKey?: string | null;
   }) => void;
   waitForAbort: () => Promise<void>;
 }) => Promise<void>;
@@ -74,13 +74,16 @@ export function createPluginRuntimeHarness(
     runId: string;
     stream: string;
     data: Record<string, unknown>;
-    sessionKey?: string;
+    sessionKey?: string | null;
   }) => {
+    const { sessionKey, ...eventData } = event;
     const payload = {
-      ...event,
+      ...eventData,
       seq: ++seq,
       ts: Date.now(),
-      sessionKey: event.sessionKey ?? defaultRoute.sessionKey,
+      ...(sessionKey === null
+        ? {}
+        : { sessionKey: sessionKey ?? defaultRoute.sessionKey }),
     };
 
     for (const listener of listeners) {
