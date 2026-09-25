@@ -66,10 +66,10 @@
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
     "express": "^5.2.1",
-    "openclaw": "2026.4.15"
+    "openclaw": "2026.9.6"
   },
   "peerDependencies": {
-    "openclaw": "2026.4.15"
+    "openclaw": "2026.9.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -77,7 +77,7 @@
     "tsx": "^4.21.0"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=24.16.0 <25 || >=26.1.0"
   },
   "publishConfig": {
     "access": "public"

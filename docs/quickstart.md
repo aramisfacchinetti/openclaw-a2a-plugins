@@ -4,7 +4,7 @@ The first-success path is outbound-only. You do not need a public URL, inbound n
 
 Prerequisites:
 
-- OpenClaw `2026.4.15` installed locally
+- OpenClaw `2026.9.6` installed locally
 - the `openclaw` CLI available on your `PATH`
 
 ## Track 1: Self-Contained 5-Minute Demo

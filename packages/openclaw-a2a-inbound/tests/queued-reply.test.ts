@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createA2AInboundServer } from "../dist/a2a-server.js";
 import { createPluginRuntimeHarness, createTestAccount, createUserMessage } from "./runtime-harness.js";
 

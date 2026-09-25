@@ -12,7 +12,7 @@ import type {
   OpenClawConfig,
   OpenClawPluginApi,
   PluginRuntime,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import type { A2AInboundAccountConfig } from "../../packages/openclaw-a2a-inbound/src/config.js";
 import { A2A_INBOUND_UNSUPPORTED_OUTBOUND_DELIVERY_MESSAGE } from "../../packages/openclaw-a2a-inbound/dist/constants.js";
 import type {
@@ -93,6 +93,20 @@ type SDKPluginEntry = {
   description?: string;
   configSchema?: unknown;
   register(api: OpenClawPluginApi): void;
+};
+
+type PluginApiTestDouble = Omit<Partial<OpenClawPluginApi>, "registerTool"> & {
+  id: string;
+  name: string;
+  source: string;
+  registrationMode: "full";
+  config: OpenClawPluginApi["config"];
+  runtime: PluginRuntime;
+  logger: OpenClawPluginApi["logger"];
+  registerTool(
+    tool: unknown,
+    opts?: { name?: string; names?: string[]; optional?: boolean },
+  ): void;
 };
 
 const REPO_ROOT = resolve(process.cwd());
@@ -211,7 +225,7 @@ function createCapturedPluginRegistry(params: {
       config: OpenClawPluginApi["config"];
       pluginConfig?: Record<string, unknown>;
     },
-  ) => OpenClawPluginApi;
+  ) => PluginApiTestDouble;
 } {
   const registry: PluginRegistryLike = {
     plugins: [],
@@ -228,7 +242,7 @@ function createCapturedPluginRegistry(params: {
   };
 
   const readToolNames = (
-    tool: AnyAgentTool | ((ctx: Record<string, unknown>) => AnyAgentTool | AnyAgentTool[] | null | undefined),
+    tool: unknown,
     opts?: { name?: string; names?: string[]; optional?: boolean },
   ): string[] => {
     const explicitNames = [
@@ -244,7 +258,12 @@ function createCapturedPluginRegistry(params: {
       return [];
     }
 
-    return typeof tool.name === "string" && tool.name.length > 0 ? [tool.name] : [];
+    if (typeof tool !== "object" || tool === null || !("name" in tool)) {
+      return [];
+    }
+
+    const name = (tool as { name?: unknown }).name;
+    return typeof name === "string" && name.length > 0 ? [name] : [];
   };
 
   return {
@@ -264,10 +283,10 @@ function createCapturedPluginRegistry(params: {
         logger: params.logger,
         registerTool(tool, opts) {
           const names = readToolNames(tool, opts);
-          const factory =
+          const factory: PluginRegistryLike["tools"][number]["factory"] =
             typeof tool === "function"
-              ? tool
-              : () => tool;
+              ? (tool as PluginRegistryLike["tools"][number]["factory"])
+              : () => tool as AnyAgentTool;
 
           for (const name of names) {
             pushUnique(record.toolNames, name);
@@ -280,19 +299,6 @@ function createCapturedPluginRegistry(params: {
             optional: opts?.optional === true,
             source: record.source,
           });
-        },
-        registerHook(events, _handler, opts) {
-          record.hookCount += 1;
-          const names = [
-            ...(typeof opts?.name === "string" ? [opts.name] : []),
-            ...(Array.isArray(events) ? events : [events]),
-          ];
-
-          for (const name of names) {
-            if (typeof name === "string" && name.length > 0) {
-              pushUnique(record.hookNames, name);
-            }
-          }
         },
         registerHttpRoute(route) {
           record.httpRoutes += 1;
@@ -311,9 +317,6 @@ function createCapturedPluginRegistry(params: {
             source: record.source,
           });
         },
-        registerGatewayMethod(method) {
-          pushUnique(record.gatewayMethods, method);
-        },
         registerCli(_registrar, opts) {
           for (const command of opts?.commands ?? []) {
             if (typeof command === "string" && command.length > 0) {
@@ -321,52 +324,7 @@ function createCapturedPluginRegistry(params: {
             }
           }
         },
-        registerReload() {},
-        registerNodeHostCommand(command) {
-          pushUnique(record.commands, command.command);
-        },
-        registerSecurityAuditCollector() {},
-        registerService(service) {
-          if (typeof service.id === "string" && service.id.length > 0) {
-            pushUnique(record.services, service.id);
-          }
-        },
-        registerCliBackend() {},
-        registerTextTransforms() {},
-        registerConfigMigration() {},
-        registerAutoEnableProbe() {},
-        registerProvider(provider) {
-          pushUnique(record.providerIds, provider.id);
-        },
-        registerSpeechProvider() {},
-        registerRealtimeTranscriptionProvider() {},
-        registerRealtimeVoiceProvider() {},
-        registerMediaUnderstandingProvider() {},
-        registerImageGenerationProvider() {},
-        registerVideoGenerationProvider() {},
-        registerMusicGenerationProvider() {},
-        registerWebFetchProvider() {},
-        registerWebSearchProvider() {},
-        registerInteractiveHandler() {},
-        onConversationBindingResolved() {},
-        registerCommand(command) {
-          pushUnique(record.commands, command.name);
-        },
-        registerContextEngine() {},
-        registerCompactionProvider() {},
-        registerAgentHarness() {},
-        registerMemoryCapability() {},
-        registerMemoryPromptSection() {},
-        registerMemoryPromptSupplement() {},
-        registerMemoryCorpusSupplement() {},
-        registerMemoryFlushPlan() {},
-        registerMemoryRuntime() {},
-        registerMemoryEmbeddingProvider() {},
-        resolvePath(input) {
-          return resolve(record.workspaceDir ?? REPO_ROOT, input);
-        },
-        on() {},
-      } satisfies OpenClawPluginApi;
+      } satisfies PluginApiTestDouble;
 
       return api;
     },
@@ -418,7 +376,7 @@ function registerPlugin(params: {
       config: OpenClawPluginApi["config"];
       pluginConfig?: Record<string, unknown>;
     },
-  ) => OpenClawPluginApi;
+  ) => PluginApiTestDouble;
   entry: SDKPluginEntry;
   source: string;
   config: OpenClawConfig;
@@ -430,7 +388,7 @@ function registerPlugin(params: {
     ...(params.pluginConfig ? { pluginConfig: params.pluginConfig } : {}),
   });
 
-  params.entry.register(api);
+  params.entry.register(api as unknown as OpenClawPluginApi);
   params.registry.plugins.push(record);
   return record;
 }

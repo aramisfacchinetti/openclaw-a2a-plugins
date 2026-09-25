@@ -1,7 +1,7 @@
 import type {
   ChannelAccountSnapshot,
   ChannelPlugin,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import {
   A2A_INBOUND_CHANNEL_CONFIG_SCHEMA,
   explainA2AInboundAccountUnconfigured,

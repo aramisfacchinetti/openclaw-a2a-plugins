@@ -6,7 +6,7 @@ import {
   type AgentExecutionEvent,
 } from "@a2a-js/sdk/server";
 import type { Message } from "@a2a-js/sdk";
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import type { A2AInboundAccountConfig } from "../src/config.js";
 
 type DispatchParams = Parameters<

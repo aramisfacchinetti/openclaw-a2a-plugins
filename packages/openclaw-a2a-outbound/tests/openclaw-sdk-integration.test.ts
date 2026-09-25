@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { createLoggerBackedRuntime } from "openclaw/plugin-sdk/runtime";
 import cliMetadata from "../dist/cli-metadata.js";
 import plugin from "../dist/index.js";

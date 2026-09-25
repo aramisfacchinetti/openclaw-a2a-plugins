@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { A2AInboundChannelConfig } from "./config.js";
 import type { A2AInboundPluginHost } from "./plugin-host.js";
 

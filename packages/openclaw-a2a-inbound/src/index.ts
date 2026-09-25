@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi, OpenClawPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, OpenClawPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import { buildA2AInboundChannel } from "./channel.js";
 import {
   A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA,
@@ -50,10 +50,10 @@ function registerPlugin(api: OpenClawPluginApi): void {
 
 export const id = PLUGIN_ID;
 
-export const plugin = {
+export const plugin: SDKPluginEntry = {
   id: PLUGIN_ID,
   configSchema: A2A_INBOUND_OPENCLAW_PLUGIN_CONFIG_SCHEMA,
   register: registerPlugin,
-} satisfies SDKPluginEntry;
+};
 
 export default plugin;

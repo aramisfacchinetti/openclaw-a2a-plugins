@@ -2,7 +2,7 @@ import {
   type AnyAgentTool,
   type OpenClawPluginApi,
   type OpenClawPluginConfigSchema,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import { jsonResult } from "openclaw/plugin-sdk/core";
 import { PLUGIN_ID } from "./constants.js";
 import {
