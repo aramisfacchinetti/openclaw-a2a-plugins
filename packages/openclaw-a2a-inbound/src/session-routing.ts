@@ -24,21 +24,92 @@ export interface A2ABoundPeerIdentity {
 
 type MessagePart = Message["parts"][number];
 
-// A2A v1.0 drafts discriminate parts by member presence instead of a `kind`
-// tag: a text part is `{ text: string, mediaType?: string }` with no `kind`
-// field at all. Our SDK types (and v0.3 wire format) require `kind: "text"`.
-// Real v1.0 clients (e.g. Hermes) omit `kind`, so a strict `part.kind`
-// check silently drops every part they send. This raw view lets us read
-// the fields defensively without widening the public MessagePart type.
+// The pinned 0.3 SDK types require `kind`; v1-style Parts use content-member
+// presence. Keep this raw view local to the compatibility boundary.
 interface RawMessagePart {
-  kind?: string;
+  kind?: unknown;
   text?: unknown;
   data?: unknown;
-  metadata?: Record<string, unknown>;
+  raw?: unknown;
+  url?: unknown;
+  metadata?: unknown;
 }
 
 function asRawPart(part: MessagePart): RawMessagePart {
   return part as unknown as RawMessagePart;
+}
+
+type MessagePartClassification =
+  | { type: "text"; text: string }
+  | { type: "data"; data: unknown }
+  | { type: "file"; member: "kind" | "raw" | "url" }
+  | { type: "invalid"; reason: string }
+  | { type: "other" };
+
+const V1_CONTENT_MEMBERS = ["text", "raw", "url", "data"] as const;
+
+function hasOwnProperty(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function classifyMessagePart(part: MessagePart): MessagePartClassification {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) {
+    return {
+      type: "invalid",
+      reason: "must be an object",
+    };
+  }
+
+  const raw = asRawPart(part);
+
+  if (hasOwnProperty(raw, "kind")) {
+    if (raw.kind === "text" && typeof raw.text === "string") {
+      return { type: "text", text: raw.text };
+    }
+
+    if (raw.kind === "data") {
+      return { type: "data", data: raw.data };
+    }
+
+    if (raw.kind === "file") {
+      return { type: "file", member: "kind" };
+    }
+
+    return { type: "other" };
+  }
+
+  const contentMembers = V1_CONTENT_MEMBERS.filter((member) =>
+    hasOwnProperty(raw, member),
+  );
+
+  if (contentMembers.length > 1) {
+    return {
+      type: "invalid",
+      reason:
+        "is ambiguous; A2A v1-style Parts must contain exactly one content member (text, raw, url, or data)",
+    };
+  }
+
+  const [member] = contentMembers;
+
+  if (!member) {
+    return { type: "other" };
+  }
+
+  if (member === "text") {
+    return typeof raw.text === "string"
+      ? { type: "text", text: raw.text }
+      : {
+          type: "invalid",
+          reason: "has a non-string text member for A2A v1-style Part compatibility",
+        };
+  }
+
+  if (member === "data") {
+    return { type: "data", data: raw.data };
+  }
+
+  return { type: "file", member };
 }
 
 const UNTRUSTED_MESSAGE_METADATA_LABEL =
@@ -55,40 +126,6 @@ type StableJsonValue =
   | string
   | StableJsonValue[]
   | { [key: string]: StableJsonValue };
-
-function readTextPart(part: MessagePart): string | undefined {
-  const raw = asRawPart(part);
-
-  if (raw.kind === "text" && typeof raw.text === "string") {
-    return raw.text;
-  }
-
-  // v1.0 member-presence discrimination: no `kind`, just a string `text`.
-  if (raw.kind === undefined && typeof raw.text === "string") {
-    return raw.text;
-  }
-
-  return undefined;
-}
-
-function isDataPart(part: MessagePart): boolean {
-  const raw = asRawPart(part);
-
-  if (raw.kind === "data") {
-    return true;
-  }
-
-  // v1.0 member-presence discrimination: no `kind`, just a `data` object.
-  return (
-    raw.kind === undefined &&
-    typeof raw.data === "object" &&
-    raw.data !== null
-  );
-}
-
-function readDataPartValue(part: MessagePart): unknown {
-  return asRawPart(part).data;
-}
 
 function toStableJsonValue(
   value: unknown,
@@ -188,7 +225,16 @@ function resolveBodyForAgent(params: {
   return "";
 }
 
-function unsupportedFilePartError(partIndex: number): A2AError {
+function unsupportedFilePartError(
+  partIndex: number,
+  member: "kind" | "raw" | "url",
+): A2AError {
+  if (member !== "kind") {
+    return A2AError.invalidParams(
+      `message.parts[${partIndex}].${member} is not supported; inbound A2A requests only accept text and data parts.`,
+    );
+  }
+
   return A2AError.invalidParams(
     `message.parts[${partIndex}].kind=file is not supported; inbound A2A requests only accept text and data parts.`,
   );
@@ -197,15 +243,26 @@ function unsupportedFilePartError(partIndex: number): A2AError {
 export function extractUserText(message: Message): string {
   return buildTextBody(
     message.parts
-      .map(readTextPart)
+      .map((part) => {
+        const classification = classifyMessagePart(part);
+        return classification.type === "text" ? classification.text : undefined;
+      })
       .filter((value): value is string => typeof value === "string"),
   );
 }
 
 export function validateInboundMessageParts(message: Message): void {
   message.parts.forEach((part, partIndex) => {
-    if (part.kind === "file") {
-      throw unsupportedFilePartError(partIndex);
+    const classification = classifyMessagePart(part);
+
+    if (classification.type === "file") {
+      throw unsupportedFilePartError(partIndex, classification.member);
+    }
+
+    if (classification.type === "invalid") {
+      throw A2AError.invalidParams(
+        `message.parts[${partIndex}] ${classification.reason}.`,
+      );
     }
   });
 }
@@ -270,26 +327,31 @@ export async function buildInboundRouteContext(params: {
   }
 
   for (const [partIndex, part] of params.requestContext.userMessage.parts.entries()) {
-    appendArrayEntry(textParts, readTextPart(part));
+    const classification = classifyMessagePart(part);
 
-    if (isDataPart(part)) {
+    if (classification.type === "text") {
+      appendArrayEntry(textParts, classification.text);
+    }
+
+    if (classification.type === "data") {
       hasStructuredData = true;
       appendArrayEntry(
         untrustedContext,
         createUntrustedJsonNote(
           `${UNTRUSTED_DATA_LABEL} (part ${partIndex + 1})`,
-          readDataPartValue(part),
+          classification.data,
         ),
       );
     }
 
-    const rawMetadata = asRawPart(part).metadata;
+    const raw = asRawPart(part);
+    const rawMetadata = raw.metadata;
 
     if (rawMetadata) {
       appendArrayEntry(
         untrustedContext,
         createUntrustedJsonNote(
-          `${UNTRUSTED_PART_METADATA_LABEL} (part ${partIndex + 1}, kind ${asRawPart(part).kind ?? "(none, v1.0-style part)"})`,
+          `${UNTRUSTED_PART_METADATA_LABEL} (part ${partIndex + 1}, kind ${raw.kind ?? "(none, v1-style part)"})`,
           rawMetadata,
         ),
       );

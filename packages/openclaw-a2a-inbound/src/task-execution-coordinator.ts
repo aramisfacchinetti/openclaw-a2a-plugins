@@ -239,7 +239,7 @@ export class A2ATaskExecutionCoordinator {
     private readonly agentStyle: A2AInboundAgentStyle,
     expectedSessionKey?: string,
   ) {
-    this.expectedSessionKey = expectedSessionKey;
+    this.expectedSessionKey = readTrimmedString(expectedSessionKey);
     this.responseMode =
       this.liveExecutions.getRequestMode(this.requestContext.userMessage.messageId) ??
       "blocking";
@@ -556,14 +556,13 @@ export class A2ATaskExecutionCoordinator {
       return true;
     }
 
-    const eventSessionKey = readTrimmedString(event.sessionKey);
+    const eventSessionKey =
+      typeof event.sessionKey === "string" && event.sessionKey.trim().length > 0
+        ? event.sessionKey
+        : undefined;
 
-    // Fail closed: an event with no sessionKey cannot be proven to belong
-    // to this task, and `onAgentEvent` is a process-wide bus shared by
-    // every concurrently running session. Treating an untagged event as a
-    // match let unrelated sessions' tool calls and assistant output leak
-    // into this A2A task's response. An expected session key that was set
-    // must be positively matched, never assumed.
+    // Agent events are process-wide; once a session is known, require an exact
+    // session-key match so untagged or foreign events cannot enter this task.
     return eventSessionKey === this.expectedSessionKey;
   }
 

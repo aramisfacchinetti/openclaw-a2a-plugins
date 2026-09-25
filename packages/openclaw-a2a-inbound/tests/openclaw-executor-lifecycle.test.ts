@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Message, Task } from "@a2a-js/sdk";
 import { createOpenClawA2AExecutor } from "../dist/openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "../dist/live-execution-registry.js";
+import { A2ATaskExecutionCoordinator } from "../dist/task-execution-coordinator.js";
 import { attachAcceptedOutputModes } from "../dist/request-context.js";
 import { createTaskStore } from "../dist/task-store.js";
 import {
@@ -754,7 +755,7 @@ test("tool-progress events publish data artifacts and tool summaries stay text-o
   assertNoA2AFilePartsOrTransportUrls(toolResult);
 });
 
-test("agent events tagged with a foreign or missing session key are dropped, not leaked into this task's output", async () => {
+test("agent events require the exact expected session key to enter this task's output", async () => {
   const { executor } = await createExecutorHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-session-isolation");
     emit({
@@ -763,19 +764,14 @@ test("agent events tagged with a foreign or missing session key are dropped, not
       data: { phase: "start" },
     });
 
-    // `onAgentEvent` is a process-wide bus shared by every concurrently
-    // running session. These two events simulate an unrelated session's
-    // tool call and assistant output reaching this task's listener without
-    // a sessionKey (the exact shape that used to fail open and leak). They
-    // share this run's runId to prove runId matching alone is not
-    // sufficient isolation — the session key check must reject them too.
+    // All events share the active runId to verify that runId alone is not enough.
     emit({
       runId: "run-session-isolation",
       stream: "tool",
-      sessionKey: "",
+      sessionKey: null,
       data: {
         phase: "result",
-        name: "unrelated-session-tool",
+        name: "untagged-session-tool",
         toolCallId: "tool:unrelated/1",
         isError: false,
         result: { secret: "cross-session-leak" },
@@ -786,14 +782,42 @@ test("agent events tagged with a foreign or missing session key are dropped, not
       stream: "assistant",
       sessionKey: "",
       data: {
-        text: "This text belongs to an unrelated session and must not leak.",
+        text: "An empty session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: " \t ",
+      data: {
+        text: "A whitespace session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "session:foreign",
+      data: {
+        text: "A foreign session must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: " session:test ",
+      data: {
+        text: "A padded session key must not leak.",
+      },
+    });
+    emit({
+      runId: "run-session-isolation",
+      stream: "assistant",
+      sessionKey: "session:test",
+      data: {
+        text: "Exact session output",
       },
     });
 
-    await params.dispatcherOptions.deliver(
-      { text: "Legitimate reply" },
-      { kind: "final" },
-    );
     emit({
       runId: "run-session-isolation",
       stream: "lifecycle",
@@ -808,8 +832,11 @@ test("agent events tagged with a foreign or missing session key are dropped, not
 
   const serialized = JSON.stringify(recorder.events);
   assert.ok(!serialized.includes("cross-session-leak"));
-  assert.ok(!serialized.includes("unrelated session"));
-  assert.ok(!serialized.includes("unrelated-session-tool"));
+  assert.ok(!serialized.includes("untagged-session-tool"));
+  assert.ok(!serialized.includes("empty session key"));
+  assert.ok(!serialized.includes("whitespace session key"));
+  assert.ok(!serialized.includes("foreign session"));
+  assert.ok(!serialized.includes("padded session key"));
 
   assert.equal(recorder.events.length, 1);
   assert.equal(isMessage(recorder.events[0]), true);
@@ -818,7 +845,35 @@ test("agent events tagged with a foreign or missing session key are dropped, not
     directMessage.parts[0] && "text" in directMessage.parts[0]
       ? directMessage.parts[0].text
       : undefined,
-    "Legitimate reply",
+    "Exact session output",
+  );
+});
+
+test("agent events remain permissive when no expected session key is configured", async () => {
+  const requestContext = createRequestContext();
+  const recorder = createEventBusRecorder();
+  const coordinator = new A2ATaskExecutionCoordinator(
+    requestContext,
+    recorder.bus,
+    new A2ALiveExecutionRegistry(),
+    "hybrid",
+  );
+
+  coordinator.handleAgentRunStart("run-without-expected-session");
+  coordinator.handleAgentEvent({
+    runId: "run-without-expected-session",
+    stream: "assistant",
+    data: { text: "Unbound session output" },
+  } as Parameters<typeof coordinator.handleAgentEvent>[0]);
+  await coordinator.finalizeSuccess();
+
+  const directMessage = recorder.events.find(isMessage) as Message | undefined;
+  assert.ok(directMessage);
+  assert.equal(
+    directMessage?.parts[0] && "text" in directMessage.parts[0]
+      ? directMessage.parts[0].text
+      : undefined,
+    "Unbound session output",
   );
 });
 
