@@ -87,7 +87,10 @@ function registerTools(api: OpenClawPluginApi): void {
     },
   );
 
-  if (api.registrationMode !== "full") {
+  // Newer OpenClaw hosts use "tool-discovery" to enumerate callable tools.
+  // Widen to string because our pinned OpenClaw types predate that mode.
+  const registrationMode: string = api.registrationMode;
+  if (registrationMode !== "full" && registrationMode !== "tool-discovery") {
     log(api.logger, "debug", "a2a.plugin.registration.deferred", {
       pluginId: PLUGIN_ID,
       registrationMode: api.registrationMode,
