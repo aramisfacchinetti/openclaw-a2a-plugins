@@ -1,7 +1,9 @@
 name: Publish
 
 on:
-  push:
+  pull_request:
+    types:
+      - closed
     branches:
       - master
   workflow_dispatch:
@@ -11,10 +13,12 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
-        github.event_name == 'push' &&
-        github.ref == 'refs/heads/master' &&
-        startsWith(github.event.head_commit.message, 'Merge pull request #') &&
-        contains(github.event.head_commit.message, 'changeset-release/master')
+        github.event_name == 'pull_request' &&
+        github.event.action == 'closed' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'master' &&
+        github.event.pull_request.head.ref == 'changeset-release/master' &&
+        github.event.pull_request.head.repo.full_name == github.repository
       )
     runs-on: ubuntu-latest
     permissions:
@@ -22,11 +26,11 @@ jobs:
       id-token: write
       pull-requests: write
     steps:
-      - name: Check out merged release commit
+      - name: Check out merged release state
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
