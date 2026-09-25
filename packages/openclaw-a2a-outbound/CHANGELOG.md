@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-outbound
 
+## 5.0.0
+
+### Major Changes
+
+- f177507: Require OpenClaw 2026.9.6 and align both plugins with its public SDK entry points and Node.js runtime floor.
+
 ## 4.1.3
 
 ### Patch Changes
