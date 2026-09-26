@@ -1,5 +1,15 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 3.0.0
+
+### Major Changes
+
+- f177507: Require OpenClaw 2026.9.6 and align both plugins with its public SDK entry points and Node.js runtime floor.
+
+### Patch Changes
+
+- 42462d1: Harden inbound A2A isolation by requiring exact session-key matches for agent events, and accept supported A2A v1-style member-discriminated text/data Parts while continuing to reject inbound file Parts.
+
 ## 2.0.2
 
 ### Patch Changes
