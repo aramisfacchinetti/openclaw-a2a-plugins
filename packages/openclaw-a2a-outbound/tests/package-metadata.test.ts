@@ -40,3 +40,18 @@ test('package name leaf stays aligned with the plugin id', () => {
   assert.equal(packageIdHint, PLUGIN_ID)
   assert.equal(packageJson.version, manifest.version)
 })
+
+test('remote_agent manifest contract stays discoverable and optional', () => {
+  const rawManifest = readFileSync(
+    new URL('../openclaw.plugin.json', import.meta.url),
+    'utf8',
+  )
+
+  const manifest = asRecord(JSON.parse(rawManifest))
+  const contracts = asRecord(manifest.contracts)
+  const toolMetadata = asRecord(manifest.toolMetadata)
+  const remoteAgentMetadata = asRecord(toolMetadata.remote_agent)
+
+  assert.deepEqual(contracts.tools, ['remote_agent'])
+  assert.equal(remoteAgentMetadata.optional, true)
+})

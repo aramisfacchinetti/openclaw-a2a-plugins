@@ -61,6 +61,18 @@ test("package channel metadata stays aligned with the exported channel id", () =
   assert.ok(manifestChannels.includes(CHANNEL_ID));
 });
 
+test("inbound channel takes precedence over OpenClaw's bundled A2A plugin", () => {
+  const rawManifest = readFileSync(
+    new URL("../openclaw.plugin.json", import.meta.url),
+    "utf8",
+  );
+  const manifest = asRecord(JSON.parse(rawManifest));
+  const channelConfigs = asRecord(manifest.channelConfigs);
+  const a2aChannelConfig = asRecord(channelConfigs[CHANNEL_ID]);
+
+  assert.deepEqual(a2aChannelConfig.preferOver, ["a2a"]);
+});
+
 test("inbound package stays publishable", () => {
   const rawPackage = readFileSync(
     new URL("../package.json", import.meta.url),

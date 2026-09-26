@@ -47,7 +47,13 @@ test("manifest channelConfigs stays in lockstep with the TypeScript channel conf
   const channelConfigs = asRecord(manifest.channelConfigs);
   const a2aChannelConfig = asRecord(channelConfigs[CHANNEL_ID]);
 
-  assert.deepEqual(a2aChannelConfig, A2A_INBOUND_CHANNEL_CONFIG_SCHEMA);
+  assert.deepEqual(
+    {
+      schema: a2aChannelConfig.schema,
+      uiHints: a2aChannelConfig.uiHints,
+    },
+    A2A_INBOUND_CHANNEL_CONFIG_SCHEMA,
+  );
 });
 
 test("channel schema keeps the restored phase 1 taskStore contract and text/json defaults", () => {
