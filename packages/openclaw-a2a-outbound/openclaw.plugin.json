@@ -4,6 +4,16 @@
   "version": "5.0.0",
   "entry": "./dist/index.js",
   "description": "Delegate to A2A agents from OpenClaw with remote_agent plus a zero-config local demo CLI.",
+  "contracts": {
+    "tools": [
+      "remote_agent"
+    ]
+  },
+  "toolMetadata": {
+    "remote_agent": {
+      "optional": true
+    }
+  },
   "skills": [
     "./skills"
   ],

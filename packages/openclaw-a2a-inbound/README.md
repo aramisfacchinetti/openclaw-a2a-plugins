@@ -172,6 +172,10 @@ Each account also exposes `agentStyle`:
 ## Example OpenClaw Config
 
 Channel config lives under `channels.a2a`, not under `plugins.entries`.
+When this package is installed and `channels.a2a` is configured, OpenClaw
+prefers this channel plugin over its bundled `a2a` plugin. If both plugins are
+explicitly selected, OpenClaw preserves that selection and reports duplicate
+channel diagnostics.
 
 ```json5
 {
