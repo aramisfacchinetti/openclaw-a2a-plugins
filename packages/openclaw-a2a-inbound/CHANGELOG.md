@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 3.0.1
+
+### Patch Changes
+
+- 402e2a8: Declare outbound tool ownership for OpenClaw tool discovery and prefer the inbound plugin over the bundled A2A channel when configured.
+
 ## 3.0.0
 
 ### Major Changes
