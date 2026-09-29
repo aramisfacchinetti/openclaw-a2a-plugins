@@ -11,6 +11,7 @@ import {
   A2AError,
   DefaultRequestHandler,
 } from "@a2a-js/sdk/server";
+import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
 import { createOpenClawA2AExecutor } from "../dist/openclaw-executor.js";
 import { A2ALiveExecutionRegistry } from "../dist/live-execution-registry.js";
 import { A2AInboundRequestHandler } from "../dist/request-handler.js";
@@ -100,6 +101,7 @@ function createBinding(taskId: string): StoredTaskBinding {
 async function createHandlerHarness(
   script: Parameters<typeof createPluginRuntimeHarness>[0],
   options?: Parameters<typeof createPluginRuntimeHarness>[1],
+  detachedWorkRunner: typeof runDetachedWebhookWork = runDetachedWebhookWork,
 ): Promise<{
   liveExecutions: A2ALiveExecutionRegistry;
   taskRuntime: Awaited<ReturnType<typeof createTaskStore>>;
@@ -138,6 +140,7 @@ async function createHandlerHarness(
       resubscribePlanner,
       agentExecutor,
       account.defaultOutputModes,
+      detachedWorkRunner,
     ),
   };
 }
@@ -364,7 +367,12 @@ test("sendMessageStream yields committed task events for promoted runs and tasks
   assert.equal(getPersistedArtifactText(persisted, "assistant-output"), "Promoted final answer");
 });
 
-test("getTask reads the latest snapshot and trims returned history", async () => {
+test("nonblocking requests dispatch in detached work and getTask reads the latest snapshot", async () => {
+  let detachedWorkStarted = 0;
+  const detachedWorkRunner: typeof runDetachedWebhookWork = async (run) => {
+    detachedWorkStarted += 1;
+    return await runDetachedWebhookWork(run);
+  };
   const harness = await createHandlerHarness(async ({ params, emit }) => {
     params.replyOptions?.onAgentRunStart?.("run-nonblocking");
     emit({
@@ -381,7 +389,7 @@ test("getTask reads the latest snapshot and trims returned history", async () =>
       stream: "lifecycle",
       data: { phase: "end" },
     });
-  });
+  }, undefined, detachedWorkRunner);
 
   const result = await harness.requestHandler.sendMessage({
     message: createUserMessage({
@@ -397,6 +405,7 @@ test("getTask reads the latest snapshot and trims returned history", async () =>
   if (!isTask(result)) {
     assert.fail("expected initial task");
   }
+  assert.equal(detachedWorkStarted, 1);
 
   await waitFor(async () => {
     const persisted = await harness.requestHandler.getTask({
