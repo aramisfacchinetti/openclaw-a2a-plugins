@@ -1,5 +1,11 @@
 # @aramisfa/openclaw-a2a-inbound
 
+## 3.0.2
+
+### Patch Changes
+
+- 5c860a6: Keep nonblocking inbound tasks admitted after the HTTP response returns.
+
 ## 3.0.1
 
 ### Patch Changes
