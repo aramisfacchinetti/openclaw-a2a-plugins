@@ -19,6 +19,7 @@ import {
   type AgentExecutionEvent,
   type AgentExecutor,
 } from "@a2a-js/sdk/server";
+import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
 import {
   createTaskSnapshot,
   createTaskStatusUpdate,
@@ -89,6 +90,8 @@ export class A2AInboundRequestHandler {
     private readonly resubscribePlanner: A2AResubscribePlanner,
     private readonly agentExecutor: AgentExecutor,
     private readonly defaultOutputModes: readonly string[],
+    private readonly detachedWorkRunner: typeof runDetachedWebhookWork =
+      runDetachedWebhookWork,
   ) {}
 
   getAgentCard(): Promise<AgentCard> {
@@ -294,12 +297,16 @@ export class A2AInboundRequestHandler {
         this.resolveAcceptedOutputModes(prepared),
       );
       const eventBus = new DefaultExecutionEventBus();
+      const execute = () => this.executeWithFallback(requestContext, eventBus);
 
       return {
         latestUserMessage: prepared.message,
         taskId: requestContext.taskId,
         eventQueue: new ExecutionEventQueue(eventBus),
-        executionPromise: this.executeWithFallback(requestContext, eventBus),
+        executionPromise:
+          mode === "non_blocking"
+            ? this.detachedWorkRunner(execute)
+            : execute(),
         context,
         cleanup: () => {
           this.liveExecutions.clearRequestMode(requestId);
